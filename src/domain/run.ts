@@ -56,7 +56,11 @@ export function approveRun(run: BuildRun, now: string): BuildRun {
 export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 	let changed = false;
 	const attempts = run.attempts.map((attempt) => {
-		if (attempt.state !== "launched" && attempt.state !== "running") {
+		if (
+			attempt.state !== "prepared" &&
+			attempt.state !== "launched" &&
+			attempt.state !== "running"
+		) {
 			return attempt;
 		}
 		changed = true;

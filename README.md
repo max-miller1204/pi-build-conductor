@@ -65,7 +65,7 @@ pi -e .
 
 The upstream orchestrator package is experimental and is not currently published to the public npm registry.
 
-From an upstream Pi source checkout, it can currently be built and started with:
+Its intended source-checkout workflow is:
 
 ```bash
 npm install
@@ -73,7 +73,11 @@ npm run build
 node packages/orchestrator/dist/cli.js serve
 ```
 
-Keep that service running before invoking `/build`.
+At upstream commit `c889eb8`, the Node source build has a conditional-export defect when resolving `@earendil-works/pi-coding-agent/rpc-entry`.
+
+Use an upstream revision or distribution that fixes that defect before invoking `/build`.
+
+The adapter smoke test uses the same upstream code with only the missing export condition corrected in a temporary checkout.
 
 ## MVP workflow
 
