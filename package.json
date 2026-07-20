@@ -50,6 +50,6 @@
 		"@earendil-works/pi-coding-agent": "0.80.10",
 		"@types/node": "22.19.19",
 		"typescript": "5.9.3",
-		"vitest": "3.2.4"
+		"vitest": "3.2.7"
 	}
 }
