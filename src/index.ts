@@ -2,4 +2,6 @@ export * from "./domain/dag.js";
 export * from "./domain/run.js";
 export * from "./domain/scheduler.js";
 export * from "./domain/types.js";
+export * from "./git/git.js";
+export * from "./git/worktrees.js";
 export * from "./storage/run-store.js";
