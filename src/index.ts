@@ -5,3 +5,5 @@ export * from "./domain/types.js";
 export * from "./git/git.js";
 export * from "./git/worktrees.js";
 export * from "./storage/run-store.js";
+export * from "./workers/backend.js";
+export * from "./workers/orchestrator-backend.js";
