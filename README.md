@@ -65,19 +65,20 @@ pi -e .
 
 The upstream orchestrator package is experimental and is not currently published to the public npm registry.
 
-Its intended source-checkout workflow is:
+Use the maintained [`orchestrator-compat`](https://github.com/max-miller1204/pi/tree/orchestrator-compat) branch until the required fixes are available upstream:
 
 ```bash
-npm install
+git clone --branch orchestrator-compat https://github.com/max-miller1204/pi.git
+cd pi
+npm ci --ignore-scripts
 npm run build
-node packages/orchestrator/dist/cli.js serve
+npm exec --workspace packages/orchestrator -- orchestrator serve
 ```
 
-At upstream commit `c889eb8`, the Node source build has a conditional-export defect when resolving `@earendil-works/pi-coding-agent/rpc-entry`.
+The fork's `main` branch remains synchronized with `earendil-works/pi`.
+The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions and restores the packaged `orchestrator` CLI executable.
 
-Use an upstream revision or distribution that fixes that defect before invoking `/build`.
-
-The optional upstream smoke test uses the same upstream code with only the missing export condition corrected in a temporary checkout.
+The optional upstream smoke test exercises a real service from spawn through shutdown.
 
 ## MVP workflow
 
