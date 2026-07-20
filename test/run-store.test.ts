@@ -78,6 +78,16 @@ describe("RunStore", () => {
 		).toThrow(/run\.attempts\[0\] must be an object/);
 	});
 
+	it.each([1, 5, 2.5])(
+		"rejects an out-of-range concurrency limit of %s",
+		(maxConcurrentWorkers) => {
+			const run = createRun();
+			expect(() => validateStoredRun({ ...run, maxConcurrentWorkers })).toThrow(
+				/must be an integer from 2 to 4/,
+			);
+		},
+	);
+
 	it.each(["prepared", "launched", "running"] as const)(
 		"recovers %s work as retryable after restart",
 		async (attemptState) => {

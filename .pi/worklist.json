@@ -21,9 +21,9 @@
       "id": "goal-mrtf4j23-33a2c776",
       "title": "Implement bounded dependency-aware concurrency",
       "description": "Launch two to four isolated workers from the ready queue, enforce dependency and concurrency limits, avoid duplicate dispatch, and schedule newly unblocked tasks deterministically.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:37.851Z",
-      "updatedAt": "2026-07-20T16:07:37.851Z"
+      "updatedAt": "2026-07-20T20:43:11.883Z"
     },
     {
       "id": "goal-mrtf4knn-ecb152e7",

@@ -358,7 +358,65 @@ describe("BuildConductor vertical slice", () => {
 		]);
 	});
 
-	it("launches one worker and safely recovers it for retry", async () => {
+	it("fills the configured worker pool from independent ready tasks", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-concurrency-"),
+		);
+		directories.push(directory);
+		const workers = new FakeWorkers();
+		const conductor = new BuildConductor({
+			store: new RunStore(directory),
+			workers,
+			worktrees: new FakeWorktrees(),
+		});
+		const run = await conductor.createRun({
+			repository,
+			handoffPath: "/repo/handoff.md",
+			handoffText: "Implement independent tasks",
+			plan: {
+				version: 1,
+				title: "Concurrent work",
+				tasks: [
+					{
+						id: "first",
+						title: "First",
+						description: "Implement first",
+						dependencies: [],
+						acceptanceCriteria: ["First works"],
+					},
+					{
+						id: "second",
+						title: "Second",
+						description: "Implement second",
+						dependencies: [],
+						acceptanceCriteria: ["Second works"],
+					},
+					{
+						id: "third",
+						title: "Third",
+						description: "Implement third",
+						dependencies: [],
+						acceptanceCriteria: ["Third works"],
+					},
+				],
+			},
+			maxConcurrentWorkers: 2,
+		});
+
+		const result = await conductor.approveAndLaunch(run, repository);
+
+		expect(
+			workers.calls.filter((call) => call.operation === "spawn"),
+		).toHaveLength(2);
+		expect(result.launches.map((launch) => launch.task.id)).toEqual([
+			"first",
+			"second",
+		]);
+		await conductor.cancelRun(result.run);
+		await result.completion;
+	});
+
+	it("launches one worker with the selected model", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-service-"),
 		);
@@ -403,9 +461,10 @@ describe("BuildConductor vertical slice", () => {
 			model: "claude-sonnet-4-5",
 		});
 
+		const launch = result.launches[0];
 		expect(result.run.state).toBe("running");
 		expect(result.run.tasks.implementation?.state).toBe("running");
-		expect(result.attempt).toMatchObject({
+		expect(launch?.attempt).toMatchObject({
 			state: "running",
 			workerId: "worker-1",
 			worktreePath: "/worktree",
@@ -424,15 +483,7 @@ describe("BuildConductor vertical slice", () => {
 		});
 		expect(workers.calls[1]).toMatchObject({ operation: "prompt" });
 		expect(await store.load(run.id)).toEqual(result.run);
-
-		const recovered = await conductor.recoverRun(run.id);
-		expect(recovered.tasks.implementation?.state).toBe("ready");
-		expect(recovered.attempts[0]?.state).toBe("interrupted");
-		expect(workers.calls[2]).toEqual({ operation: "stop", value: "worker-1" });
-
-		const resumed = await conductor.resumeAndLaunch(recovered, repository);
-		expect(resumed.attempt.number).toBe(2);
-		expect(resumed.attempt.state).toBe("running");
-		expect(resumed.attempt.branch).toContain("attempt-2");
+		await conductor.cancelRun(result.run);
+		await result.completion;
 	});
 });

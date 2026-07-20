@@ -57,11 +57,26 @@ export interface LaunchOptions {
 	onRunUpdated?: (run: BuildRun) => void;
 }
 
-export interface LaunchResult {
-	run: BuildRun;
+export interface TaskLaunch {
 	task: TaskDefinition;
 	attempt: TaskAttempt;
+}
+
+export interface LaunchResult {
+	run: BuildRun;
+	launches: TaskLaunch[];
 	completion: Promise<BuildRun>;
+}
+
+interface ScheduledLaunch {
+	run: BuildRun;
+	launch: TaskLaunch;
+	completion: Promise<BuildRun>;
+}
+
+interface DispatchResult {
+	run: BuildRun;
+	launches: ScheduledLaunch[];
 }
 
 interface MonitoredExecution {
@@ -95,6 +110,20 @@ When finished, summarize changed files and test evidence.`;
 }
 
 const runMutationTails = new Map<string, Promise<void>>();
+const activeSchedulingRuns = new Set<string>();
+const recoveringRuns = new Set<string>();
+
+function schedulingKey(store: RunStore, runId: string): string {
+	return `${store.directory}:${runId}`;
+}
+
+function notifyRunUpdated(options: LaunchOptions, run: BuildRun): void {
+	try {
+		options.onRunUpdated?.(run);
+	} catch {
+		// UI observers must not affect persisted lifecycle state.
+	}
+}
 
 async function mutateStoredRun(
 	store: RunStore,
@@ -275,46 +304,66 @@ export class BuildConductor {
 		model?: WorkerModelSelection,
 		options: LaunchOptions = {},
 	): Promise<LaunchResult> {
-		let current = approveRun(run, this.now());
-		await this.dependencies.store.save(current);
+		let current = await mutateStoredRun(
+			this.dependencies.store,
+			run.id,
+			(stored) => approveRun(stored, this.now()),
+		);
 		try {
 			const integrationBranch =
 				await this.dependencies.worktrees.prepareIntegrationBranch(
 					repository,
 					run.id,
 				);
-			if (integrationBranch !== run.integrationBranch) {
+			if (integrationBranch !== current.integrationBranch) {
 				throw new Error(`Unexpected integration branch: ${integrationBranch}`);
 			}
 		} catch (error) {
-			current = { ...current, state: "failed", updatedAt: this.now() };
-			await this.dependencies.store.save(current);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				run.id,
+				(stored) => ({
+					...stored,
+					state: "failed",
+					updatedAt: this.now(),
+				}),
+			);
+			notifyRunUpdated(options, current);
 			throw error;
 		}
-		return this.launchReadyTask(current, repository, model, options);
+		return this.startScheduling(current, repository, model, options);
 	}
 
 	async recoverRun(runId: string): Promise<BuildRun> {
-		const run = await this.dependencies.store.load(runId);
-		const workers = await this.dependencies.workers.list();
-		const liveWorkerIds = new Set(
-			workers.flatMap((worker) =>
-				["starting", "online", "stopping"].includes(worker.status)
-					? [worker.id]
-					: [],
-			),
-		);
-		const activeWorkerIds = run.attempts.flatMap((attempt) =>
-			attempt.workerId &&
-			["prepared", "launched", "running"].includes(attempt.state) &&
-			liveWorkerIds.has(attempt.workerId)
-				? [attempt.workerId]
-				: [],
-		);
-		for (const workerId of activeWorkerIds) {
-			await this.dependencies.workers.stop(workerId);
+		const key = schedulingKey(this.dependencies.store, runId);
+		if (activeSchedulingRuns.has(key) || recoveringRuns.has(key)) {
+			throw new Error(
+				`Cannot recover run ${runId} while it has active lifecycle work`,
+			);
 		}
-		return this.dependencies.store.recover(runId, this.now());
+		recoveringRuns.add(key);
+		try {
+			const run = await this.dependencies.store.load(runId);
+			const workers = await this.dependencies.workers.list();
+			const liveWorkerIds = new Set(
+				workers.flatMap((worker) =>
+					["starting", "online", "stopping"].includes(worker.status)
+						? [worker.id]
+						: [],
+				),
+			);
+			const referencedLiveWorkerIds = run.attempts.flatMap((attempt) =>
+				attempt.workerId && liveWorkerIds.has(attempt.workerId)
+					? [attempt.workerId]
+					: [],
+			);
+			for (const workerId of new Set(referencedLiveWorkerIds)) {
+				await this.dependencies.workers.stop(workerId);
+			}
+			return await this.dependencies.store.recover(runId, this.now());
+		} finally {
+			recoveringRuns.delete(key);
+		}
 	}
 
 	resumeAndLaunch(
@@ -326,7 +375,7 @@ export class BuildConductor {
 		if (run.state !== "running") {
 			throw new Error(`Cannot resume run in state ${run.state}`);
 		}
-		return this.launchReadyTask(run, repository, model, options);
+		return this.startScheduling(run, repository, model, options);
 	}
 
 	private stopWorker(workerId: string): Promise<string | undefined> {
@@ -517,21 +566,133 @@ export class BuildConductor {
 		);
 	}
 
-	private async launchReadyTask(
+	private async startScheduling(
 		run: BuildRun,
 		repository: RepositoryInfo,
 		model: WorkerModelSelection | undefined,
 		options: LaunchOptions,
 	): Promise<LaunchResult> {
+		const key = schedulingKey(this.dependencies.store, run.id);
+		if (activeSchedulingRuns.has(key) || recoveringRuns.has(key)) {
+			throw new Error(`Run ${run.id} already has active lifecycle work`);
+		}
+		activeSchedulingRuns.add(key);
+		try {
+			const initial = await this.dispatchAvailableTasks(
+				run.id,
+				repository,
+				model,
+				options,
+			);
+			const active = new Map<string, Promise<string>>();
+			for (const scheduled of initial.launches) {
+				active.set(
+					scheduled.launch.attempt.id,
+					scheduled.completion.then(() => scheduled.launch.attempt.id),
+				);
+			}
+			const completion = this.runSchedulingLoop(
+				run.id,
+				repository,
+				model,
+				options,
+				active,
+			).finally(() => {
+				activeSchedulingRuns.delete(key);
+			});
+			return {
+				run: initial.run,
+				launches: initial.launches.map((scheduled) => scheduled.launch),
+				completion,
+			};
+		} catch (error) {
+			activeSchedulingRuns.delete(key);
+			throw error;
+		}
+	}
+
+	private async runSchedulingLoop(
+		runId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+		active: Map<string, Promise<string>>,
+	): Promise<BuildRun> {
+		while (true) {
+			if (active.size > 0) {
+				const settledAttemptId = await Promise.race(active.values());
+				active.delete(settledAttemptId);
+			}
+			const dispatched = await this.dispatchAvailableTasks(
+				runId,
+				repository,
+				model,
+				options,
+			);
+			for (const scheduled of dispatched.launches) {
+				active.set(
+					scheduled.launch.attempt.id,
+					scheduled.completion.then(() => scheduled.launch.attempt.id),
+				);
+			}
+			if (active.size === 0) {
+				return dispatched.run;
+			}
+		}
+	}
+
+	private async dispatchAvailableTasks(
+		runId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<DispatchResult> {
+		let current = await this.dependencies.store.load(runId);
+		const taskIds = getLaunchableTaskIds(current);
+		const launches: ScheduledLaunch[] = [];
+		for (const taskId of taskIds) {
+			try {
+				const scheduled = await this.launchTask(
+					current,
+					taskId,
+					repository,
+					model,
+					options,
+				);
+				launches.push(scheduled);
+				current = scheduled.run;
+			} catch (error) {
+				current = await this.dependencies.store.load(runId);
+				if (current.state === "cancelled") {
+					throw new Error("Run cancelled during worker launch", {
+						cause: error,
+					});
+				}
+				break;
+			}
+		}
+		return {
+			run: await this.dependencies.store.load(runId),
+			launches,
+		};
+	}
+
+	private async launchTask(
+		run: BuildRun,
+		taskId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<ScheduledLaunch> {
 		let current = run;
 		let currentAttemptId: string | undefined;
 		let spawnedWorkerId: string | undefined;
 		let executionController: AbortController | undefined;
+		let reservationRejected = false;
 		try {
-			const taskId = getLaunchableTaskIds(current)[0];
-			const taskRecord = taskId ? current.tasks[taskId] : undefined;
-			if (!taskId || !taskRecord) {
-				throw new Error("Run has no launchable task");
+			const taskRecord = current.tasks[taskId];
+			if (!taskRecord) {
+				throw new Error(`Task disappeared from run state: ${taskId}`);
 			}
 			const attemptNumber = taskRecord.attemptIds.length + 1;
 			const allocation = await this.dependencies.worktrees.prepareTaskWorktree({
@@ -550,18 +711,19 @@ export class BuildConductor {
 				worktreePath: allocation.path,
 				startedAt: this.now(),
 			};
-			currentAttemptId = attempt.id;
 			current = await mutateStoredRun(
 				this.dependencies.store,
 				current.id,
 				(stored) => {
-					if (stored.state === "cancelled") {
+					if (!getLaunchableTaskIds(stored).includes(taskId)) {
+						reservationRejected = true;
 						return stored;
 					}
 					const storedTask = stored.tasks[taskId];
 					if (!storedTask) {
 						throw new Error(`Task disappeared from run state: ${taskId}`);
 					}
+					currentAttemptId = attempt.id;
 					return {
 						...stored,
 						tasks: {
@@ -577,9 +739,10 @@ export class BuildConductor {
 					};
 				},
 			);
-			if (current.state === "cancelled") {
-				throw new Error("Run cancelled during worker launch");
+			if (reservationRejected) {
+				throw new Error(`Task ${taskId} is no longer launchable`);
 			}
+			notifyRunUpdated(options, current);
 			const worker = await this.dependencies.workers.spawn({
 				cwd: allocation.path,
 				label: `${current.id}:${taskId}`,
@@ -592,14 +755,18 @@ export class BuildConductor {
 				(stored) =>
 					stored.state === "cancelled"
 						? stored
-						: updateAttempt(stored, attempt.id, {
-								state: "launched",
-								workerId: worker.id,
-							}),
+						: {
+								...updateAttempt(stored, attempt.id, {
+									state: "launched",
+									workerId: worker.id,
+								}),
+								updatedAt: this.now(),
+							},
 			);
 			if (current.state === "cancelled") {
 				throw new Error("Run cancelled during worker launch");
 			}
+			notifyRunUpdated(options, current);
 			executionController = new AbortController();
 			this.activeExecutions.set(attempt.id, {
 				runId: current.id,
@@ -640,6 +807,7 @@ export class BuildConductor {
 				executionController.abort(new Error("Run cancelled"));
 				throw new Error("Run cancelled during worker launch");
 			}
+			notifyRunUpdated(options, current);
 			const launchedAttempt = current.attempts.find(
 				(item) => item.id === attempt.id,
 			);
@@ -656,8 +824,7 @@ export class BuildConductor {
 			});
 			return {
 				run: current,
-				task: taskRecord.definition,
-				attempt: launchedAttempt,
+				launch: { task: taskRecord.definition, attempt: launchedAttempt },
 				completion,
 			};
 		} catch (error) {
@@ -667,9 +834,8 @@ export class BuildConductor {
 			executionController?.abort(error);
 			let failureMessage =
 				error instanceof Error ? error.message : String(error);
-			const workerId = spawnedWorkerId;
-			if (workerId) {
-				const stopError = await this.stopWorker(workerId);
+			if (spawnedWorkerId) {
+				const stopError = await this.stopWorker(spawnedWorkerId);
 				if (stopError) {
 					failureMessage += `; failed to stop worker: ${stopError}`;
 				}
@@ -678,7 +844,7 @@ export class BuildConductor {
 				this.dependencies.store,
 				current.id,
 				(stored) => {
-					if (stored.state === "cancelled") {
+					if (stored.state === "cancelled" || reservationRejected) {
 						return stored;
 					}
 					const activeAttempt = currentAttemptId
@@ -696,15 +862,17 @@ export class BuildConductor {
 					if (task) {
 						failed = reconcileTaskStates({
 							...failed,
+							state: "failed",
 							tasks: {
 								...failed.tasks,
-								[activeAttempt.taskId]: { ...task, state: "planned" },
+								[activeAttempt.taskId]: { ...task, state: "failed" },
 							},
 						});
 					}
-					return { ...failed, updatedAt: this.now() };
+					return { ...failed, state: "failed", updatedAt: this.now() };
 				},
 			);
+			notifyRunUpdated(options, current);
 			throw error;
 		}
 	}

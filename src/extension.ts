@@ -14,7 +14,12 @@ import {
 	type WorkerModelSelection,
 } from "./conductor.js";
 import { validateTaskPlan } from "./domain/dag.js";
-import type { BuildRun, TaskPlan } from "./domain/types.js";
+import {
+	type BuildRun,
+	MAX_CONCURRENT_WORKERS,
+	MIN_CONCURRENT_WORKERS,
+	type TaskPlan,
+} from "./domain/types.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
@@ -132,6 +137,24 @@ function configuredWorkerTimeoutMs(): number | undefined {
 	return timeout;
 }
 
+function configuredMaxConcurrentWorkers(): number {
+	const value = process.env.PI_BUILD_MAX_CONCURRENT_WORKERS;
+	if (value === undefined) {
+		return MIN_CONCURRENT_WORKERS;
+	}
+	const maximum = Number(value);
+	if (
+		!Number.isInteger(maximum) ||
+		maximum < MIN_CONCURRENT_WORKERS ||
+		maximum > MAX_CONCURRENT_WORKERS
+	) {
+		throw new Error(
+			`PI_BUILD_MAX_CONCURRENT_WORKERS must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+		);
+	}
+	return maximum;
+}
+
 function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const store = new RunStore(
 		join(repository.commonDirectory, "pi-build-conductor", "runs"),
@@ -170,6 +193,19 @@ function progressText(progress: WorkerLifecycleProgress): string | undefined {
 	}
 }
 
+function taskStateSummary(run: BuildRun): string {
+	const counts = new Map<string, number>();
+	for (const task of Object.values(run.tasks)) {
+		counts.set(task.state, (counts.get(task.state) ?? 0) + 1);
+	}
+	return ["running", "succeeded", "ready", "planned", "blocked", "failed"]
+		.flatMap((state) => {
+			const count = counts.get(state);
+			return count ? [`${count} ${state}`] : [];
+		})
+		.join(", ");
+}
+
 function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 	return {
 		onProgress: (progress) => {
@@ -178,39 +214,47 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 				ctx.ui.setStatus(runUiKey(progress.runId), text);
 			}
 		},
+		onRunUpdated: (run) => {
+			ctx.ui.setStatus(runUiKey(run.id), taskStateSummary(run));
+			ctx.ui.setWidget(runUiKey(run.id), [
+				`Build ${run.id}`,
+				`Run: ${run.state}`,
+				`Tasks: ${taskStateSummary(run)}`,
+			]);
+		},
 	};
 }
 
 function showCompletion(
 	ctx: ExtensionCommandContext,
-	result: LaunchResult,
+	_result: LaunchResult,
 	run: BuildRun,
 	store: RunStore,
 ): void {
-	const attempt = run.attempts.find((item) => item.id === result.attempt.id);
+	const workerLines = run.attempts.map(
+		(attempt) =>
+			`${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"})`,
+	);
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
-		`Task: ${result.task.title}`,
-		`Worker: ${result.attempt.workerId ?? "unknown"} (stopped)`,
-		`Attempt: ${attempt?.state ?? "unknown"}`,
 		`Run: ${run.state}`,
+		`Tasks: ${taskStateSummary(run)}`,
+		...workerLines,
 		`State file: ${store.directory}`,
 	]);
-	if (attempt?.state === "succeeded") {
-		ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: complete`);
-		ctx.ui.notify(`Worker completed ${result.task.id}`, "info");
+	if (run.state === "integrating") {
+		ctx.ui.setStatus(runUiKey(run.id), "implementation complete");
+		ctx.ui.notify(`All workers completed for build ${run.id}`, "info");
 		return;
 	}
-	if (attempt?.state === "cancelled") {
-		ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: cancelled`);
-		ctx.ui.notify(`Worker cancelled for ${result.task.id}`, "warning");
+	if (run.state === "cancelled") {
+		ctx.ui.setStatus(runUiKey(run.id), "build cancelled");
+		ctx.ui.notify(`Build ${run.id} was cancelled`, "warning");
 		return;
 	}
-	ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: failed`);
-	ctx.ui.notify(
-		attempt?.error ?? `Worker failed for ${result.task.id}`,
-		"error",
-	);
+	const failure = run.attempts.find((attempt) => attempt.state === "failed");
+	ctx.ui.setStatus(runUiKey(run.id), "build failed");
+	ctx.ui.notify(failure?.error ?? `Build ${run.id} failed`, "error");
 }
 
 function showLaunch(
@@ -219,22 +263,27 @@ function showLaunch(
 	store: RunStore,
 ): void {
 	const key = runUiKey(result.run.id);
+	const launchLines = result.launches.map(
+		({ task, attempt }) =>
+			`${task.id}: ${attempt.workerId ?? "starting"} in ${attempt.worktreePath}`,
+	);
 	ctx.ui.setStatus("pi-build-conductor", undefined);
-	ctx.ui.setStatus(key, `${result.task.id}: running`);
+	ctx.ui.setStatus(key, taskStateSummary(result.run));
 	ctx.ui.setWidget(key, [
 		`Build ${result.run.id}`,
-		`Task: ${result.task.title}`,
-		`Worker: ${result.attempt.workerId ?? "starting"}`,
-		`Branch: ${result.attempt.branch}`,
+		`Run: ${result.run.state}`,
+		`Tasks: ${taskStateSummary(result.run)}`,
+		...launchLines,
+		`State file: ${store.directory}`,
 	]);
 	ctx.ui.notify(
-		`Launched ${result.task.id} in ${result.attempt.worktreePath}. Run state: ${store.directory}`,
+		`Launched ${result.launches.length} worker(s) for build ${result.run.id}`,
 		"info",
 	);
 	void result.completion.then(
 		(run) => showCompletion(ctx, result, run, store),
 		(error: unknown) => {
-			ctx.ui.setStatus(key, `${result.task.id}: failed`);
+			ctx.ui.setStatus(key, "build failed");
 			ctx.ui.notify(errorMessage(error), "error");
 		},
 	);
@@ -242,7 +291,7 @@ function showLaunch(
 
 export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	pi.registerCommand("build", {
-		description: "Plan and launch an isolated build worker from a handoff file",
+		description: "Plan and launch isolated build workers from a handoff file",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				throw new Error(
@@ -287,11 +336,11 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					handoffPath,
 					handoffText,
 					plan: editedPlan,
-					maxConcurrentWorkers: 2,
+					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
 				const approved = await ctx.ui.confirm(
 					`Approve build plan: ${editedPlan.title}`,
-					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches and launch the first ready task.`,
+					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches and launch ready tasks up to the configured worker limit.`,
 				);
 				if (!approved) {
 					run = await conductor.cancelRun(run);
@@ -312,7 +361,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						"Repository changed during planning. Start /build again from a clean, unchanged branch.",
 					);
 				}
-				ctx.ui.setStatus("pi-build-conductor", "launching worker");
+				ctx.ui.setStatus("pi-build-conductor", "launching workers");
 				const result = await conductor.approveAndLaunch(
 					run,
 					freshRepository,
@@ -362,7 +411,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build-resume", {
-		description: "Recover an interrupted build run and launch its next retry",
+		description: "Recover an interrupted build run and launch ready retries",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId) {
@@ -402,7 +451,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						"Repository changed during recovery. Resume again from a clean, unchanged branch.",
 					);
 				}
-				ctx.ui.setStatus("pi-build-conductor", "launching retry");
+				ctx.ui.setStatus("pi-build-conductor", "launching retries");
 				const result = await conductor.resumeAndLaunch(
 					recovered,
 					freshRepository,

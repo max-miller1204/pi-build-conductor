@@ -6,6 +6,8 @@ import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
 	type BuildRun,
+	MAX_CONCURRENT_WORKERS,
+	MIN_CONCURRENT_WORKERS,
 	RUN_SCHEMA_VERSION,
 	type RunState,
 	type TaskState,
@@ -177,9 +179,40 @@ export function validateStoredRun(value: unknown): BuildRun {
 	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||
-		(value.maxConcurrentWorkers as number) < 1
+		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
+		(value.maxConcurrentWorkers as number) > MAX_CONCURRENT_WORKERS
 	) {
-		throw new Error("run.maxConcurrentWorkers must be a positive integer");
+		throw new Error(
+			`run.maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+		);
+	}
+	const activeAttempts = [...attemptsById.values()].filter((attempt) =>
+		["prepared", "launched", "running"].includes(String(attempt.state)),
+	);
+	if (activeAttempts.length > (value.maxConcurrentWorkers as number)) {
+		throw new Error("Run has more active attempts than its concurrency limit");
+	}
+	const activeAttemptCountByTask = new Map<string, number>();
+	for (const attempt of activeAttempts) {
+		const taskId = String(attempt.taskId);
+		activeAttemptCountByTask.set(
+			taskId,
+			(activeAttemptCountByTask.get(taskId) ?? 0) + 1,
+		);
+	}
+	for (const [taskId, count] of activeAttemptCountByTask) {
+		if (count > 1) {
+			throw new Error(`Task ${taskId} has more than one active attempt`);
+		}
+	}
+	for (const [taskId, task] of Object.entries(value.tasks)) {
+		if (
+			isRecord(task) &&
+			task.state === "running" &&
+			!activeAttemptCountByTask.has(taskId)
+		) {
+			throw new Error(`Running task ${taskId} has no active attempt`);
+		}
 	}
 	if (!isRecord(value.handoff)) {
 		throw new Error("run.handoff must be an object");

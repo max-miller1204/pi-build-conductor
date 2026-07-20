@@ -23,7 +23,8 @@ Return JSON only, with exactly this shape:
 Every dependency must refer to another task in the plan.
 The graph must be acyclic.
 Prefer independently implementable tasks, but do not invent unnecessary parallelism.
-The first vertical slice may launch only the first ready task, so every task must be executable from its description.`;
+Independent ready tasks may execute concurrently, so every prerequisite must be represented as an explicit dependency.
+Every task must be executable from its description.`;
 
 function unwrapJson(text: string): string {
 	const trimmed = text.trim();

@@ -1,5 +1,7 @@
 export const RUN_SCHEMA_VERSION = 1 as const;
 export const PLAN_SCHEMA_VERSION = 1 as const;
+export const MIN_CONCURRENT_WORKERS = 2 as const;
+export const MAX_CONCURRENT_WORKERS = 4 as const;
 
 export type RunState =
 	| "planning"

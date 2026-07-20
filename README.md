@@ -2,7 +2,7 @@
 
 `pi-build-conductor` is a Pi package for turning a build handoff into isolated, dependency-aware implementation work.
 
-The current vertical slice reads a handoff, generates or loads a validated task DAG, lets the user edit and explicitly approve it, creates isolated Git branches and a worktree, and launches the first ready worker through the official experimental Pi orchestrator.
+The current vertical slice reads a handoff, generates or loads a validated task DAG, lets the user edit and explicitly approve it, and launches a bounded pool of isolated workers through the official experimental Pi orchestrator.
 
 ## Status
 
@@ -19,13 +19,15 @@ Implemented:
 - Git branch and worktree isolation
 - A narrow `WorkerBackend` interface
 - An adapter for the official orchestrator JSONL socket API
-- Launch and live lifecycle monitoring of one ready implementation worker
+- Deterministic launch and live lifecycle monitoring with a worker limit configured from two through four
+- Dependency-aware pool refill as tasks succeed and unblock downstream work
+- Duplicate-dispatch prevention and durable active-attempt invariants
 - Worker completion and failure detection through orchestrator events and status checks
 - Execution timeouts, explicit cancellation, and deterministic process cleanup
 - Live Pi status and widget updates for worker progress and terminal state
 - Tests for DAG validation, scheduling, recovery, Git isolation, worker launch, completion, failure, timeout, and cancellation
 
-Bounded concurrency, sequential integration, automatic commits, reviewer agents, and final full-suite validation are the next implementation stages.
+Sequential integration, automatic commits, reviewer agents, and final full-suite validation are the next implementation stages.
 
 ## Architecture
 
@@ -100,13 +102,17 @@ The command performs these steps:
 5. Requires explicit approval.
 6. Saves restart-safe run state under `.git/pi-build-conductor/runs/`.
 7. Creates `conductor/<run-id>/integration` without checking it out.
-8. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/`.
-9. Spawns an independent Pi instance through the official orchestrator and sends the task prompt.
-10. Streams worker activity into Pi's live status UI.
-11. Detects the terminal Pi event, persists success or failure, and stops the worker process.
+8. Selects ready tasks in deterministic plan order, up to the configured concurrency limit.
+9. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/` for each selected task.
+10. Spawns an independent Pi instance for each task through the official orchestrator and sends its task prompt.
+11. Streams concurrent worker activity into Pi's live status UI.
+12. Detects terminal Pi events, persists success or failure, and stops each worker process.
+13. Refills available slots when successful tasks unblock downstream work.
 
 Worker executions time out after one hour by default.
 Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
+The worker pool defaults to two concurrent workers.
+Set `PI_BUILD_MAX_CONCURRENT_WORKERS` to an integer from two through four to change the bound.
 
 Cancel a running build and stop its active workers with:
 
@@ -120,7 +126,7 @@ After an interrupted conductor session, run:
 /build-resume <run-id>
 ```
 
-Recovery checks the official orchestrator, stops any still-live worker from the interrupted attempt, marks in-flight state as interrupted, and launches a new isolated attempt.
+Recovery checks the official orchestrator, stops all still-live workers from interrupted attempts, marks in-flight state as interrupted, and launches a new deterministic ready batch.
 
 ## Plan sidecar format
 
@@ -147,11 +153,15 @@ Recovery checks the official orchestrator, stops any still-live worker from the 
 - Git state is checked again immediately before branch or worktree side effects.
 - No Git or worker side effects occur before explicit plan approval.
 - Every worker receives a separate branch and worktree.
+- Dependencies gate dispatch, and newly unblocked tasks are selected in deterministic plan order.
+- The configured two-to-four worker limit includes prepared, launched, and running attempts.
 - Worker prompts forbid branch switching, merging, and commits.
 - Run state is written atomically outside the checked-out file tree.
 - Active attempts are marked interrupted and retryable during recovery.
 - Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.
 - Integration is designed to occur sequentially on a separate integration branch.
+- A dependent task does not yet receive a predecessor's uncommitted worktree changes.
+- Plans should use dependencies to gate execution, while implementation that requires predecessor output should wait for the sequential integration stage.
 - The current MVP does not claim a branch is merge-ready because final reviews and full validation are not implemented yet.
 
 ## Development

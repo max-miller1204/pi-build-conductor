@@ -1,6 +1,8 @@
 import { reconcileTaskStates } from "./scheduler.js";
 import {
 	type BuildRun,
+	MAX_CONCURRENT_WORKERS,
+	MIN_CONCURRENT_WORKERS,
 	RUN_SCHEMA_VERSION,
 	type RunTask,
 	type TaskPlan,
@@ -19,8 +21,14 @@ export interface CreateRunInput {
 }
 
 export function createBuildRun(input: CreateRunInput): BuildRun {
-	if (input.maxConcurrentWorkers < 1) {
-		throw new Error("maxConcurrentWorkers must be at least 1");
+	if (
+		!Number.isInteger(input.maxConcurrentWorkers) ||
+		input.maxConcurrentWorkers < MIN_CONCURRENT_WORKERS ||
+		input.maxConcurrentWorkers > MAX_CONCURRENT_WORKERS
+	) {
+		throw new Error(
+			`maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+		);
 	}
 	const tasks: Record<string, RunTask> = Object.fromEntries(
 		input.plan.tasks.map((definition) => [

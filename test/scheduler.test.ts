@@ -68,14 +68,39 @@ describe("scheduler", () => {
 	it("launches ready dependents up to the concurrency limit", () => {
 		const run = runWith({ base: "succeeded" });
 		expect(getLaunchableTaskIds(run)).toEqual(["api", "ui"]);
-		expect(getLaunchableTaskIds(runWith({ base: "succeeded" }, 1))).toEqual([
-			"api",
-		]);
 	});
 
 	it("accounts for already running work", () => {
 		const run = runWith({ base: "succeeded", api: "running" }, 2);
 		expect(getLaunchableTaskIds(run)).toEqual(["ui"]);
+	});
+
+	it("counts prepared attempts and excludes their tasks defensively", () => {
+		const run = runWith({ base: "succeeded" }, 2);
+		run.attempts.push({
+			id: "api-1",
+			taskId: "api",
+			number: 1,
+			state: "prepared",
+			branch: "api",
+			worktreePath: "/api",
+			startedAt: run.createdAt,
+		});
+		expect(getLaunchableTaskIds(run)).toEqual(["ui"]);
+	});
+
+	it("does not dispatch work for non-running runs", () => {
+		for (const state of ["failed", "cancelled", "integrating"] as const) {
+			expect(getLaunchableTaskIds({ ...runWith({}), state })).toEqual([]);
+		}
+	});
+
+	it("propagates dependency blocking through the DAG in one pass", () => {
+		const run = reconcileTaskStates(runWith({ base: "failed" }));
+		expect(run.tasks.api?.state).toBe("blocked");
+		expect(run.tasks.ui?.state).toBe("blocked");
+		expect(run.tasks.release?.state).toBe("blocked");
+		expect(getLaunchableTaskIds(run)).toEqual([]);
 	});
 
 	it("blocks downstream tasks after a dependency failure", () => {
