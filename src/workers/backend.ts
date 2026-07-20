@@ -21,10 +21,35 @@ export interface SpawnWorkerRequest {
 	model?: string;
 }
 
+export type WorkerProgressEvent =
+	| { type: "agent_started" }
+	| { type: "text_delta"; text: string }
+	| { type: "tool_started"; toolName: string }
+	| { type: "tool_finished"; toolName: string; isError: boolean }
+	| { type: "retrying"; message: string };
+
+export interface WorkerExecutionOptions {
+	signal?: AbortSignal;
+	onEvent?: (event: WorkerProgressEvent) => void;
+}
+
+export type WorkerExecutionResult =
+	| { status: "succeeded" }
+	| { status: "failed"; error: string }
+	| { status: "aborted"; error: string };
+
+export interface WorkerExecution {
+	completion: Promise<WorkerExecutionResult>;
+}
+
 export interface WorkerBackend {
 	spawn(request: SpawnWorkerRequest): Promise<WorkerInstance>;
 	list(): Promise<WorkerInstance[]>;
 	status(workerId: string): Promise<WorkerInstance>;
-	sendPrompt(workerId: string, prompt: string): Promise<void>;
+	startPrompt(
+		workerId: string,
+		prompt: string,
+		options?: WorkerExecutionOptions,
+	): Promise<WorkerExecution>;
 	stop(workerId: string): Promise<void>;
 }

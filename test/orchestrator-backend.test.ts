@@ -25,7 +25,11 @@ afterEach(async () => {
 });
 
 async function fakeOrchestrator(
-	options: { failSetModel?: boolean } = {},
+	options: {
+		failExecution?: boolean;
+		failSetModel?: boolean;
+		eventsBeforePromptResponse?: boolean;
+	} = {},
 ): Promise<{
 	socketPath: string;
 	requests: unknown[];
@@ -44,59 +48,113 @@ async function fakeOrchestrator(
 	};
 	const server = createServer((socket) => {
 		let buffer = "";
+		let streaming = false;
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString();
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) {
-				return;
-			}
-			let request: { type: string; command?: { type: string } };
-			try {
-				request = JSON.parse(buffer.slice(0, newline)) as typeof request;
-			} catch (error) {
-				socket.end(
-					`${JSON.stringify({ type: "error", ok: false, error: error instanceof Error ? error.message : String(error) })}\n`,
-				);
-				return;
-			}
-			requests.push(request);
-			if (request.type === "spawn") {
-				socket.end(
-					`${JSON.stringify({ type: "spawn_result", ok: true, instance })}\n`,
-				);
-				return;
-			}
-			if (request.type === "rpc") {
-				const failed =
-					options.failSetModel && request.command?.type === "set_model";
-				socket.end(
-					`${JSON.stringify({
-						type: "rpc_result",
-						ok: true,
-						response: {
-							success: !failed,
-							command: request.command?.type,
-							...(failed ? { error: "model unavailable" } : {}),
+			for (;;) {
+				const newline = buffer.indexOf("\n");
+				if (newline === -1) {
+					return;
+				}
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				let request: {
+					id?: string;
+					type: string;
+					command?: { type: string };
+				};
+				try {
+					request = JSON.parse(line) as typeof request;
+				} catch (error) {
+					socket.end(
+						`${JSON.stringify({ type: "error", ok: false, error: error instanceof Error ? error.message : String(error) })}\n`,
+					);
+					return;
+				}
+				requests.push(request);
+				if (streaming) {
+					const response = {
+						id: request.id,
+						type: "response",
+						command: request.type,
+						success: true,
+					};
+					const events = [
+						{ type: "agent_start" },
+						{ type: "tool_execution_start", toolName: "bash" },
+						{
+							type: "tool_execution_end",
+							toolName: "bash",
+							isError: false,
 						},
-					})}\n`,
-				);
-				return;
-			}
-			if (request.type === "status") {
+						{
+							type: "agent_end",
+							messages: [
+								options.failExecution
+									? {
+											role: "assistant",
+											stopReason: "error",
+											errorMessage: "provider failed",
+										}
+									: { role: "assistant", stopReason: "stop" },
+							],
+						},
+						{ type: "agent_settled" },
+					];
+					const messages = options.eventsBeforePromptResponse
+						? [...events, response]
+						: [response, ...events];
+					for (const message of messages) {
+						socket.write(`${JSON.stringify(message)}\n`);
+					}
+					continue;
+				}
+				if (request.type === "rpc_stream") {
+					streaming = true;
+					socket.write(
+						`${JSON.stringify({ type: "rpc_ready", ok: true, instance })}\n`,
+					);
+					continue;
+				}
+				if (request.type === "spawn") {
+					socket.end(
+						`${JSON.stringify({ type: "spawn_result", ok: true, instance })}\n`,
+					);
+					return;
+				}
+				if (request.type === "rpc") {
+					const failed =
+						options.failSetModel && request.command?.type === "set_model";
+					socket.end(
+						`${JSON.stringify({
+							type: "rpc_result",
+							ok: true,
+							response: {
+								success: !failed,
+								command: request.command?.type,
+								...(failed ? { error: "model unavailable" } : {}),
+							},
+						})}\n`,
+					);
+					return;
+				}
+				if (request.type === "status") {
+					socket.end(
+						`${JSON.stringify({ type: "status_result", ok: true, instance })}\n`,
+					);
+					return;
+				}
+				if (request.type === "list") {
+					socket.end(
+						`${JSON.stringify({ type: "list_result", ok: true, instances: [instance] })}\n`,
+					);
+					return;
+				}
 				socket.end(
-					`${JSON.stringify({ type: "status_result", ok: true, instance })}\n`,
+					`${JSON.stringify({ type: "stop_result", ok: true, instanceId: instance.id })}\n`,
 				);
 				return;
 			}
-			if (request.type === "list") {
-				socket.end(
-					`${JSON.stringify({ type: "list_result", ok: true, instances: [instance] })}\n`,
-				);
-				return;
-			}
-			socket.end(
-				`${JSON.stringify({ type: "stop_result", ok: true, instanceId: instance.id })}\n`,
-			);
 		});
 	});
 	servers.push(server);
@@ -108,6 +166,47 @@ async function fakeOrchestrator(
 }
 
 describe("OfficialOrchestratorBackend", () => {
+	it("streams worker progress through terminal completion", async () => {
+		const fake = await fakeOrchestrator({
+			eventsBeforePromptResponse: true,
+		});
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		const events: string[] = [];
+
+		const execution = await backend.startPrompt(
+			"worker-1",
+			"Implement the task",
+			{ onEvent: (event) => events.push(event.type) },
+		);
+
+		expect(await execution.completion).toEqual({ status: "succeeded" });
+		expect(events).toEqual(["agent_started", "tool_started", "tool_finished"]);
+		expect(fake.requests.slice(0, 2)).toEqual([
+			{ type: "rpc_stream", instanceId: "worker-1" },
+			{
+				id: "conductor_prompt",
+				type: "prompt",
+				message: "Implement the task",
+			},
+		]);
+	});
+
+	it("reports terminal Pi failures", async () => {
+		const fake = await fakeOrchestrator({ failExecution: true });
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+
+		const execution = await backend.startPrompt("worker-1", "Implement it");
+
+		expect(await execution.completion).toEqual({
+			status: "failed",
+			error: "provider failed",
+		});
+	});
+
 	it("isolates the first-party spawn and RPC protocol", async () => {
 		const fake = await fakeOrchestrator();
 		const backend = new OfficialOrchestratorBackend({

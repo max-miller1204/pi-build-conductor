@@ -10,7 +10,7 @@ This repository is an early MVP.
 
 Implemented:
 
-- `/build <handoff-file>` and `/build-resume <run-id>` Pi commands
+- `/build <handoff-file>`, `/build-resume <run-id>`, and `/build-cancel <run-id>` Pi commands
 - Planning through the selected Pi model
 - Optional `<handoff-file>.plan.json` sidecar loading
 - Editable plan and explicit approval gate
@@ -19,10 +19,13 @@ Implemented:
 - Git branch and worktree isolation
 - A narrow `WorkerBackend` interface
 - An adapter for the official orchestrator JSONL socket API
-- Launch of one ready implementation worker
-- Tests for DAG validation, scheduling, recovery, Git isolation, and worker launch
+- Launch and live lifecycle monitoring of one ready implementation worker
+- Worker completion and failure detection through orchestrator events and status checks
+- Execution timeouts, explicit cancellation, and deterministic process cleanup
+- Live Pi status and widget updates for worker progress and terminal state
+- Tests for DAG validation, scheduling, recovery, Git isolation, worker launch, completion, failure, timeout, and cancellation
 
-Sequential integration, worker completion tracking, automatic commits, reviewer agents, and final full-suite validation are the next implementation stages.
+Bounded concurrency, sequential integration, automatic commits, reviewer agents, and final full-suite validation are the next implementation stages.
 
 ## Architecture
 
@@ -99,7 +102,17 @@ The command performs these steps:
 7. Creates `conductor/<run-id>/integration` without checking it out.
 8. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/`.
 9. Spawns an independent Pi instance through the official orchestrator and sends the task prompt.
-10. Shows the run, worker, branch, and worktree in Pi's live status widget.
+10. Streams worker activity into Pi's live status UI.
+11. Detects the terminal Pi event, persists success or failure, and stops the worker process.
+
+Worker executions time out after one hour by default.
+Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
+
+Cancel a running build and stop its active workers with:
+
+```text
+/build-cancel <run-id>
+```
 
 After an interrupted conductor session, run:
 
@@ -137,6 +150,7 @@ Recovery checks the official orchestrator, stops any still-live worker from the 
 - Worker prompts forbid branch switching, merging, and commits.
 - Run state is written atomically outside the checked-out file tree.
 - Active attempts are marked interrupted and retryable during recovery.
+- Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.
 - Integration is designed to occur sequentially on a separate integration branch.
 - The current MVP does not claim a branch is merge-ready because final reviews and full validation are not implemented yet.
 

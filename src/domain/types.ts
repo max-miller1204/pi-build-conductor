@@ -26,6 +26,7 @@ export type AttemptState =
 	| "running"
 	| "succeeded"
 	| "failed"
+	| "cancelled"
 	| "interrupted";
 
 export interface TaskDefinition {

@@ -8,11 +8,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
 	BuildConductor,
+	type LaunchOptions,
 	type LaunchResult,
+	type WorkerLifecycleProgress,
 	type WorkerModelSelection,
 } from "./conductor.js";
 import { validateTaskPlan } from "./domain/dag.js";
-import type { TaskPlan } from "./domain/types.js";
+import type { BuildRun, TaskPlan } from "./domain/types.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
@@ -118,17 +120,97 @@ function selectedWorkerModel(
 		: undefined;
 }
 
+function configuredWorkerTimeoutMs(): number | undefined {
+	const value = process.env.PI_BUILD_WORKER_TIMEOUT_MS;
+	if (value === undefined) {
+		return undefined;
+	}
+	const timeout = Number(value);
+	if (!Number.isFinite(timeout) || timeout <= 0) {
+		throw new Error("PI_BUILD_WORKER_TIMEOUT_MS must be a positive number");
+	}
+	return timeout;
+}
+
 function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const store = new RunStore(
 		join(repository.commonDirectory, "pi-build-conductor", "runs"),
 	);
 	const workers = new OfficialOrchestratorBackend();
+	const workerTimeoutMs = configuredWorkerTimeoutMs();
 	const conductor = new BuildConductor({
 		store,
 		workers,
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
+		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	return { conductor, store, workers };
+}
+
+function runUiKey(runId: string): string {
+	return `pi-build-conductor:${runId}`;
+}
+
+function progressText(progress: WorkerLifecycleProgress): string | undefined {
+	switch (progress.event.type) {
+		case "agent_started":
+			return `${progress.taskId}: running`;
+		case "text_delta":
+			return undefined;
+		case "tool_started":
+			return `${progress.taskId}: ${progress.event.toolName}`;
+		case "tool_finished":
+			return progress.event.isError
+				? `${progress.taskId}: ${progress.event.toolName} failed`
+				: `${progress.taskId}: running`;
+		case "retrying":
+			return `${progress.taskId}: retrying`;
+		default:
+			return undefined;
+	}
+}
+
+function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
+	return {
+		onProgress: (progress) => {
+			const text = progressText(progress);
+			if (text) {
+				ctx.ui.setStatus(runUiKey(progress.runId), text);
+			}
+		},
+	};
+}
+
+function showCompletion(
+	ctx: ExtensionCommandContext,
+	result: LaunchResult,
+	run: BuildRun,
+	store: RunStore,
+): void {
+	const attempt = run.attempts.find((item) => item.id === result.attempt.id);
+	ctx.ui.setWidget(runUiKey(run.id), [
+		`Build ${run.id}`,
+		`Task: ${result.task.title}`,
+		`Worker: ${result.attempt.workerId ?? "unknown"} (stopped)`,
+		`Attempt: ${attempt?.state ?? "unknown"}`,
+		`Run: ${run.state}`,
+		`State file: ${store.directory}`,
+	]);
+	if (attempt?.state === "succeeded") {
+		ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: complete`);
+		ctx.ui.notify(`Worker completed ${result.task.id}`, "info");
+		return;
+	}
+	if (attempt?.state === "cancelled") {
+		ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: cancelled`);
+		ctx.ui.notify(`Worker cancelled for ${result.task.id}`, "warning");
+		return;
+	}
+	ctx.ui.setStatus(runUiKey(run.id), `${result.task.id}: failed`);
+	ctx.ui.notify(
+		attempt?.error ?? `Worker failed for ${result.task.id}`,
+		"error",
+	);
 }
 
 function showLaunch(
@@ -136,8 +218,10 @@ function showLaunch(
 	result: LaunchResult,
 	store: RunStore,
 ): void {
-	ctx.ui.setStatus("pi-build-conductor", `worker: ${result.task.id}`);
-	ctx.ui.setWidget("pi-build-conductor", [
+	const key = runUiKey(result.run.id);
+	ctx.ui.setStatus("pi-build-conductor", undefined);
+	ctx.ui.setStatus(key, `${result.task.id}: running`);
+	ctx.ui.setWidget(key, [
 		`Build ${result.run.id}`,
 		`Task: ${result.task.title}`,
 		`Worker: ${result.attempt.workerId ?? "starting"}`,
@@ -146,6 +230,13 @@ function showLaunch(
 	ctx.ui.notify(
 		`Launched ${result.task.id} in ${result.attempt.worktreePath}. Run state: ${store.directory}`,
 		"info",
+	);
+	void result.completion.then(
+		(run) => showCompletion(ctx, result, run, store),
+		(error: unknown) => {
+			ctx.ui.setStatus(key, `${result.task.id}: failed`);
+			ctx.ui.notify(errorMessage(error), "error");
+		},
 	);
 }
 
@@ -226,10 +317,45 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					run,
 					freshRepository,
 					selectedWorkerModel(ctx),
+					lifecycleUi(ctx),
 				);
 				showLaunch(ctx, result, store);
 			} catch (error) {
 				ctx.ui.setStatus("pi-build-conductor", "failed");
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-cancel", {
+		description: "Cancel a build run and stop its active workers",
+		handler: async (args, ctx) => {
+			const runId = args.trim();
+			if (!runId) {
+				ctx.ui.notify("Usage: /build-cancel <run-id>", "error");
+				return;
+			}
+			ctx.ui.setStatus("pi-build-conductor", "cancelling run");
+			try {
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				const { conductor, store } = createRuntime(git, repository);
+				const stored = await store.load(runId);
+				if (stored.repositoryRoot !== repository.root) {
+					throw new Error(`Run ${runId} belongs to a different repository`);
+				}
+				const cancelled = await conductor.cancelRun(stored);
+				const key = runUiKey(runId);
+				ctx.ui.setStatus("pi-build-conductor", undefined);
+				ctx.ui.setStatus(key, `build ${runId}: cancelled`);
+				ctx.ui.setWidget(key, [
+					`Build ${runId}`,
+					`Run: ${cancelled.state}`,
+					`State file: ${store.directory}`,
+				]);
+				ctx.ui.notify(`Build ${runId} cancelled and workers stopped`, "info");
+			} catch (error) {
+				ctx.ui.setStatus("pi-build-conductor", "cancellation failed");
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},
@@ -281,6 +407,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					recovered,
 					freshRepository,
 					selectedWorkerModel(ctx),
+					lifecycleUi(ctx),
 				);
 				showLaunch(ctx, result, store);
 			} catch (error) {

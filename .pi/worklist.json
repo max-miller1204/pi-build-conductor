@@ -4,18 +4,18 @@
     {
       "id": "goal-mrtf3zlv-a6a0e476",
       "title": "Establish maintained Pi orchestrator fork",
-      "description": "Fork the full earendil-works/pi monorepo, keep main synchronized with upstream, maintain an orchestrator-compat branch, fix rpc-entry resolution and CLI packaging, run compatibility smoke tests, and submit focused fixes upstream.",
-      "status": "active",
+      "description": "Maintain a full fork of the earendil-works/pi monorepo, keep main synchronized with upstream, maintain an orchestrator-compat branch, fix rpc-entry resolution and CLI packaging, and run compatibility smoke tests.",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:12.643Z",
-      "updatedAt": "2026-07-20T16:08:00.474Z"
+      "updatedAt": "2026-07-20T16:39:56.787Z"
     },
     {
       "id": "goal-mrtf4hh0-8928b98a",
       "title": "Complete worker lifecycle monitoring",
       "description": "Consume orchestrator events and status, detect completion and failure, expose live Pi UI updates, support cancellation and timeouts, and clean up worker processes deterministically.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:35.796Z",
-      "updatedAt": "2026-07-20T16:07:35.796Z"
+      "updatedAt": "2026-07-20T20:07:41.268Z"
     },
     {
       "id": "goal-mrtf4j23-33a2c776",

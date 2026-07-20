@@ -37,6 +37,7 @@ const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
 	"running",
 	"succeeded",
 	"failed",
+	"cancelled",
 	"interrupted",
 ]);
 
