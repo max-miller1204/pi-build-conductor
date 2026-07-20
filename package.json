@@ -1,0 +1,55 @@
+{
+	"name": "pi-build-conductor",
+	"version": "0.1.0",
+	"description": "Safe multi-agent build orchestration for Pi",
+	"type": "module",
+	"license": "MIT",
+	"author": "Max Miller",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/max-miller1204/pi-build-conductor.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"orchestration",
+		"agents"
+	],
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"exports": {
+		".": "./src/index.ts",
+		"./extension": "./src/extension.ts"
+	},
+	"pi": {
+		"extensions": [
+			"./src/extension.ts"
+		]
+	},
+	"scripts": {
+		"check": "npm run format:check && npm run typecheck && npm test",
+		"format": "biome check --write .",
+		"format:check": "biome check .",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "^0.80.10",
+		"@earendil-works/pi-coding-agent": "^0.80.10"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"@earendil-works/pi-ai": "0.80.10",
+		"@earendil-works/pi-coding-agent": "0.80.10",
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3",
+		"vitest": "3.2.4"
+	}
+}
