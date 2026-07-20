@@ -24,16 +24,21 @@ Implemented:
 - Duplicate-dispatch prevention and durable active-attempt invariants
 - Worker completion and failure detection through orchestrator events and status checks
 - Execution timeouts, explicit cancellation, and deterministic process cleanup
+- Approved per-task path scopes and focused validation commands
+- Conductor-controlled diff inspection, focused checks, and coherent task commits
+- Durable changed-file, diff fingerprint, check, and commit evidence
+- Successful worktree cleanup with failed worktrees retained for inspection
 - Live Pi status and widget updates for worker progress and terminal state
-- Tests for DAG validation, scheduling, recovery, Git isolation, worker launch, completion, failure, timeout, and cancellation
+- Tests for DAG validation, scheduling, recovery, Git isolation, validation, conductor-owned commits, worker launch, completion, failure, timeout, and cancellation
 
-Sequential integration, automatic commits, reviewer agents, and final full-suite validation are the next implementation stages.
+Sequential integration, reviewer agents, and final full-suite validation are the next implementation stages.
 
 ## Architecture
 
 - `src/domain` contains run, task, attempt, and DAG state without process or UI dependencies.
 - `src/storage` persists versioned run snapshots under the repository's Git common directory.
-- `src/git` owns branch, commit, cherry-pick, and worktree operations.
+- `src/git` owns branch, diff inspection, commit, cherry-pick, and worktree operations.
+- `src/validation` enforces approved task scope and runs focused checks without a shell.
 - `src/workers` isolates the experimental orchestrator protocol behind `WorkerBackend`.
 - `src/planning` calls the selected Pi model and validates its JSON plan.
 - `src/conductor.ts` coordinates durable state transitions, Git isolation, and worker launch.
@@ -106,11 +111,18 @@ The command performs these steps:
 9. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/` for each selected task.
 10. Spawns an independent Pi instance for each task through the official orchestrator and sends its task prompt.
 11. Streams concurrent worker activity into Pi's live status UI.
-12. Detects terminal Pi events, persists success or failure, and stops each worker process.
-13. Refills available slots when successful tasks unblock downstream work.
+12. Detects terminal Pi events and stops each worker process before inspecting its output.
+13. Verifies the assigned branch and base commit, rejects conflicts or out-of-scope changes, and records a diff fingerprint.
+14. Runs `git diff --check` and the exact focused validation commands approved in the plan.
+15. Re-inspects the worktree to reject checks that changed worker output.
+16. Creates one conductor-owned task commit, records its hash and validation evidence, and removes the successful worktree while retaining its branch.
+17. Retains failed worktrees for inspection and blocks dependent tasks after validation or commit failure.
+18. Refills available slots only after successful validation, commit creation, and cleanup unblock downstream work.
 
 Worker executions time out after one hour by default.
 Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
+Each validation command times out after ten minutes by default.
+Set `PI_BUILD_VALIDATION_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
 The worker pool defaults to two concurrent workers.
 Set `PI_BUILD_MAX_CONCURRENT_WORKERS` to an integer from two through four to change the bound.
 
@@ -126,13 +138,15 @@ After an interrupted conductor session, run:
 /build-resume <run-id>
 ```
 
-Recovery checks the official orchestrator, stops all still-live workers from interrupted attempts, marks in-flight state as interrupted, and launches a new deterministic ready batch.
+Recovery checks the official orchestrator and stops all still-live workers from interrupted attempts.
+Uncommitted in-flight attempts become interrupted and retryable.
+A validating attempt with a recorded task commit is verified and cleanup is retried without creating a duplicate commit.
 
 ## Plan sidecar format
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "title": "Example build",
   "tasks": [
     {
@@ -140,7 +154,14 @@ Recovery checks the official orchestrator, stops all still-live workers from int
       "title": "Implement the feature",
       "description": "Add the smallest complete implementation.",
       "dependencies": [],
-      "acceptanceCriteria": ["Focused tests pass"]
+      "acceptanceCriteria": ["Focused tests pass"],
+      "allowedPaths": ["src/feature/", "test/feature.test.ts"],
+      "validationCommands": [
+        {
+          "command": "npm",
+          "args": ["test", "--", "test/feature.test.ts"]
+        }
+      ]
     }
   ]
 }
@@ -154,10 +175,18 @@ Recovery checks the official orchestrator, stops all still-live workers from int
 - No Git or worker side effects occur before explicit plan approval.
 - Every worker receives a separate branch and worktree.
 - Dependencies gate dispatch, and newly unblocked tasks are selected in deterministic plan order.
-- The configured two-to-four worker limit includes prepared, launched, and running attempts.
+- The configured two-to-four worker limit includes prepared, launched, running, and validating attempts.
 - Worker prompts forbid branch switching, merging, and commits.
+- Worker-created commits, branch switches, base resets, conflicts, Git submodules, and empty diffs are rejected.
+- Both sides of a rename must stay within the plan's approved path scope.
+- Task commits use a controlled temporary index, bypass repository hooks, and reject clean filters that would alter validated bytes.
+- Validation commands execute directly without a shell, receive a reduced environment, have bounded output and time, and may not modify the validated snapshot.
+- Focused validation executes repository code and is not a security sandbox.
 - Run state is written atomically outside the checked-out file tree.
-- Active attempts are marked interrupted and retryable during recovery.
+- Active uncommitted attempts are marked interrupted and retryable during recovery.
+- A conductor-owned commit and its passing evidence are persisted before successful worktree cleanup.
+- Failed validation worktrees are retained for inspection.
+- Successful task branches and commits are retained for later integration.
 - Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.
 - Integration is designed to occur sequentially on a separate integration branch.
 - A dependent task does not yet receive a predecessor's uncommitted worktree changes.

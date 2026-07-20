@@ -24,6 +24,7 @@ import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import { RunStore } from "./storage/run-store.js";
+import { LocalTaskValidator } from "./validation/task-validator.js";
 import { OfficialOrchestratorBackend } from "./workers/orchestrator-backend.js";
 
 function parsePathArgument(args: string): string {
@@ -87,7 +88,11 @@ function approvalSummary(plan: TaskPlan): string {
 		.map((task, index) => {
 			const dependencies =
 				task.dependencies.length > 0 ? task.dependencies.join(", ") : "none";
-			return `${index + 1}. ${task.title} (${task.id})\n   dependencies: ${dependencies}`;
+			const paths = task.allowedPaths.join(", ");
+			const commands = task.validationCommands
+				.map(({ command, args }) => [command, ...args].join(" "))
+				.join("; ");
+			return `${index + 1}. ${task.title} (${task.id})\n   dependencies: ${dependencies}\n   allowed paths: ${paths}\n   validation: ${commands}`;
 		})
 		.join("\n");
 }
@@ -137,6 +142,18 @@ function configuredWorkerTimeoutMs(): number | undefined {
 	return timeout;
 }
 
+function configuredValidationTimeoutMs(): number | undefined {
+	const value = process.env.PI_BUILD_VALIDATION_TIMEOUT_MS;
+	if (value === undefined) {
+		return undefined;
+	}
+	const timeout = Number(value);
+	if (!Number.isFinite(timeout) || timeout <= 0) {
+		throw new Error("PI_BUILD_VALIDATION_TIMEOUT_MS must be a positive number");
+	}
+	return timeout;
+}
+
 function configuredMaxConcurrentWorkers(): number {
 	const value = process.env.PI_BUILD_MAX_CONCURRENT_WORKERS;
 	if (value === undefined) {
@@ -161,9 +178,16 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	);
 	const workers = new OfficialOrchestratorBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
+	const validationTimeoutMs = configuredValidationTimeoutMs();
 	const conductor = new BuildConductor({
 		store,
 		workers,
+		git,
+		validator: new LocalTaskValidator(git, {
+			...(validationTimeoutMs === undefined
+				? {}
+				: { commandTimeoutMs: validationTimeoutMs }),
+		}),
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
@@ -198,7 +222,15 @@ function taskStateSummary(run: BuildRun): string {
 	for (const task of Object.values(run.tasks)) {
 		counts.set(task.state, (counts.get(task.state) ?? 0) + 1);
 	}
-	return ["running", "succeeded", "ready", "planned", "blocked", "failed"]
+	return [
+		"running",
+		"validating",
+		"succeeded",
+		"ready",
+		"planned",
+		"blocked",
+		"failed",
+	]
 		.flatMap((state) => {
 			const count = counts.get(state);
 			return count ? [`${count} ${state}`] : [];
@@ -231,10 +263,18 @@ function showCompletion(
 	run: BuildRun,
 	store: RunStore,
 ): void {
-	const workerLines = run.attempts.map(
-		(attempt) =>
-			`${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"})`,
-	);
+	const workerLines = run.attempts.map((attempt) => {
+		const passingChecks = attempt.evidence?.checks.filter(
+			(check) => check.passed,
+		).length;
+		const checks = attempt.evidence
+			? `, checks ${passingChecks}/${attempt.evidence.checks.length}`
+			: "";
+		const commit = attempt.commit
+			? `, commit ${attempt.commit.slice(0, 12)}`
+			: "";
+		return `${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit})`;
+	});
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
 		`Run: ${run.state}`,
@@ -243,8 +283,14 @@ function showCompletion(
 		`State file: ${store.directory}`,
 	]);
 	if (run.state === "integrating") {
-		ctx.ui.setStatus(runUiKey(run.id), "implementation complete");
-		ctx.ui.notify(`All workers completed for build ${run.id}`, "info");
+		ctx.ui.setStatus(
+			runUiKey(run.id),
+			"validated task commits ready for integration",
+		);
+		ctx.ui.notify(
+			`All task changes were validated and committed for build ${run.id}`,
+			"info",
+		);
 		return;
 	}
 	if (run.state === "cancelled") {
@@ -340,7 +386,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				});
 				const approved = await ctx.ui.confirm(
 					`Approve build plan: ${editedPlan.title}`,
-					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches and launch ready tasks up to the configured worker limit.`,
+					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches, run the exact validation commands above, and launch ready tasks up to the configured worker limit. Validation executes repository code without a sandbox.`,
 				);
 				if (!approved) {
 					run = await conductor.cancelRun(run);

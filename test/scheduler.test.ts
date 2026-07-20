@@ -17,6 +17,8 @@ function definition(id: string, dependencies: string[] = []): TaskDefinition {
 		description: `Implement ${id}`,
 		dependencies,
 		acceptanceCriteria: [`${id} works`],
+		allowedPaths: [`src/${id}/`],
+		validationCommands: [{ command: "npm", args: ["test"] }],
 	};
 }
 
@@ -30,9 +32,9 @@ function runWith(
 		definition("ui", ["base"]),
 		definition("release", ["api", "ui"]),
 	];
-	const plan: TaskPlan = { version: 1, title: "Build", tasks: definitions };
+	const plan: TaskPlan = { version: 2, title: "Build", tasks: definitions };
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		id: "run-1",
 		state: "running",
 		repositoryRoot: "/repo",
@@ -84,6 +86,7 @@ describe("scheduler", () => {
 			state: "prepared",
 			branch: "api",
 			worktreePath: "/api",
+			baseCommit: run.baseCommit,
 			startedAt: run.createdAt,
 		});
 		expect(getLaunchableTaskIds(run)).toEqual(["ui"]);

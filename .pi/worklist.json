@@ -29,9 +29,9 @@
       "id": "goal-mrtf4knn-ecb152e7",
       "title": "Validate and commit task work",
       "description": "Inspect worker diffs, enforce task scope, run focused validation, reject unsafe output, create coherent conductor-owned commits, record evidence, and clean up completed task worktrees.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-20T16:07:39.923Z",
-      "updatedAt": "2026-07-20T16:07:39.923Z"
+      "updatedAt": "2026-07-20T20:44:02.753Z"
     },
     {
       "id": "goal-mrtf4m6v-486a112c",

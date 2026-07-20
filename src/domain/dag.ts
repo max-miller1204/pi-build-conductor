@@ -1,7 +1,9 @@
+import { posix, win32 } from "node:path";
 import {
 	PLAN_SCHEMA_VERSION,
 	type TaskDefinition,
 	type TaskPlan,
+	type ValidationCommand,
 } from "./types.js";
 
 const TASK_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
@@ -48,6 +50,97 @@ function readStringArray(
 	return result;
 }
 
+function readAllowedPaths(
+	value: unknown,
+	path: string,
+	issues: string[],
+): string[] {
+	const paths = readStringArray(value, path, issues);
+	if (paths.length === 0) {
+		issues.push(`${path} must contain at least one repository-relative path`);
+	}
+	for (const [index, entry] of paths.entries()) {
+		const itemPath = `${path}[${index}]`;
+		const directory = entry.endsWith("/");
+		const withoutSlash = directory ? entry.slice(0, -1) : entry;
+		if (
+			entry.includes("\0") ||
+			entry.includes("\\") ||
+			posix.isAbsolute(entry) ||
+			win32.isAbsolute(entry) ||
+			withoutSlash.length === 0 ||
+			withoutSlash === "." ||
+			withoutSlash === ".." ||
+			withoutSlash.startsWith("../") ||
+			withoutSlash.includes("/../") ||
+			/[?*[\]]/.test(entry)
+		) {
+			issues.push(
+				`${itemPath} must be a safe repository-relative file or directory path`,
+			);
+			continue;
+		}
+		const normalized = posix.normalize(withoutSlash);
+		const canonical = directory ? `${normalized}/` : normalized;
+		if (
+			canonical !== entry ||
+			normalized === ".git" ||
+			normalized.startsWith(".git/")
+		) {
+			issues.push(
+				`${itemPath} must be normalized and cannot address Git metadata`,
+			);
+		}
+	}
+	if (new Set(paths).size !== paths.length) {
+		issues.push(`${path} must not contain duplicates`);
+	}
+	return paths;
+}
+
+function readValidationCommands(
+	value: unknown,
+	path: string,
+	issues: string[],
+): ValidationCommand[] {
+	if (!Array.isArray(value) || value.length === 0) {
+		issues.push(`${path} must be a non-empty array of command objects`);
+		return [];
+	}
+	return value.map((item, index) => {
+		const itemPath = `${path}[${index}]`;
+		if (!isRecord(item)) {
+			issues.push(`${itemPath} must be an object`);
+			return { command: "", args: [] };
+		}
+		const command = readNonEmptyString(
+			item.command,
+			`${itemPath}.command`,
+			issues,
+		);
+		if (command.includes("\0")) {
+			issues.push(`${itemPath}.command cannot contain a NUL byte`);
+		}
+		if (!Array.isArray(item.args)) {
+			issues.push(`${itemPath}.args must be an array of strings`);
+			return { command, args: [] };
+		}
+		const args = item.args.map((argument, argumentIndex) => {
+			if (typeof argument !== "string") {
+				issues.push(`${itemPath}.args[${argumentIndex}] must be a string`);
+				return "";
+			}
+			if (argument.includes("\0")) {
+				issues.push(
+					`${itemPath}.args[${argumentIndex}] cannot contain a NUL byte`,
+				);
+			}
+			return argument;
+		});
+		return { command, args };
+	});
+}
+
 function readTask(
 	value: unknown,
 	index: number,
@@ -62,6 +155,8 @@ function readTask(
 			description: "",
 			dependencies: [],
 			acceptanceCriteria: [],
+			allowedPaths: [],
+			validationCommands: [],
 		};
 	}
 	return {
@@ -80,6 +175,16 @@ function readTask(
 		acceptanceCriteria: readStringArray(
 			value.acceptanceCriteria,
 			`${path}.acceptanceCriteria`,
+			issues,
+		),
+		allowedPaths: readAllowedPaths(
+			value.allowedPaths,
+			`${path}.allowedPaths`,
+			issues,
+		),
+		validationCommands: readValidationCommands(
+			value.validationCommands,
+			`${path}.validationCommands`,
 			issues,
 		),
 	};

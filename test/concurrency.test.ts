@@ -2,7 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
+import {
+	type BuildConductorDependencies,
+	BuildConductor as ProductionBuildConductor,
+} from "../src/conductor.js";
 import { approveRun } from "../src/domain/run.js";
 import type { BuildRun, TaskDefinition } from "../src/domain/types.js";
 import type { RepositoryInfo } from "../src/git/git.js";
@@ -19,8 +22,17 @@ import type {
 	WorkerExecutionResult,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
 
 const directories: string[] = [];
+
+class BuildConductor extends ProductionBuildConductor {
+	constructor(
+		dependencies: Omit<BuildConductorDependencies, "git" | "validator">,
+	) {
+		super({ ...dependencies, ...createFakeFinalizationDependencies() });
+	}
+}
 
 class ControlledWorkers implements WorkerBackend {
 	readonly instances = new Map<string, WorkerInstance>();
@@ -118,6 +130,7 @@ class ControlledWorkers implements WorkerBackend {
 
 class IsolatedWorktrees implements WorktreeManager {
 	readonly allocations: PrepareTaskWorktreeInput[] = [];
+	readonly removed: string[] = [];
 
 	async prepareIntegrationBranch(
 		_repository: RepositoryInfo,
@@ -132,6 +145,13 @@ class IsolatedWorktrees implements WorktreeManager {
 			branch: `conductor/${input.runId}/task/${input.taskId}/attempt-${input.attemptNumber}`,
 			path: `/worktrees/${input.taskId}/attempt-${input.attemptNumber}`,
 		};
+	}
+
+	async removeTaskWorktree(
+		_repositoryRoot: string,
+		path: string,
+	): Promise<void> {
+		this.removed.push(path);
 	}
 }
 
@@ -150,6 +170,8 @@ function task(id: string, dependencies: string[] = []): TaskDefinition {
 		description: `Implement ${id}`,
 		dependencies,
 		acceptanceCriteria: [`${id} works`],
+		allowedPaths: [`src/${id}/`],
+		validationCommands: [{ command: "npm", args: ["test"] }],
 	};
 }
 
@@ -164,7 +186,7 @@ async function setup(tasks: TaskDefinition[], maxConcurrentWorkers = 2) {
 		repository,
 		handoffPath: "/repo/handoff.md",
 		handoffText: "Build concurrently",
-		plan: { version: 1, title: "Concurrent build", tasks },
+		plan: { version: 2, title: "Concurrent build", tasks },
 		maxConcurrentWorkers,
 	});
 	return { conductor, run, store, workers, worktrees };
@@ -320,6 +342,7 @@ describe("bounded dependency-aware concurrency", () => {
 					state: "running",
 					branch: "first",
 					worktreePath: "/worktrees/first",
+					baseCommit: approved.baseCommit,
 					workerId: "worker-1",
 					startedAt: approved.updatedAt,
 				},
@@ -330,6 +353,7 @@ describe("bounded dependency-aware concurrency", () => {
 					state: "launched",
 					branch: "second",
 					worktreePath: "/worktrees/second",
+					baseCommit: approved.baseCommit,
 					workerId: "worker-2",
 					startedAt: approved.updatedAt,
 				},
@@ -348,6 +372,106 @@ describe("bounded dependency-aware concurrency", () => {
 			"ready",
 			"ready",
 		]);
+	});
+
+	it("recovers a recorded commit by retrying cleanup without recommitting", async () => {
+		const { conductor, run, store, worktrees } = await setup([
+			task("committed"),
+		]);
+		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
+		const committedTask = approved.tasks.committed;
+		if (!committedTask) {
+			throw new Error("missing committed task");
+		}
+		await store.save({
+			...approved,
+			tasks: {
+				committed: {
+					...committedTask,
+					state: "validating",
+					attemptIds: ["committed-1"],
+				},
+			},
+			attempts: [
+				{
+					id: "committed-1",
+					taskId: "committed",
+					number: 1,
+					state: "validating",
+					branch: "committed",
+					worktreePath: "/worktrees/committed",
+					baseCommit: approved.baseCommit,
+					startedAt: approved.updatedAt,
+					commit: "commit-1",
+					evidence: {
+						startedAt: approved.updatedAt,
+						finishedAt: approved.updatedAt,
+						passed: true,
+						changedFiles: [{ path: "src/committed/result.txt", status: "??" }],
+						diffHash: "diff-1",
+						checks: [],
+					},
+				},
+			],
+		});
+
+		const recovered = await conductor.recoverRun(run.id);
+
+		expect(recovered.state).toBe("integrating");
+		expect(recovered.tasks.committed?.state).toBe("succeeded");
+		expect(recovered.attempts[0]).toMatchObject({
+			state: "succeeded",
+			commit: "commit-1",
+		});
+		expect(worktrees.removed).toEqual(["/worktrees/committed"]);
+	});
+
+	it("recovers a commit created just before state persistence", async () => {
+		const { conductor, run, store, worktrees } = await setup([task("crashed")]);
+		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
+		const crashedTask = approved.tasks.crashed;
+		if (!crashedTask) {
+			throw new Error("missing crashed task");
+		}
+		await store.save({
+			...approved,
+			tasks: {
+				crashed: {
+					...crashedTask,
+					state: "validating",
+					attemptIds: ["crashed-1"],
+				},
+			},
+			attempts: [
+				{
+					id: "crashed-1",
+					taskId: "crashed",
+					number: 1,
+					state: "validating",
+					branch: "crashed",
+					worktreePath: "/worktrees/crashed",
+					baseCommit: approved.baseCommit,
+					startedAt: approved.updatedAt,
+					evidence: {
+						startedAt: approved.updatedAt,
+						finishedAt: approved.updatedAt,
+						passed: true,
+						changedFiles: [{ path: "src/crashed/result.txt", status: "??" }],
+						diffHash: "diff-crashed",
+						checks: [],
+					},
+				},
+			],
+		});
+
+		const recovered = await conductor.recoverRun(run.id);
+
+		expect(recovered.state).toBe("integrating");
+		expect(recovered.attempts[0]).toMatchObject({
+			state: "succeeded",
+			commit: "recovered-commit",
+		});
+		expect(worktrees.removed).toEqual(["/worktrees/crashed"]);
 	});
 
 	it("retries cleanup for a live worker referenced by a terminal attempt", async () => {
@@ -378,6 +502,7 @@ describe("bounded dependency-aware concurrency", () => {
 					state: "failed",
 					branch: "failed",
 					worktreePath: "/worktrees/failed",
+					baseCommit: run.baseCommit,
 					workerId: "worker-1",
 					startedAt: run.updatedAt,
 					finishedAt: run.updatedAt,

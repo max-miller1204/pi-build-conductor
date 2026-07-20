@@ -16,7 +16,7 @@ async function temporaryStore(): Promise<RunStore> {
 
 function createRun(): BuildRun {
 	const plan: TaskPlan = {
-		version: 1,
+		version: 2,
 		title: "Build",
 		tasks: [
 			{
@@ -25,6 +25,8 @@ function createRun(): BuildRun {
 				description: "Implement the feature",
 				dependencies: [],
 				acceptanceCriteria: ["Tests pass"],
+				allowedPaths: ["src/implementation/"],
+				validationCommands: [{ command: "npm", args: ["test"] }],
 			},
 		],
 	};
@@ -114,6 +116,7 @@ describe("RunStore", () => {
 						state: attemptState,
 						branch: "conductor/run-1/implementation",
 						worktreePath: "/tmp/worktree",
+						baseCommit: approved.baseCommit,
 						workerId: "worker-1",
 						startedAt: "2026-01-01T00:02:00.000Z",
 					},

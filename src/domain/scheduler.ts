@@ -1,19 +1,22 @@
 import { topologicalTaskIds } from "./dag.js";
-import type { AttemptState, BuildRun, RunTask, TaskState } from "./types.js";
+import {
+	type BuildRun,
+	isActiveAttemptState,
+	type RunTask,
+	type TaskState,
+} from "./types.js";
 
 const TERMINAL_FAILURE_STATES: ReadonlySet<TaskState> = new Set([
 	"failed",
 	"blocked",
 	"cancelled",
 ]);
-const ACTIVE_ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
-	"prepared",
-	"launched",
-	"running",
-]);
-
 function nextState(task: RunTask, tasks: Record<string, RunTask>): TaskState {
-	if (["running", "succeeded", "failed", "cancelled"].includes(task.state)) {
+	if (
+		["running", "validating", "succeeded", "failed", "cancelled"].includes(
+			task.state,
+		)
+	) {
 		return task.state;
 	}
 	const dependencyStates = task.definition.dependencies.map(
@@ -49,14 +52,15 @@ export function getLaunchableTaskIds(run: BuildRun): string[] {
 	}
 	const reconciled = reconcileTaskStates(run);
 	const activeAttempts = reconciled.attempts.filter((attempt) =>
-		ACTIVE_ATTEMPT_STATES.has(attempt.state),
+		isActiveAttemptState(attempt.state),
 	);
 	const tasksWithActiveAttempts = new Set(
 		activeAttempts.map((attempt) => attempt.taskId),
 	);
 	const untrackedRunningTasks = Object.entries(reconciled.tasks).filter(
 		([taskId, task]) =>
-			task.state === "running" && !tasksWithActiveAttempts.has(taskId),
+			["running", "validating"].includes(task.state) &&
+			!tasksWithActiveAttempts.has(taskId),
 	).length;
 	const availableSlots = Math.max(
 		0,

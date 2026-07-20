@@ -1,8 +1,14 @@
 import { execFile } from "node:child_process";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { createReadStream, type Stats } from "node:fs";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import type { ChangedFileEvidence } from "../domain/types.js";
 
 const execFileAsync = promisify(execFile);
+const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 export interface RepositoryInfo {
 	root: string;
@@ -12,9 +18,17 @@ export interface RepositoryInfo {
 	isClean: boolean;
 }
 
+export interface TaskWorktreeSnapshot {
+	branch: string;
+	baseCommit: string;
+	changedFiles: ChangedFileEvidence[];
+	diffHash: string;
+}
+
 export interface GitClient {
 	inspect(cwd: string): Promise<RepositoryInfo>;
 	branchExists(repositoryRoot: string, branch: string): Promise<boolean>;
+	branchHead(repositoryRoot: string, branch: string): Promise<string>;
 	createBranch(
 		repositoryRoot: string,
 		branch: string,
@@ -28,6 +42,23 @@ export interface GitClient {
 	): Promise<void>;
 	removeWorktree(repositoryRoot: string, path: string): Promise<void>;
 	status(repositoryRoot: string): Promise<string>;
+	inspectTaskWorktree(
+		worktreePath: string,
+		expectedBranch: string,
+		expectedBaseCommit: string,
+	): Promise<TaskWorktreeSnapshot>;
+	checkTaskDiff(worktreePath: string, baseCommit: string): Promise<void>;
+	commitTaskWork(
+		worktreePath: string,
+		expectedSnapshot: TaskWorktreeSnapshot,
+		message: string,
+	): Promise<string>;
+	verifyTaskCommit(
+		repositoryRoot: string,
+		branch: string,
+		commit: string,
+		baseCommit: string,
+	): Promise<void>;
 	commitAll(worktreePath: string, message: string): Promise<string>;
 	cherryPick(worktreePath: string, commit: string): Promise<void>;
 }
@@ -43,19 +74,122 @@ export class GitCommandError extends Error {
 	}
 }
 
+function validateChangedPath(path: string): void {
+	if (
+		path.length === 0 ||
+		path.includes("\0") ||
+		isAbsolute(path) ||
+		path === ".." ||
+		path.startsWith("../") ||
+		path.includes("/../") ||
+		path === ".git" ||
+		path.startsWith(".git/")
+	) {
+		throw new Error(
+			`Git reported an unsafe changed path: ${JSON.stringify(path)}`,
+		);
+	}
+}
+
+function parsePorcelainV1Z(output: string): ChangedFileEvidence[] {
+	const files: ChangedFileEvidence[] = [];
+	let offset = 0;
+	while (offset < output.length) {
+		const end = output.indexOf("\0", offset);
+		if (end < 0) {
+			throw new Error("Git status returned a malformed NUL-delimited record");
+		}
+		const record = output.slice(offset, end);
+		offset = end + 1;
+		if (record.length < 4 || record[2] !== " ") {
+			throw new Error(
+				`Git status returned a malformed record: ${JSON.stringify(record)}`,
+			);
+		}
+		const status = record.slice(0, 2);
+		const path = record.slice(3);
+		validateChangedPath(path);
+		const conflict =
+			status.includes("U") ||
+			["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(status);
+		if (conflict) {
+			throw new Error(
+				`Task worktree contains an unresolved conflict at ${path}`,
+			);
+		}
+		const changed: ChangedFileEvidence = { path, status };
+		if (status.includes("R") || status.includes("C")) {
+			const previousEnd = output.indexOf("\0", offset);
+			if (previousEnd < 0) {
+				throw new Error("Git status returned a malformed rename record");
+			}
+			const previousPath = output.slice(offset, previousEnd);
+			offset = previousEnd + 1;
+			validateChangedPath(previousPath);
+			changed.previousPath = previousPath;
+		}
+		files.push(changed);
+	}
+	return files.sort((left, right) =>
+		`${left.path}\0${left.previousPath ?? ""}`.localeCompare(
+			`${right.path}\0${right.previousPath ?? ""}`,
+		),
+	);
+}
+
+async function hashFile(
+	hash: ReturnType<typeof createHash>,
+	path: string,
+): Promise<void> {
+	await new Promise<void>((resolvePromise, reject) => {
+		const stream = createReadStream(path);
+		stream.on("data", (chunk) => hash.update(chunk));
+		stream.on("error", reject);
+		stream.on("end", resolvePromise);
+	});
+}
+
+function assertSnapshotMatches(
+	actual: TaskWorktreeSnapshot,
+	expected: TaskWorktreeSnapshot,
+): void {
+	if (
+		actual.branch !== expected.branch ||
+		actual.baseCommit !== expected.baseCommit ||
+		actual.diffHash !== expected.diffHash ||
+		JSON.stringify(actual.changedFiles) !==
+			JSON.stringify(expected.changedFiles)
+	) {
+		throw new Error("Task worktree changed after validation");
+	}
+}
+
 export class GitCli implements GitClient {
-	private async execute(cwd: string, args: string[]): Promise<string> {
+	private async executeRaw(
+		cwd: string,
+		args: string[],
+		env?: NodeJS.ProcessEnv,
+	): Promise<string> {
 		try {
 			const result = await execFileAsync("git", args, {
 				cwd,
+				...(env ? { env } : {}),
 				encoding: "utf8",
-				maxBuffer: 10 * 1024 * 1024,
+				maxBuffer: MAX_GIT_OUTPUT_BYTES,
 			});
-			return result.stdout.trim();
+			return result.stdout;
 		} catch (error) {
 			const failure = error as NodeJS.ErrnoException & { stderr?: string };
 			throw new GitCommandError(args, cwd, failure.stderr ?? failure.message);
 		}
+	}
+
+	private async execute(
+		cwd: string,
+		args: string[],
+		env?: NodeJS.ProcessEnv,
+	): Promise<string> {
+		return (await this.executeRaw(cwd, args, env)).trim();
 	}
 
 	async inspect(cwd: string): Promise<RepositoryInfo> {
@@ -95,6 +229,10 @@ export class GitCli implements GitClient {
 		}
 	}
 
+	async branchHead(repositoryRoot: string, branch: string): Promise<string> {
+		return this.execute(repositoryRoot, ["rev-parse", `refs/heads/${branch}`]);
+	}
+
 	async createBranch(
 		repositoryRoot: string,
 		branch: string,
@@ -123,12 +261,288 @@ export class GitCli implements GitClient {
 		await this.execute(repositoryRoot, ["worktree", "remove", "--force", path]);
 	}
 
-	status(repositoryRoot: string): Promise<string> {
-		return this.execute(repositoryRoot, [
-			"status",
-			"--porcelain=v1",
-			"--untracked-files=all",
+	async status(repositoryRoot: string): Promise<string> {
+		return (
+			await this.executeRaw(repositoryRoot, [
+				"status",
+				"--porcelain=v1",
+				"--untracked-files=all",
+			])
+		).trim();
+	}
+
+	async inspectTaskWorktree(
+		worktreePath: string,
+		expectedBranch: string,
+		expectedBaseCommit: string,
+	): Promise<TaskWorktreeSnapshot> {
+		const [branch, head, statusOutput] = await Promise.all([
+			this.execute(worktreePath, [
+				"symbolic-ref",
+				"--quiet",
+				"--short",
+				"HEAD",
+			]),
+			this.execute(worktreePath, ["rev-parse", "HEAD"]),
+			this.executeRaw(worktreePath, [
+				"status",
+				"--porcelain=v1",
+				"-z",
+				"--untracked-files=all",
+			]),
 		]);
+		if (branch !== expectedBranch) {
+			throw new Error(
+				`Task worktree branch changed: expected ${expectedBranch}, found ${branch}`,
+			);
+		}
+		if (head !== expectedBaseCommit) {
+			throw new Error(
+				`Task worktree HEAD changed: expected ${expectedBaseCommit}, found ${head}`,
+			);
+		}
+		const changedFiles = parsePorcelainV1Z(statusOutput);
+		if (changedFiles.length === 0) {
+			throw new Error("Task worker produced no changes");
+		}
+		const pathSet = new Set(
+			changedFiles.flatMap((file) => [
+				file.path,
+				...(file.previousPath ? [file.previousPath] : []),
+			]),
+		);
+		const paths = [...pathSet].sort();
+		const stagedEntries = await this.executeRaw(worktreePath, [
+			"--literal-pathspecs",
+			"ls-files",
+			"--stage",
+			"-z",
+			"--",
+			...paths,
+		]);
+		for (const entry of stagedEntries.split("\0")) {
+			if (entry.startsWith("160000 ")) {
+				throw new Error(
+					"Task worktree changes include an unsupported Git submodule",
+				);
+			}
+		}
+		const diff = await this.executeRaw(worktreePath, [
+			"--literal-pathspecs",
+			"diff",
+			"--binary",
+			"--no-ext-diff",
+			"HEAD",
+			"--",
+			...paths,
+		]);
+		for (const path of paths) {
+			try {
+				const stat = await lstat(resolve(worktreePath, path));
+				if (stat.isSymbolicLink()) {
+					throw new Error(
+						`Task worktree changes include an unsupported symbolic link: ${path}`,
+					);
+				}
+				if (!stat.isFile()) {
+					throw new Error(`Unsupported changed file type: ${path}`);
+				}
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+			}
+		}
+		const hash = createHash("sha256");
+		hash.update(JSON.stringify(changedFiles));
+		hash.update("\0");
+		hash.update(diff);
+		for (const file of changedFiles.filter((item) => item.status === "??")) {
+			const absolutePath = resolve(worktreePath, file.path);
+			const relativePath = relative(resolve(worktreePath), absolutePath);
+			if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+				throw new Error(`Changed path escapes task worktree: ${file.path}`);
+			}
+			const stat = await lstat(absolutePath);
+			hash.update(`\0${file.path}\0${stat.mode}\0`);
+			if (stat.isFile()) {
+				await hashFile(hash, absolutePath);
+			} else {
+				throw new Error(`Unsupported untracked file type: ${file.path}`);
+			}
+		}
+		return {
+			branch,
+			baseCommit: expectedBaseCommit,
+			changedFiles,
+			diffHash: hash.digest("hex"),
+		};
+	}
+
+	async checkTaskDiff(worktreePath: string, baseCommit: string): Promise<void> {
+		await this.execute(worktreePath, ["diff", "--check", baseCommit, "--"]);
+	}
+
+	async commitTaskWork(
+		worktreePath: string,
+		expectedSnapshot: TaskWorktreeSnapshot,
+		message: string,
+	): Promise<string> {
+		if (!message.trim() || /[\r\n]/.test(message)) {
+			throw new Error("Task commit message must be a non-empty single line");
+		}
+		const actual = await this.inspectTaskWorktree(
+			worktreePath,
+			expectedSnapshot.branch,
+			expectedSnapshot.baseCommit,
+		);
+		assertSnapshotMatches(actual, expectedSnapshot);
+		const paths = [
+			...new Set(
+				expectedSnapshot.changedFiles.flatMap((file) => [
+					file.path,
+					...(file.previousPath ? [file.previousPath] : []),
+				]),
+			),
+		].sort();
+		const temporaryIndexDirectory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-index-"),
+		);
+		const indexEnvironment = {
+			...process.env,
+			GIT_INDEX_FILE: join(temporaryIndexDirectory, "index"),
+		};
+		let commit: string;
+		try {
+			await this.execute(
+				worktreePath,
+				["read-tree", expectedSnapshot.baseCommit],
+				indexEnvironment,
+			);
+			for (const path of paths) {
+				const absolutePath = resolve(worktreePath, path);
+				let stat: Stats;
+				try {
+					stat = await lstat(absolutePath);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+						throw error;
+					}
+					await this.execute(
+						worktreePath,
+						[
+							"--literal-pathspecs",
+							"update-index",
+							"--force-remove",
+							"--",
+							path,
+						],
+						indexEnvironment,
+					);
+					continue;
+				}
+				if (!stat.isFile()) {
+					throw new Error(`Unsupported changed file type: ${path}`);
+				}
+				const blob = await this.execute(worktreePath, [
+					"hash-object",
+					"-w",
+					"--no-filters",
+					"--",
+					path,
+				]);
+				const filteredBlob = await this.execute(worktreePath, [
+					"hash-object",
+					`--path=${path}`,
+					"--",
+					path,
+				]);
+				if (filteredBlob !== blob) {
+					throw new Error(
+						`Git clean filter would alter validated bytes for ${path}`,
+					);
+				}
+				const mode = stat.mode & 0o111 ? "100755" : "100644";
+				await this.execute(
+					worktreePath,
+					["update-index", "--add", "--cacheinfo", mode, blob, path],
+					indexEnvironment,
+				);
+			}
+			const tree = await this.execute(
+				worktreePath,
+				["write-tree"],
+				indexEnvironment,
+			);
+			commit = await this.execute(worktreePath, [
+				"commit-tree",
+				tree,
+				"-p",
+				expectedSnapshot.baseCommit,
+				"-m",
+				message,
+			]);
+			await this.execute(worktreePath, [
+				"update-ref",
+				`refs/heads/${expectedSnapshot.branch}`,
+				commit,
+				expectedSnapshot.baseCommit,
+			]);
+			await this.execute(worktreePath, ["read-tree", commit]);
+		} finally {
+			await rm(temporaryIndexDirectory, { recursive: true, force: true });
+		}
+		await this.verifyTaskCommit(
+			worktreePath,
+			expectedSnapshot.branch,
+			commit,
+			expectedSnapshot.baseCommit,
+		);
+		const committedPaths = (
+			await this.executeRaw(worktreePath, [
+				"diff-tree",
+				"--no-commit-id",
+				"--name-only",
+				"-r",
+				"-z",
+				"--no-renames",
+				commit,
+			])
+		)
+			.split("\0")
+			.filter(Boolean)
+			.sort();
+		if (JSON.stringify(committedPaths) !== JSON.stringify(paths)) {
+			throw new Error(
+				"Created task commit does not match the validated path set",
+			);
+		}
+		if ((await this.status(worktreePath)).length > 0) {
+			throw new Error("Task worktree is not clean after commit");
+		}
+		return commit;
+	}
+
+	async verifyTaskCommit(
+		repositoryRoot: string,
+		branch: string,
+		commit: string,
+		baseCommit: string,
+	): Promise<void> {
+		const [branchHead, parent] = await Promise.all([
+			this.execute(repositoryRoot, ["rev-parse", `refs/heads/${branch}`]),
+			this.execute(repositoryRoot, ["rev-parse", `${commit}^`]),
+		]);
+		if (branchHead !== commit) {
+			throw new Error(
+				`Task branch ${branch} does not point to recorded commit ${commit}`,
+			);
+		}
+		if (parent !== baseCommit) {
+			throw new Error(
+				`Task commit ${commit} does not have expected parent ${baseCommit}`,
+			);
+		}
 	}
 
 	async commitAll(worktreePath: string, message: string): Promise<string> {

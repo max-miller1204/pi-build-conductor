@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { GitClient, RepositoryInfo } from "./git.js";
 
 export interface WorktreeAllocation {
@@ -23,6 +23,7 @@ export interface WorktreeManager {
 	prepareTaskWorktree(
 		input: PrepareTaskWorktreeInput,
 	): Promise<WorktreeAllocation>;
+	removeTaskWorktree(repositoryRoot: string, path: string): Promise<void>;
 }
 
 export class GitWorktreeManager implements WorktreeManager {
@@ -79,5 +80,46 @@ export class GitWorktreeManager implements WorktreeManager {
 			input.startPoint,
 		);
 		return { branch, path };
+	}
+
+	async removeTaskWorktree(
+		repositoryRoot: string,
+		path: string,
+	): Promise<void> {
+		const root = resolve(this.worktreeRoot);
+		const target = resolve(path);
+		const pathFromRoot = relative(root, target);
+		if (
+			pathFromRoot.length === 0 ||
+			pathFromRoot === ".." ||
+			pathFromRoot.startsWith(
+				`..${process.platform === "win32" ? "\\" : "/"}`,
+			) ||
+			isAbsolute(pathFromRoot)
+		) {
+			throw new Error(
+				`Refusing to remove worktree outside conductor root: ${path}`,
+			);
+		}
+		try {
+			await lstat(target);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				return;
+			}
+			throw error;
+		}
+		const [repository, worktree] = await Promise.all([
+			this.git.inspect(repositoryRoot),
+			this.git.inspect(target),
+		]);
+		if (
+			worktree.root !== target ||
+			worktree.commonDirectory !== repository.commonDirectory ||
+			worktree.root === repository.root
+		) {
+			throw new Error(`Refusing to remove an unexpected worktree: ${path}`);
+		}
+		await this.git.removeWorktree(repository.root, target);
 	}
 }

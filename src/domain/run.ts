@@ -67,7 +67,8 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 		if (
 			attempt.state !== "prepared" &&
 			attempt.state !== "launched" &&
-			attempt.state !== "running"
+			attempt.state !== "running" &&
+			attempt.state !== "validating"
 		) {
 			return attempt;
 		}
@@ -81,7 +82,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 	});
 	const tasks = Object.fromEntries(
 		Object.entries(run.tasks).map(([id, task]) => {
-			if (task.state !== "running") {
+			if (task.state !== "running" && task.state !== "validating") {
 				return [id, task];
 			}
 			changed = true;

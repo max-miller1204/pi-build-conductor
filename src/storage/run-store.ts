@@ -6,6 +6,7 @@ import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
 	type BuildRun,
+	isActiveAttemptState,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
 	RUN_SCHEMA_VERSION,
@@ -28,6 +29,7 @@ const TASK_STATES: ReadonlySet<TaskState> = new Set([
 	"planned",
 	"ready",
 	"running",
+	"validating",
 	"succeeded",
 	"failed",
 	"blocked",
@@ -37,6 +39,7 @@ const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
 	"prepared",
 	"launched",
 	"running",
+	"validating",
 	"succeeded",
 	"failed",
 	"cancelled",
@@ -50,6 +53,68 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function assertString(value: unknown, path: string): asserts value is string {
 	if (typeof value !== "string" || value.length === 0) {
 		throw new Error(`${path} must be a non-empty string`);
+	}
+}
+
+function validateEvidence(value: unknown, path: string): void {
+	if (!isRecord(value)) {
+		throw new Error(`${path} must be an object`);
+	}
+	assertString(value.startedAt, `${path}.startedAt`);
+	assertString(value.finishedAt, `${path}.finishedAt`);
+	if (typeof value.passed !== "boolean") {
+		throw new Error(`${path}.passed must be a boolean`);
+	}
+	if (!Array.isArray(value.changedFiles)) {
+		throw new Error(`${path}.changedFiles must be an array`);
+	}
+	for (const [index, file] of value.changedFiles.entries()) {
+		if (!isRecord(file)) {
+			throw new Error(`${path}.changedFiles[${index}] must be an object`);
+		}
+		assertString(file.path, `${path}.changedFiles[${index}].path`);
+		assertString(file.status, `${path}.changedFiles[${index}].status`);
+		if (file.previousPath !== undefined) {
+			assertString(
+				file.previousPath,
+				`${path}.changedFiles[${index}].previousPath`,
+			);
+		}
+	}
+	if (typeof value.diffHash !== "string") {
+		throw new Error(`${path}.diffHash must be a string`);
+	}
+	if (!Array.isArray(value.checks)) {
+		throw new Error(`${path}.checks must be an array`);
+	}
+	for (const [index, check] of value.checks.entries()) {
+		const checkPath = `${path}.checks[${index}]`;
+		if (!isRecord(check)) {
+			throw new Error(`${checkPath} must be an object`);
+		}
+		for (const field of [
+			"command",
+			"startedAt",
+			"finishedAt",
+			"stdoutTail",
+			"stderrTail",
+		] as const) {
+			if (typeof check[field] !== "string") {
+				throw new Error(`${checkPath}.${field} must be a string`);
+			}
+		}
+		if (
+			!Array.isArray(check.args) ||
+			check.args.some((arg) => typeof arg !== "string")
+		) {
+			throw new Error(`${checkPath}.args must be an array of strings`);
+		}
+		if (check.exitCode !== null && !Number.isInteger(check.exitCode)) {
+			throw new Error(`${checkPath}.exitCode must be an integer or null`);
+		}
+		if (typeof check.passed !== "boolean") {
+			throw new Error(`${checkPath}.passed must be a boolean`);
+		}
 	}
 }
 
@@ -123,6 +188,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 			"taskId",
 			"branch",
 			"worktreePath",
+			"baseCommit",
 			"startedAt",
 		] as const) {
 			assertString(attempt[field], `${path}.${field}`);
@@ -148,6 +214,21 @@ export function validateStoredRun(value: unknown): BuildRun {
 			if (attempt[field] !== undefined && typeof attempt[field] !== "string") {
 				throw new Error(`${path}.${field} must be a string when present`);
 			}
+		}
+		if (attempt.evidence !== undefined) {
+			validateEvidence(attempt.evidence, `${path}.evidence`);
+		}
+		if (
+			attempt.commit !== undefined &&
+			(!isRecord(attempt.evidence) || attempt.evidence.passed !== true)
+		) {
+			throw new Error(
+				`${path} has a commit without passing validation evidence`,
+			);
+		}
+		if (attempt.state === "succeeded") {
+			assertString(attempt.finishedAt, `${path}.finishedAt`);
+			assertString(attempt.commit, `${path}.commit`);
 		}
 		if (attemptsById.has(attempt.id as string)) {
 			throw new Error(`Duplicate attempt id: ${String(attempt.id)}`);
@@ -187,7 +268,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 		);
 	}
 	const activeAttempts = [...attemptsById.values()].filter((attempt) =>
-		["prepared", "launched", "running"].includes(String(attempt.state)),
+		isActiveAttemptState(attempt.state as AttemptState),
 	);
 	if (activeAttempts.length > (value.maxConcurrentWorkers as number)) {
 		throw new Error("Run has more active attempts than its concurrency limit");
@@ -208,10 +289,23 @@ export function validateStoredRun(value: unknown): BuildRun {
 	for (const [taskId, task] of Object.entries(value.tasks)) {
 		if (
 			isRecord(task) &&
-			task.state === "running" &&
+			["running", "validating"].includes(String(task.state)) &&
 			!activeAttemptCountByTask.has(taskId)
 		) {
-			throw new Error(`Running task ${taskId} has no active attempt`);
+			throw new Error(`Active task ${taskId} has no active attempt`);
+		}
+		if (isRecord(task) && task.state === "succeeded") {
+			const hasSucceededAttempt =
+				Array.isArray(task.attemptIds) &&
+				task.attemptIds.some(
+					(attemptId) =>
+						attemptsById.get(String(attemptId))?.state === "succeeded",
+				);
+			if (!hasSucceededAttempt) {
+				throw new Error(
+					`Succeeded task ${taskId} has no succeeded committed attempt`,
+				);
+			}
 		}
 	}
 	if (!isRecord(value.handoff)) {

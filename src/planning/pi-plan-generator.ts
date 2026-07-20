@@ -8,7 +8,7 @@ const PLANNING_SYSTEM_PROMPT = `You are the planning stage of a software build c
 Turn the supplied handoff into a small, implementation-ready dependency DAG.
 Return JSON only, with exactly this shape:
 {
-  "version": 1,
+  "version": 2,
   "title": "short plan title",
   "tasks": [
     {
@@ -16,7 +16,11 @@ Return JSON only, with exactly this shape:
       "title": "short task title",
       "description": "self-contained implementation instructions",
       "dependencies": ["task-id"],
-      "acceptanceCriteria": ["observable criterion"]
+      "acceptanceCriteria": ["observable criterion"],
+      "allowedPaths": ["src/feature/", "test/feature.test.ts"],
+      "validationCommands": [
+        { "command": "npm", "args": ["test", "--", "test/feature.test.ts"] }
+      ]
     }
   ]
 }
@@ -24,7 +28,10 @@ Every dependency must refer to another task in the plan.
 The graph must be acyclic.
 Prefer independently implementable tasks, but do not invent unnecessary parallelism.
 Independent ready tasks may execute concurrently, so every prerequisite must be represented as an explicit dependency.
-Every task must be executable from its description.`;
+Every task must be executable from its description.
+Every allowed path must be a normalized repository-relative file path or directory ending in /.
+Use the narrowest practical path scope and focused validation commands.
+Validation commands execute directly without a shell and must not modify files.`;
 
 function unwrapJson(text: string): string {
 	const trimmed = text.trim();

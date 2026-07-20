@@ -4,15 +4,20 @@ import {
 	getLaunchableTaskIds,
 	reconcileTaskStates,
 } from "./domain/scheduler.js";
-import type {
-	BuildRun,
-	TaskAttempt,
-	TaskDefinition,
-	TaskPlan,
+import {
+	type BuildRun,
+	isActiveAttemptState,
+	type TaskAttempt,
+	type TaskDefinition,
+	type TaskPlan,
 } from "./domain/types.js";
-import type { RepositoryInfo } from "./git/git.js";
+import type { GitClient, RepositoryInfo } from "./git/git.js";
 import type { WorktreeManager } from "./git/worktrees.js";
 import type { RunStore } from "./storage/run-store.js";
+import {
+	TaskValidationError,
+	type TaskValidator,
+} from "./validation/task-validator.js";
 import type {
 	WorkerBackend,
 	WorkerExecutionResult,
@@ -26,6 +31,8 @@ export interface BuildConductorDependencies {
 	store: RunStore;
 	worktrees: WorktreeManager;
 	workers: WorkerBackend;
+	git: GitClient;
+	validator: TaskValidator;
 	now?: () => string;
 	workerTimeoutMs?: number;
 	workerPollIntervalMs?: number;
@@ -97,6 +104,12 @@ ${task.description}
 
 Acceptance criteria:
 ${task.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")}
+
+Approved path scope:
+${task.allowedPaths.map((path) => `- ${path}`).join("\n")}
+
+Required validation commands:
+${task.validationCommands.map(({ command, args }) => `- ${[command, ...args].join(" ")}`).join("\n")}
 
 Relevant handoff:
 ${run.handoff.text}
@@ -179,6 +192,10 @@ export class BuildConductor {
 		string,
 		Promise<string | undefined>
 	>();
+	private readonly commitFinalizations = new Map<
+		string,
+		{ runId: string; completion: Promise<void> }
+	>();
 
 	constructor(private readonly dependencies: BuildConductorDependencies) {
 		this.now = dependencies.now ?? (() => new Date().toISOString());
@@ -215,6 +232,13 @@ export class BuildConductor {
 	}
 
 	async cancelRun(run: BuildRun): Promise<BuildRun> {
+		const committing = [...this.commitFinalizations.values()].flatMap(
+			(finalization) =>
+				finalization.runId === run.id ? [finalization.completion] : [],
+		);
+		if (committing.length > 0) {
+			await Promise.all(committing);
+		}
 		let activeRun = run;
 		let shouldCleanup = false;
 		const now = this.now();
@@ -239,7 +263,7 @@ export class BuildConductor {
 						]),
 					),
 					attempts: current.attempts.map((attempt) =>
-						["prepared", "launched", "running"].includes(attempt.state)
+						isActiveAttemptState(attempt.state)
 							? {
 									...attempt,
 									state: "cancelled" as const,
@@ -264,8 +288,7 @@ export class BuildConductor {
 		const cleanupErrors: string[] = [];
 		const workerIds = new Set(
 			activeRun.attempts.flatMap((attempt) =>
-				attempt.workerId &&
-				["prepared", "launched", "running"].includes(attempt.state)
+				attempt.workerId && isActiveAttemptState(attempt.state)
 					? [attempt.workerId]
 					: [],
 			),
@@ -343,7 +366,7 @@ export class BuildConductor {
 		}
 		recoveringRuns.add(key);
 		try {
-			const run = await this.dependencies.store.load(runId);
+			let run = await this.dependencies.store.load(runId);
 			const workers = await this.dependencies.workers.list();
 			const liveWorkerIds = new Set(
 				workers.flatMap((worker) =>
@@ -359,6 +382,123 @@ export class BuildConductor {
 			);
 			for (const workerId of new Set(referencedLiveWorkerIds)) {
 				await this.dependencies.workers.stop(workerId);
+			}
+			const recoverableAttempts = run.attempts.filter(
+				(attempt) =>
+					attempt.state === "validating" && attempt.evidence?.passed === true,
+			);
+			for (const originalAttempt of recoverableAttempts) {
+				let attempt = originalAttempt;
+				try {
+					let commit = attempt.commit;
+					if (!commit) {
+						const branchHead = await this.dependencies.git.branchHead(
+							run.repositoryRoot,
+							attempt.branch,
+						);
+						if (branchHead === attempt.baseCommit) {
+							continue;
+						}
+						await this.dependencies.git.verifyTaskCommit(
+							run.repositoryRoot,
+							attempt.branch,
+							branchHead,
+							attempt.baseCommit,
+						);
+						commit = branchHead;
+						run = await mutateStoredRun(
+							this.dependencies.store,
+							runId,
+							(stored) => ({
+								...updateAttempt(stored, attempt.id, { commit: branchHead }),
+								updatedAt: this.now(),
+							}),
+						);
+						attempt = { ...attempt, commit };
+					}
+					await this.dependencies.git.verifyTaskCommit(
+						run.repositoryRoot,
+						attempt.branch,
+						commit,
+						attempt.baseCommit,
+					);
+					await this.dependencies.worktrees.removeTaskWorktree(
+						run.repositoryRoot,
+						attempt.worktreePath,
+					);
+					run = await mutateStoredRun(
+						this.dependencies.store,
+						runId,
+						(stored) => {
+							const storedAttempt = stored.attempts.find(
+								(item) => item.id === attempt.id,
+							);
+							const storedTask = stored.tasks[attempt.taskId];
+							if (
+								!storedAttempt ||
+								storedAttempt.state !== "validating" ||
+								!storedTask
+							) {
+								return stored;
+							}
+							let recovered = reconcileTaskStates({
+								...updateAttempt(stored, attempt.id, {
+									state: "succeeded",
+									finishedAt: this.now(),
+								}),
+								tasks: {
+									...stored.tasks,
+									[attempt.taskId]: {
+										...storedTask,
+										state: "succeeded",
+									},
+								},
+								updatedAt: this.now(),
+							});
+							if (
+								Object.values(recovered.tasks).every(
+									(item) => item.state === "succeeded",
+								)
+							) {
+								recovered = {
+									...recovered,
+									state: "integrating",
+									updatedAt: this.now(),
+								};
+							}
+							return recovered;
+						},
+					);
+				} catch (error) {
+					const message = `Failed to recover committed task ${attempt.taskId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`;
+					return await mutateStoredRun(
+						this.dependencies.store,
+						runId,
+						(stored) => {
+							const storedTask = stored.tasks[attempt.taskId];
+							let failed = updateAttempt(stored, attempt.id, {
+								state: "failed",
+								finishedAt: this.now(),
+								error: message,
+							});
+							if (storedTask) {
+								failed = reconcileTaskStates({
+									...failed,
+									tasks: {
+										...failed.tasks,
+										[attempt.taskId]: {
+											...storedTask,
+											state: "failed",
+										},
+									},
+								});
+							}
+							return { ...failed, state: "failed", updatedAt: this.now() };
+						},
+					);
+				}
 			}
 			return await this.dependencies.store.recover(runId, this.now());
 		} finally {
@@ -488,11 +628,11 @@ export class BuildConductor {
 				} else if (timedOut) {
 					failureMessage = `Worker execution timed out after ${this.workerTimeoutMs}ms`;
 				} else if (result.status !== "succeeded") {
-					failureMessage = result.error;
+					failureMessage = result.error ?? `Worker execution ${result.status}`;
 				}
 				let current = updateAttempt(stored, execution.attemptId, {
-					state: succeeded ? "succeeded" : "failed",
-					finishedAt: this.now(),
+					state: succeeded ? "validating" : "failed",
+					...(succeeded ? {} : { finishedAt: this.now() }),
 					...(failureMessage ? { error: failureMessage } : {}),
 				});
 				const task = current.tasks[attempt.taskId];
@@ -506,28 +646,247 @@ export class BuildConductor {
 						...current.tasks,
 						[attempt.taskId]: {
 							...task,
-							state: succeeded ? "succeeded" : "failed",
+							state: succeeded ? "validating" : "failed",
 						},
 					},
 					updatedAt: this.now(),
 				});
-				if (
-					succeeded &&
-					Object.values(current.tasks).every(
-						(item) => item.state === "succeeded",
-					)
-				) {
-					return { ...current, state: "integrating", updatedAt: this.now() };
-				}
 				return current;
 			},
 		);
-		try {
-			execution.options.onRunUpdated?.(updated);
-		} catch {
-			// UI observers must not affect persisted lifecycle state.
-		}
+		notifyRunUpdated(execution.options, updated);
 		return updated;
+	}
+
+	private async finalizeTaskAttempt(
+		execution: MonitoredExecution,
+	): Promise<BuildRun> {
+		let attempt = (
+			await this.dependencies.store.load(execution.runId)
+		).attempts.find((item) => item.id === execution.attemptId);
+		if (!attempt || attempt.state !== "validating") {
+			return this.dependencies.store.load(execution.runId);
+		}
+		const task = (await this.dependencies.store.load(execution.runId)).tasks[
+			attempt.taskId
+		];
+		if (!task) {
+			throw new Error(`Missing task for attempt ${execution.attemptId}`);
+		}
+		let releaseCommitBoundary: (() => void) | undefined;
+		try {
+			const validation = await this.dependencies.validator.validate({
+				task: task.definition,
+				attempt,
+				signal: execution.controller.signal,
+			});
+			const evidenced = await mutateStoredRun(
+				this.dependencies.store,
+				execution.runId,
+				(stored) => {
+					const storedAttempt = stored.attempts.find(
+						(item) => item.id === execution.attemptId,
+					);
+					if (
+						stored.state !== "running" ||
+						!storedAttempt ||
+						storedAttempt.state !== "validating"
+					) {
+						return stored;
+					}
+					return {
+						...updateAttempt(stored, execution.attemptId, {
+							evidence: validation.evidence,
+						}),
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(execution.options, evidenced);
+			const beforeCommit = evidenced;
+			attempt = beforeCommit.attempts.find(
+				(item) => item.id === execution.attemptId,
+			);
+			if (
+				beforeCommit.state !== "running" ||
+				!attempt ||
+				attempt.state !== "validating"
+			) {
+				return beforeCommit;
+			}
+			let releaseBoundary = () => {};
+			const completion = new Promise<void>((resolve) => {
+				releaseBoundary = resolve;
+			});
+			releaseCommitBoundary = releaseBoundary;
+			this.commitFinalizations.set(execution.attemptId, {
+				runId: execution.runId,
+				completion,
+			});
+			const commit = await this.dependencies.git.commitTaskWork(
+				attempt.worktreePath,
+				validation.snapshot,
+				`build(${attempt.taskId}): ${task.definition.title.replace(/[\r\n]+/g, " ").trim()}`,
+			);
+			let current = await mutateStoredRun(
+				this.dependencies.store,
+				execution.runId,
+				(stored) => {
+					const storedAttempt = stored.attempts.find(
+						(item) => item.id === execution.attemptId,
+					);
+					if (!storedAttempt || storedAttempt.state !== "validating") {
+						throw new Error(
+							`Attempt left validation while commit ${commit} was being created`,
+						);
+					}
+					return {
+						...updateAttempt(stored, execution.attemptId, { commit }),
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(execution.options, current);
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				attempt.worktreePath,
+			);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				execution.runId,
+				(stored) => {
+					if (stored.state === "cancelled") {
+						return stored;
+					}
+					const storedAttempt = stored.attempts.find(
+						(item) => item.id === execution.attemptId,
+					);
+					if (!storedAttempt || storedAttempt.state !== "validating") {
+						return stored;
+					}
+					const storedTask = stored.tasks[storedAttempt.taskId];
+					if (!storedTask) {
+						throw new Error(`Missing task for attempt ${execution.attemptId}`);
+					}
+					let succeeded = reconcileTaskStates({
+						...updateAttempt(stored, execution.attemptId, {
+							state: "succeeded",
+							finishedAt: this.now(),
+						}),
+						tasks: {
+							...stored.tasks,
+							[storedAttempt.taskId]: {
+								...storedTask,
+								state: "succeeded",
+							},
+						},
+						updatedAt: this.now(),
+					});
+					if (
+						Object.values(succeeded.tasks).every(
+							(item) => item.state === "succeeded",
+						)
+					) {
+						succeeded = {
+							...succeeded,
+							state: "integrating",
+							updatedAt: this.now(),
+						};
+					}
+					return succeeded;
+				},
+			);
+			notifyRunUpdated(execution.options, current);
+			return current;
+		} catch (error) {
+			let message = error instanceof Error ? error.message : String(error);
+			const evidence =
+				error instanceof TaskValidationError ? error.evidence : undefined;
+			let advancedCommit: string | undefined;
+			try {
+				const latest = await this.dependencies.store.load(execution.runId);
+				const latestAttempt = latest.attempts.find(
+					(item) => item.id === execution.attemptId,
+				);
+				if (
+					latestAttempt?.state === "validating" &&
+					latestAttempt.evidence?.passed === true &&
+					!latestAttempt.commit
+				) {
+					const branchHead = await this.dependencies.git.branchHead(
+						latest.repositoryRoot,
+						latestAttempt.branch,
+					);
+					if (branchHead !== latestAttempt.baseCommit) {
+						await this.dependencies.git.verifyTaskCommit(
+							latest.repositoryRoot,
+							latestAttempt.branch,
+							branchHead,
+							latestAttempt.baseCommit,
+						);
+						advancedCommit = branchHead;
+					}
+				}
+			} catch (reconciliationError) {
+				message += `; could not reconcile task branch: ${
+					reconciliationError instanceof Error
+						? reconciliationError.message
+						: String(reconciliationError)
+				}`;
+			}
+			const failed = await mutateStoredRun(
+				this.dependencies.store,
+				execution.runId,
+				(stored) => {
+					if (stored.state === "cancelled") {
+						return stored;
+					}
+					const storedAttempt = stored.attempts.find(
+						(item) => item.id === execution.attemptId,
+					);
+					if (!storedAttempt || storedAttempt.state !== "validating") {
+						return stored;
+					}
+					const storedTask = stored.tasks[storedAttempt.taskId];
+					const durableCommit = storedAttempt.commit ?? advancedCommit;
+					if (durableCommit) {
+						return {
+							...updateAttempt(stored, execution.attemptId, {
+								commit: durableCommit,
+								error: message,
+							}),
+							state: "failed",
+							updatedAt: this.now(),
+						};
+					}
+					let current = updateAttempt(stored, execution.attemptId, {
+						state: "failed",
+						finishedAt: this.now(),
+						error: message,
+						...(evidence ? { evidence } : {}),
+					});
+					if (storedTask) {
+						current = reconcileTaskStates({
+							...current,
+							state: "failed",
+							tasks: {
+								...current.tasks,
+								[storedAttempt.taskId]: {
+									...storedTask,
+									state: "failed",
+								},
+							},
+						});
+					}
+					return { ...current, state: "failed", updatedAt: this.now() };
+				},
+			);
+			notifyRunUpdated(execution.options, failed);
+			return failed;
+		} finally {
+			releaseCommitBoundary?.();
+			this.commitFinalizations.delete(execution.attemptId);
+		}
 	}
 
 	private async monitorExecution(
@@ -550,20 +909,31 @@ export class BuildConductor {
 			execution.controller,
 		);
 		timeout.unref();
-		const result = await this.waitForExecution(execution.completion).finally(
-			() => {
-				clearTimeout(timeout);
-				clearInterval(poll);
-				this.activeExecutions.delete(execution.attemptId);
-			},
-		);
-		const cleanupError = await this.stopWorker(execution.workerId);
-		return this.persistExecutionResult(
-			execution,
-			result,
-			cleanupError,
-			timedOut,
-		);
+		try {
+			const result = await this.waitForExecution(execution.completion).finally(
+				() => {
+					clearTimeout(timeout);
+					clearInterval(poll);
+				},
+			);
+			const cleanupError = await this.stopWorker(execution.workerId);
+			const transitioned = await this.persistExecutionResult(
+				execution,
+				result,
+				cleanupError,
+				timedOut,
+			);
+			const attempt = transitioned.attempts.find(
+				(item) => item.id === execution.attemptId,
+			);
+			return attempt?.state === "validating"
+				? await this.finalizeTaskAttempt(execution)
+				: transitioned;
+		} finally {
+			clearTimeout(timeout);
+			clearInterval(poll);
+			this.activeExecutions.delete(execution.attemptId);
+		}
 	}
 
 	private async startScheduling(
@@ -709,6 +1079,7 @@ export class BuildConductor {
 				state: "prepared",
 				branch: allocation.branch,
 				worktreePath: allocation.path,
+				baseCommit: current.baseCommit,
 				startedAt: this.now(),
 			};
 			current = await mutateStoredRun(

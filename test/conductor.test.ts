@@ -2,8 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
-import type { RepositoryInfo } from "../src/git/git.js";
+import {
+	type BuildConductorDependencies,
+	BuildConductor as ProductionBuildConductor,
+} from "../src/conductor.js";
+import type { GitClient, RepositoryInfo } from "../src/git/git.js";
 import type {
 	PrepareTaskWorktreeInput,
 	WorktreeManager,
@@ -17,8 +20,17 @@ import type {
 	WorkerExecutionResult,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
 
 const directories: string[] = [];
+
+class BuildConductor extends ProductionBuildConductor {
+	constructor(
+		dependencies: Omit<BuildConductorDependencies, "git" | "validator">,
+	) {
+		super({ ...dependencies, ...createFakeFinalizationDependencies() });
+	}
+}
 
 class FakeWorkers implements WorkerBackend {
 	readonly calls: Array<{ operation: string; value?: unknown }> = [];
@@ -118,6 +130,19 @@ class FakeWorktrees implements WorktreeManager {
 			path: "/worktree",
 		};
 	}
+
+	async removeTaskWorktree(): Promise<void> {}
+}
+
+class FailOnceWorktrees extends FakeWorktrees {
+	removeCalls = 0;
+
+	override async removeTaskWorktree(): Promise<void> {
+		this.removeCalls += 1;
+		if (this.removeCalls === 1) {
+			throw new Error("cleanup failed");
+		}
+	}
 }
 
 afterEach(async () => {
@@ -142,7 +167,7 @@ function createSingleTaskRun(conductor: BuildConductor) {
 		handoffPath: "/repo/handoff.md",
 		handoffText: "Implement the feature",
 		plan: {
-			version: 1,
+			version: 2,
 			title: "Feature",
 			tasks: [
 				{
@@ -151,6 +176,8 @@ function createSingleTaskRun(conductor: BuildConductor) {
 					description: "Implement it",
 					dependencies: [],
 					acceptanceCriteria: ["Tests pass"],
+					allowedPaths: ["src/implementation/"],
+					validationCommands: [{ command: "npm", args: ["test"] }],
 				},
 			],
 		},
@@ -183,7 +210,7 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement the feature",
 			plan: {
-				version: 1,
+				version: 2,
 				title: "Feature",
 				tasks: [
 					{
@@ -192,6 +219,8 @@ describe("BuildConductor vertical slice", () => {
 						description: "Implement it",
 						dependencies: [],
 						acceptanceCriteria: ["Tests pass"],
+						allowedPaths: ["src/implementation/"],
+						validationCommands: [{ command: "npm", args: ["test"] }],
 					},
 				],
 			},
@@ -208,6 +237,35 @@ describe("BuildConductor vertical slice", () => {
 			operation: "stop",
 			value: "worker-1",
 		});
+	});
+
+	it("retains a committed attempt when cleanup fails and recovers it without recommitting", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-cleanup-recovery-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new FakeWorkers({ status: "succeeded" });
+		const worktrees = new FailOnceWorktrees();
+		const conductor = new BuildConductor({ store, workers, worktrees });
+		const run = await createSingleTaskRun(conductor);
+
+		const launch = await conductor.approveAndLaunch(run, repository);
+		const failed = await launch.completion;
+		expect(failed.state).toBe("failed");
+		expect(failed.attempts[0]).toMatchObject({
+			state: "validating",
+			commit: expect.any(String),
+			error: "cleanup failed",
+		});
+
+		const recovered = await conductor.recoverRun(run.id);
+		expect(recovered.state).toBe("integrating");
+		expect(recovered.attempts[0]).toMatchObject({
+			state: "succeeded",
+			commit: failed.attempts[0]?.commit,
+		});
+		expect(worktrees.removeCalls).toBe(2);
 	});
 
 	it("records worker failures and cleans up the process", async () => {
@@ -328,6 +386,58 @@ describe("BuildConductor vertical slice", () => {
 		]);
 	});
 
+	it("serializes cancellation after a commit that has already started", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-commit-cancel-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new FakeWorkers({ status: "succeeded" });
+		const finalization = createFakeFinalizationDependencies();
+		let releaseCommit = () => {};
+		let markCommitStarted = () => {};
+		const commitGate = new Promise<void>((resolve) => {
+			releaseCommit = resolve;
+		});
+		const commitStarted = new Promise<void>((resolve) => {
+			markCommitStarted = resolve;
+		});
+		const git = {
+			...finalization.git,
+			async commitTaskWork(): Promise<string> {
+				markCommitStarted();
+				await commitGate;
+				return "commit-1";
+			},
+		} as GitClient;
+		const conductor = new ProductionBuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+			git,
+			validator: finalization.validator,
+		});
+		const run = await createSingleTaskRun(conductor);
+		const launch = await conductor.approveAndLaunch(run, repository);
+		await commitStarted;
+
+		const cancellation = conductor.cancelRun(launch.run);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect((await store.load(run.id)).state).toBe("running");
+		releaseCommit();
+
+		const [cancelled, completed] = await Promise.all([
+			cancellation,
+			launch.completion,
+		]);
+		expect(cancelled.state).toBe("cancelled");
+		expect(completed.state).toBe("integrating");
+		expect(cancelled.attempts[0]).toMatchObject({
+			state: "succeeded",
+			commit: "commit-1",
+		});
+	});
+
 	it("preserves cancellation while a prompt is starting", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-start-cancel-"),
@@ -374,7 +484,7 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement independent tasks",
 			plan: {
-				version: 1,
+				version: 2,
 				title: "Concurrent work",
 				tasks: [
 					{
@@ -383,6 +493,8 @@ describe("BuildConductor vertical slice", () => {
 						description: "Implement first",
 						dependencies: [],
 						acceptanceCriteria: ["First works"],
+						allowedPaths: ["src/first/"],
+						validationCommands: [{ command: "npm", args: ["test"] }],
 					},
 					{
 						id: "second",
@@ -390,6 +502,8 @@ describe("BuildConductor vertical slice", () => {
 						description: "Implement second",
 						dependencies: [],
 						acceptanceCriteria: ["Second works"],
+						allowedPaths: ["src/second/"],
+						validationCommands: [{ command: "npm", args: ["test"] }],
 					},
 					{
 						id: "third",
@@ -397,6 +511,8 @@ describe("BuildConductor vertical slice", () => {
 						description: "Implement third",
 						dependencies: [],
 						acceptanceCriteria: ["Third works"],
+						allowedPaths: ["src/third/"],
+						validationCommands: [{ command: "npm", args: ["test"] }],
 					},
 				],
 			},
@@ -442,7 +558,7 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement the feature",
 			plan: {
-				version: 1,
+				version: 2,
 				title: "Feature",
 				tasks: [
 					{
@@ -451,6 +567,8 @@ describe("BuildConductor vertical slice", () => {
 						description: "Implement it",
 						dependencies: [],
 						acceptanceCriteria: ["Tests pass"],
+						allowedPaths: ["src/implementation/"],
+						validationCommands: [{ command: "npm", args: ["test"] }],
 					},
 				],
 			},
