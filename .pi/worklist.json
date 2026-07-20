@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "goals": [
+    {
+      "id": "goal-mrtf3zlv-a6a0e476",
+      "title": "Establish maintained Pi orchestrator fork",
+      "description": "Fork the full earendil-works/pi monorepo, keep main synchronized with upstream, maintain an orchestrator-compat branch, fix rpc-entry resolution and CLI packaging, run compatibility smoke tests, and submit focused fixes upstream.",
+      "status": "active",
+      "createdAt": "2026-07-20T16:07:12.643Z",
+      "updatedAt": "2026-07-20T16:08:00.474Z"
+    },
+    {
+      "id": "goal-mrtf4hh0-8928b98a",
+      "title": "Complete worker lifecycle monitoring",
+      "description": "Consume orchestrator events and status, detect completion and failure, expose live Pi UI updates, support cancellation and timeouts, and clean up worker processes deterministically.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:35.796Z",
+      "updatedAt": "2026-07-20T16:07:35.796Z"
+    },
+    {
+      "id": "goal-mrtf4j23-33a2c776",
+      "title": "Implement bounded dependency-aware concurrency",
+      "description": "Launch two to four isolated workers from the ready queue, enforce dependency and concurrency limits, avoid duplicate dispatch, and schedule newly unblocked tasks deterministically.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:37.851Z",
+      "updatedAt": "2026-07-20T16:07:37.851Z"
+    },
+    {
+      "id": "goal-mrtf4knn-ecb152e7",
+      "title": "Validate and commit task work",
+      "description": "Inspect worker diffs, enforce task scope, run focused validation, reject unsafe output, create coherent conductor-owned commits, record evidence, and clean up completed task worktrees.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:39.923Z",
+      "updatedAt": "2026-07-20T16:07:39.923Z"
+    },
+    {
+      "id": "goal-mrtf4m6v-486a112c",
+      "title": "Build deterministic sequential integration",
+      "description": "Integrate validated task commits in dependency order on the separate integration branch, refresh task bases after dependencies land, handle conflicts safely, and never merge into the user branch.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:41.911Z",
+      "updatedAt": "2026-07-20T16:07:41.911Z"
+    },
+    {
+      "id": "goal-mrtf4nqy-8bdb9199",
+      "title": "Add independent review and repair passes",
+      "description": "Launch fresh reviewer agents for correctness, security, maintainability, tests, and documentation, prioritize findings, and apply important fixes through isolated repair attempts.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:43.930Z",
+      "updatedAt": "2026-07-20T16:07:43.930Z"
+    },
+    {
+      "id": "goal-mrtf4pcp-951916e0",
+      "title": "Deliver final validation and merge-ready evidence",
+      "description": "Run the complete configured test and lint suite on the integration branch, verify repository cleanliness and history, and report the final branch, commits, reviews, tests, and remaining risks.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:46.009Z",
+      "updatedAt": "2026-07-20T16:07:46.009Z"
+    },
+    {
+      "id": "goal-mrtf4qyc-e58a8184",
+      "title": "Harden restart recovery and idempotency",
+      "description": "Add locked state transitions, schema migrations, daemon restart reconciliation, idempotent retries, orphan branch and worktree cleanup, and safe resume behavior across every run phase.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:48.084Z",
+      "updatedAt": "2026-07-20T16:07:48.084Z"
+    },
+    {
+      "id": "goal-mrtf4swz-f12261f9",
+      "title": "Improve plan editing and approval experience",
+      "description": "Provide structured DAG visualization and editing, clear validation feedback, configurable worker limits, persisted plan revisions, and a concise final approval summary before side effects.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:50.627Z",
+      "updatedAt": "2026-07-20T16:07:50.627Z"
+    },
+    {
+      "id": "goal-mrtf4und-fa85808e",
+      "title": "Add run inspection and control commands",
+      "description": "Add commands and UI for listing runs, viewing task and attempt details, following worker output, retrying or cancelling work, pruning completed resources, and resuming interrupted runs.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:52.873Z",
+      "updatedAt": "2026-07-20T16:07:52.873Z"
+    },
+    {
+      "id": "goal-mrtf4w5v-fa87f418",
+      "title": "Expand end-to-end and fault-injection coverage",
+      "description": "Test real Pi and orchestrator workflows, concurrent scheduling, crashes at each state boundary, Git conflicts, worker failures, malformed state, cancellation, recovery, and platform-specific worktree behavior.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:54.835Z",
+      "updatedAt": "2026-07-20T16:07:54.835Z"
+    },
+    {
+      "id": "goal-mrtf4xj5-ace1989f",
+      "title": "Package release and CI automation",
+      "description": "Add GitHub Actions for checks and upstream compatibility, define versioning and release workflows, validate GitHub installation, prepare npm publication when appropriate, and document supported Pi and orchestrator versions.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:56.609Z",
+      "updatedAt": "2026-07-20T16:07:56.609Z"
+    },
+    {
+      "id": "goal-mrtf4yxl-017cc555",
+      "title": "Define sandbox and permission policy",
+      "description": "Document the worker trust model, add optional sandbox integration, constrain credentials and destructive tools where possible, and make security boundaries explicit in prompts, configuration, and reports.",
+      "status": "open",
+      "createdAt": "2026-07-20T16:07:58.424Z",
+      "updatedAt": "2026-07-20T16:07:58.424Z"
+    }
+  ]
+}
