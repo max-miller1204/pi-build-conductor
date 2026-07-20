@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { topologicalTaskIds } from "./domain/dag.js";
 import { approveRun, createBuildRun } from "./domain/run.js";
 import {
 	getLaunchableTaskIds,
@@ -125,6 +126,10 @@ When finished, summarize changed files and test evidence.`;
 const runMutationTails = new Map<string, Promise<void>>();
 const activeSchedulingRuns = new Set<string>();
 const recoveringRuns = new Set<string>();
+const lifecycleFinalizations = new Map<
+	string,
+	{ runKey: string; completion: Promise<void> }
+>();
 
 function schedulingKey(store: RunStore, runId: string): string {
 	return `${store.directory}:${runId}`;
@@ -180,6 +185,35 @@ function updateAttempt(
 	};
 }
 
+function expectedIntegrationHead(run: BuildRun): string {
+	let head = run.baseCommit;
+	for (const taskId of topologicalTaskIds(run.plan)) {
+		const integratedCommit = run.tasks[taskId]?.integratedCommit;
+		if (!integratedCommit) {
+			break;
+		}
+		head = integratedCommit;
+	}
+	return head;
+}
+
+function succeededTaskAttempt(
+	run: BuildRun,
+	taskId: string,
+): TaskAttempt | undefined {
+	const task = run.tasks[taskId];
+	if (!task) {
+		return undefined;
+	}
+	const attemptIds = new Set(task.attemptIds);
+	return run.attempts.findLast(
+		(attempt) =>
+			attemptIds.has(attempt.id) &&
+			attempt.state === "succeeded" &&
+			attempt.commit !== undefined,
+	);
+}
+
 export class BuildConductor {
 	private readonly now: () => string;
 	private readonly workerTimeoutMs: number;
@@ -192,11 +226,6 @@ export class BuildConductor {
 		string,
 		Promise<string | undefined>
 	>();
-	private readonly commitFinalizations = new Map<
-		string,
-		{ runId: string; completion: Promise<void> }
-	>();
-
 	constructor(private readonly dependencies: BuildConductorDependencies) {
 		this.now = dependencies.now ?? (() => new Date().toISOString());
 		this.workerTimeoutMs =
@@ -232,9 +261,10 @@ export class BuildConductor {
 	}
 
 	async cancelRun(run: BuildRun): Promise<BuildRun> {
-		const committing = [...this.commitFinalizations.values()].flatMap(
+		const runKey = schedulingKey(this.dependencies.store, run.id);
+		const committing = [...lifecycleFinalizations.values()].flatMap(
 			(finalization) =>
-				finalization.runId === run.id ? [finalization.completion] : [],
+				finalization.runKey === runKey ? [finalization.completion] : [],
 		);
 		if (committing.length > 0) {
 			await Promise.all(committing);
@@ -441,11 +471,20 @@ export class BuildConductor {
 							) {
 								return stored;
 							}
-							let recovered = reconcileTaskStates({
+							const hasOtherFailedTask = Object.entries(stored.tasks).some(
+								([taskId, task]) =>
+									taskId !== attempt.taskId &&
+									["failed", "cancelled"].includes(task.state),
+							);
+							return reconcileTaskStates({
 								...updateAttempt(stored, attempt.id, {
 									state: "succeeded",
 									finishedAt: this.now(),
 								}),
+								state:
+									stored.state === "failed" && !hasOtherFailedTask
+										? "running"
+										: stored.state,
 								tasks: {
 									...stored.tasks,
 									[attempt.taskId]: {
@@ -455,18 +494,6 @@ export class BuildConductor {
 								},
 								updatedAt: this.now(),
 							});
-							if (
-								Object.values(recovered.tasks).every(
-									(item) => item.state === "succeeded",
-								)
-							) {
-								recovered = {
-									...recovered,
-									state: "integrating",
-									updatedAt: this.now(),
-								};
-							}
-							return recovered;
 						},
 					);
 				} catch (error) {
@@ -500,7 +527,35 @@ export class BuildConductor {
 					);
 				}
 			}
-			return await this.dependencies.store.recover(runId, this.now());
+			let recovered = await this.dependencies.store.recover(runId, this.now());
+			if (
+				recovered.state === "integrating" &&
+				Object.values(recovered.tasks).some((task) => !task.integratedCommit)
+			) {
+				recovered = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) => ({ ...stored, state: "running", updatedAt: this.now() }),
+				);
+			}
+			if (recovered.state === "integrating") {
+				const recordedHead = expectedIntegrationHead(recovered);
+				const actualHead = await this.dependencies.git.branchHead(
+					recovered.repositoryRoot,
+					recovered.integrationBranch,
+				);
+				if (actualHead !== recordedHead) {
+					throw new Error(
+						`Integration branch ${recovered.integrationBranch} is at ${actualHead}, expected ${recordedHead}`,
+					);
+				}
+			}
+			return recovered.state === "running" &&
+				!recovered.attempts.some((attempt) =>
+					isActiveAttemptState(attempt.state),
+				)
+				? await this.integrateAvailableTasks(runId, {})
+				: recovered;
 		} finally {
 			recoveringRuns.delete(key);
 		}
@@ -719,8 +774,9 @@ export class BuildConductor {
 				releaseBoundary = resolve;
 			});
 			releaseCommitBoundary = releaseBoundary;
-			this.commitFinalizations.set(execution.attemptId, {
-				runId: execution.runId,
+			const boundaryId = `${schedulingKey(this.dependencies.store, execution.runId)}:commit:${execution.attemptId}`;
+			lifecycleFinalizations.set(boundaryId, {
+				runKey: schedulingKey(this.dependencies.store, execution.runId),
 				completion,
 			});
 			const commit = await this.dependencies.git.commitTaskWork(
@@ -768,7 +824,7 @@ export class BuildConductor {
 					if (!storedTask) {
 						throw new Error(`Missing task for attempt ${execution.attemptId}`);
 					}
-					let succeeded = reconcileTaskStates({
+					return reconcileTaskStates({
 						...updateAttempt(stored, execution.attemptId, {
 							state: "succeeded",
 							finishedAt: this.now(),
@@ -782,18 +838,6 @@ export class BuildConductor {
 						},
 						updatedAt: this.now(),
 					});
-					if (
-						Object.values(succeeded.tasks).every(
-							(item) => item.state === "succeeded",
-						)
-					) {
-						succeeded = {
-							...succeeded,
-							state: "integrating",
-							updatedAt: this.now(),
-						};
-					}
-					return succeeded;
 				},
 			);
 			notifyRunUpdated(execution.options, current);
@@ -885,7 +929,8 @@ export class BuildConductor {
 			return failed;
 		} finally {
 			releaseCommitBoundary?.();
-			this.commitFinalizations.delete(execution.attemptId);
+			const boundaryId = `${schedulingKey(this.dependencies.store, execution.runId)}:commit:${execution.attemptId}`;
+			lifecycleFinalizations.delete(boundaryId);
 		}
 	}
 
@@ -933,6 +978,127 @@ export class BuildConductor {
 			clearTimeout(timeout);
 			clearInterval(poll);
 			this.activeExecutions.delete(execution.attemptId);
+		}
+	}
+
+	private async integrateAvailableTasks(
+		runId: string,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		while (true) {
+			let current = await this.dependencies.store.load(runId);
+			if (current.state !== "running") {
+				return current;
+			}
+			const taskId = topologicalTaskIds(current.plan).find(
+				(id) => !current.tasks[id]?.integratedCommit,
+			);
+			if (!taskId) {
+				current = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) =>
+						stored.state === "running" &&
+						Object.values(stored.tasks).every((task) => task.integratedCommit)
+							? { ...stored, state: "integrating", updatedAt: this.now() }
+							: stored,
+				);
+				notifyRunUpdated(options, current);
+				return current;
+			}
+			const task = current.tasks[taskId];
+			if (!task || task.state !== "succeeded") {
+				return current;
+			}
+			const attempt = succeededTaskAttempt(current, taskId);
+			if (!attempt?.commit) {
+				throw new Error(`Succeeded task ${taskId} has no committed attempt`);
+			}
+			const expectedHead = expectedIntegrationHead(current);
+			const runKey = schedulingKey(this.dependencies.store, runId);
+			const boundaryId = `${runKey}:integration:${taskId}`;
+			let releaseBoundary = () => {};
+			const completion = new Promise<void>((resolve) => {
+				releaseBoundary = resolve;
+			});
+			lifecycleFinalizations.set(boundaryId, { runKey, completion });
+			try {
+				await this.dependencies.git.verifyTaskCommit(
+					current.repositoryRoot,
+					attempt.branch,
+					attempt.commit,
+					attempt.baseCommit,
+				);
+				const integratedCommit = await this.dependencies.git.integrateCommit(
+					current.repositoryRoot,
+					current.integrationBranch,
+					expectedHead,
+					attempt.commit,
+				);
+				current = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) => {
+						const storedTask = stored.tasks[taskId];
+						if (
+							stored.state !== "running" ||
+							!storedTask ||
+							storedTask.state !== "succeeded" ||
+							storedTask.integratedCommit
+						) {
+							throw new Error(
+								`Task ${taskId} changed while its commit was being integrated`,
+							);
+						}
+						const { integrationError: _integrationError, ...taskWithoutError } =
+							storedTask;
+						return {
+							...stored,
+							tasks: {
+								...stored.tasks,
+								[taskId]: { ...taskWithoutError, integratedCommit },
+							},
+							updatedAt: this.now(),
+						};
+					},
+				);
+				notifyRunUpdated(options, current);
+			} catch (error) {
+				const message = `Failed to integrate task ${taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`;
+				const failed = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) => {
+						if (stored.state === "cancelled") {
+							return stored;
+						}
+						const storedTask = stored.tasks[taskId];
+						if (!storedTask) {
+							return { ...stored, state: "failed", updatedAt: this.now() };
+						}
+						return reconcileTaskStates({
+							...stored,
+							state: "failed",
+							tasks: {
+								...stored.tasks,
+								[taskId]: {
+									...storedTask,
+									state: "failed",
+									integrationError: message,
+								},
+							},
+							updatedAt: this.now(),
+						});
+					},
+				);
+				notifyRunUpdated(options, failed);
+				return failed;
+			} finally {
+				releaseBoundary();
+				lifecycleFinalizations.delete(boundaryId);
+			}
 		}
 	}
 
@@ -992,6 +1158,24 @@ export class BuildConductor {
 			if (active.size > 0) {
 				const settledAttemptId = await Promise.race(active.values());
 				active.delete(settledAttemptId);
+			}
+			const integrated = await this.integrateAvailableTasks(runId, options);
+			if (integrated.state !== "running") {
+				if (
+					Object.values(integrated.tasks).some((task) => task.integrationError)
+				) {
+					for (const execution of this.activeExecutions.values()) {
+						if (execution.runId === runId) {
+							execution.controller.abort(
+								new Error("Run stopped after an integration failure"),
+							);
+						}
+					}
+				}
+				if (active.size === 0) {
+					return integrated;
+				}
+				continue;
 			}
 			const dispatched = await this.dispatchAvailableTasks(
 				runId,
@@ -1065,12 +1249,22 @@ export class BuildConductor {
 				throw new Error(`Task disappeared from run state: ${taskId}`);
 			}
 			const attemptNumber = taskRecord.attemptIds.length + 1;
+			const integrationHead = expectedIntegrationHead(current);
+			const actualIntegrationHead = await this.dependencies.git.branchHead(
+				current.repositoryRoot,
+				current.integrationBranch,
+			);
+			if (actualIntegrationHead !== integrationHead) {
+				throw new Error(
+					`Integration branch ${current.integrationBranch} moved from expected head ${integrationHead} to ${actualIntegrationHead}`,
+				);
+			}
 			const allocation = await this.dependencies.worktrees.prepareTaskWorktree({
 				repository,
 				runId: current.id,
 				taskId,
 				attemptNumber,
-				startPoint: current.integrationBranch,
+				startPoint: integrationHead,
 			});
 			const attempt: TaskAttempt = {
 				id: `${taskId}-${attemptNumber}-${randomUUID().slice(0, 8)}`,
@@ -1079,7 +1273,7 @@ export class BuildConductor {
 				state: "prepared",
 				branch: allocation.branch,
 				worktreePath: allocation.path,
-				baseCommit: current.baseCommit,
+				baseCommit: integrationHead,
 				startedAt: this.now(),
 			};
 			current = await mutateStoredRun(

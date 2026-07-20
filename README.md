@@ -27,11 +27,14 @@ Implemented:
 - Approved per-task path scopes and focused validation commands
 - Conductor-controlled diff inspection, focused checks, and coherent task commits
 - Durable changed-file, diff fingerprint, check, and commit evidence
+- Deterministic sequential cherry-pick integration on a separate branch
+- Dependency worktrees refreshed from the latest integrated dependency commits
+- Conflict-safe detached integration without changing the user branch
 - Successful worktree cleanup with failed worktrees retained for inspection
 - Live Pi status and widget updates for worker progress and terminal state
 - Tests for DAG validation, scheduling, recovery, Git isolation, validation, conductor-owned commits, worker launch, completion, failure, timeout, and cancellation
 
-Sequential integration, reviewer agents, and final full-suite validation are the next implementation stages.
+Reviewer agents and final full-suite validation are the next implementation stages.
 
 ## Architecture
 
@@ -117,7 +120,10 @@ The command performs these steps:
 15. Re-inspects the worktree to reject checks that changed worker output.
 16. Creates one conductor-owned task commit, records its hash and validation evidence, and removes the successful worktree while retaining its branch.
 17. Retains failed worktrees for inspection and blocks dependent tasks after validation or commit failure.
-18. Refills available slots only after successful validation, commit creation, and cleanup unblock downstream work.
+18. Cherry-picks validated commits onto the integration branch in deterministic topological order.
+19. Starts dependent task worktrees from the refreshed integration head after their dependencies land.
+20. Aborts conflicting cherry-picks without advancing the integration branch or changing the user branch.
+21. Refills available slots only after successful validation, commit creation, cleanup, and required dependency integration unblock downstream work.
 
 Worker executions time out after one hour by default.
 Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
@@ -186,11 +192,12 @@ A validating attempt with a recorded task commit is verified and cleanup is retr
 - Active uncommitted attempts are marked interrupted and retryable during recovery.
 - A conductor-owned commit and its passing evidence are persisted before successful worktree cleanup.
 - Failed validation worktrees are retained for inspection.
-- Successful task branches and commits are retained for later integration.
+- Successful task branches and source commits are retained after integration.
 - Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.
-- Integration is designed to occur sequentially on a separate integration branch.
-- A dependent task does not yet receive a predecessor's uncommitted worktree changes.
-- Plans should use dependencies to gate execution, while implementation that requires predecessor output should wait for the sequential integration stage.
+- Validated task commits are cherry-picked sequentially in deterministic topological order on the separate integration branch.
+- Dependent task worktrees start from the refreshed integration head after all dependencies land.
+- Cherry-picks use detached temporary worktrees and an atomic compare-and-swap branch update, so conflicts leave the integration branch at its last good commit.
+- The user branch is never checked out, merged, reset, or advanced by integration.
 - The current MVP does not claim a branch is merge-ready because final reviews and full validation are not implemented yet.
 
 ## Development

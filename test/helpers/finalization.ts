@@ -19,6 +19,7 @@ export function createFakeFinalizationDependencies(): {
 	git: GitClient;
 	validator: TaskValidator;
 } {
+	const integrationHeads = new Map<string, string>();
 	const validator: TaskValidator = {
 		async validate(input) {
 			const path = changedPath(input);
@@ -57,10 +58,26 @@ export function createFakeFinalizationDependencies(): {
 		): Promise<string> {
 			return `commit-${snapshot.diffHash}`;
 		},
-		async branchHead(): Promise<string> {
-			return "recovered-commit";
+		async branchHead(_repositoryRoot: string, branch: string): Promise<string> {
+			return branch.endsWith("/integration")
+				? (integrationHeads.get(branch) ?? "abc123")
+				: "recovered-commit";
 		},
 		async verifyTaskCommit(): Promise<void> {},
+		async integrateCommit(
+			_repositoryRoot: string,
+			branch: string,
+			expectedHead: string,
+			commit: string,
+		): Promise<string> {
+			const actualHead = integrationHeads.get(branch) ?? "abc123";
+			if (actualHead !== expectedHead) {
+				throw new Error(`Unexpected integration head ${actualHead}`);
+			}
+			const integratedCommit = `integrated-${commit}`;
+			integrationHeads.set(branch, integratedCommit);
+			return integratedCommit;
+		},
 	} as unknown as GitClient;
 	return { git, validator };
 }

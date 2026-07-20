@@ -410,18 +410,21 @@ describe("BuildConductor vertical slice", () => {
 				return "commit-1";
 			},
 		} as GitClient;
-		const conductor = new ProductionBuildConductor({
+		const worktrees = new FakeWorktrees();
+		const dependencies = {
 			store,
 			workers,
-			worktrees: new FakeWorktrees(),
+			worktrees,
 			git,
 			validator: finalization.validator,
-		});
+		};
+		const conductor = new ProductionBuildConductor(dependencies);
+		const cancellingConductor = new ProductionBuildConductor(dependencies);
 		const run = await createSingleTaskRun(conductor);
 		const launch = await conductor.approveAndLaunch(run, repository);
 		await commitStarted;
 
-		const cancellation = conductor.cancelRun(launch.run);
+		const cancellation = cancellingConductor.cancelRun(launch.run);
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect((await store.load(run.id)).state).toBe("running");
 		releaseCommit();
@@ -431,11 +434,12 @@ describe("BuildConductor vertical slice", () => {
 			launch.completion,
 		]);
 		expect(cancelled.state).toBe("cancelled");
-		expect(completed.state).toBe("integrating");
+		expect(completed.state).toBe("cancelled");
 		expect(cancelled.attempts[0]).toMatchObject({
 			state: "succeeded",
 			commit: "commit-1",
 		});
+		expect(cancelled.tasks.implementation?.integratedCommit).toBeUndefined();
 	});
 
 	it("preserves cancellation while a prompt is starting", async () => {
@@ -587,9 +591,7 @@ describe("BuildConductor vertical slice", () => {
 			workerId: "worker-1",
 			worktreePath: "/worktree",
 		});
-		expect(worktrees.allocationInput?.startPoint).toBe(
-			result.run.integrationBranch,
-		);
+		expect(worktrees.allocationInput?.startPoint).toBe(repository.head);
 		expect(workers.calls[0]).toEqual({
 			operation: "spawn",
 			value: {

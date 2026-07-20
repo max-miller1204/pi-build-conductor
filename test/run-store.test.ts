@@ -70,6 +70,13 @@ describe("RunStore", () => {
 		expect(await store.list()).toEqual([run]);
 	});
 
+	it("rejects an integration branch outside the run namespace", () => {
+		const run = createRun();
+		expect(() =>
+			validateStoredRun({ ...run, integrationBranch: run.baseBranch }),
+		).toThrow(/run\.integrationBranch must be conductor\/run-1\/integration/);
+	});
+
 	it("rejects malformed attempt records", () => {
 		const run = createRun();
 		expect(() =>

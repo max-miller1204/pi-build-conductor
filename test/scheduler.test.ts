@@ -50,6 +50,9 @@ function runWith(
 					definition: item,
 					state: states[item.id] ?? "planned",
 					attemptIds: [],
+					...(states[item.id] === "succeeded"
+						? { integratedCommit: `integrated-${item.id}` }
+						: {}),
 				},
 			]),
 		),

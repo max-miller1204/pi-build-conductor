@@ -112,6 +112,7 @@ export interface RunTask {
 	state: TaskState;
 	attemptIds: string[];
 	integratedCommit?: string;
+	integrationError?: string;
 }
 
 export interface HandoffRecord {

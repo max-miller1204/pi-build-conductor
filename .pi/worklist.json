@@ -37,9 +37,9 @@
       "id": "goal-mrtf4m6v-486a112c",
       "title": "Build deterministic sequential integration",
       "description": "Integrate validated task commits in dependency order on the separate integration branch, refresh task bases after dependencies land, handle conflicts safely, and never merge into the user branch.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:41.911Z",
-      "updatedAt": "2026-07-20T16:07:41.911Z"
+      "updatedAt": "2026-07-20T22:48:47.503Z"
     },
     {
       "id": "goal-mrtf4nqy-8bdb9199",

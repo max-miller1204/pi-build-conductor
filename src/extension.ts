@@ -273,7 +273,11 @@ function showCompletion(
 		const commit = attempt.commit
 			? `, commit ${attempt.commit.slice(0, 12)}`
 			: "";
-		return `${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit})`;
+		const integratedCommit = run.tasks[attempt.taskId]?.integratedCommit;
+		const integrated = integratedCommit
+			? `, integrated ${integratedCommit.slice(0, 12)}`
+			: "";
+		return `${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit}${integrated})`;
 	});
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
@@ -285,10 +289,10 @@ function showCompletion(
 	if (run.state === "integrating") {
 		ctx.ui.setStatus(
 			runUiKey(run.id),
-			"validated task commits ready for integration",
+			"task commits integrated and ready for review",
 		);
 		ctx.ui.notify(
-			`All task changes were validated and committed for build ${run.id}`,
+			`All task changes were integrated on ${run.integrationBranch}`,
 			"info",
 		);
 		return;
@@ -299,8 +303,16 @@ function showCompletion(
 		return;
 	}
 	const failure = run.attempts.find((attempt) => attempt.state === "failed");
+	const integrationFailure = Object.values(run.tasks).find(
+		(task) => task.integrationError,
+	);
 	ctx.ui.setStatus(runUiKey(run.id), "build failed");
-	ctx.ui.notify(failure?.error ?? `Build ${run.id} failed`, "error");
+	ctx.ui.notify(
+		integrationFailure?.integrationError ??
+			failure?.error ??
+			`Build ${run.id} failed`,
+		"error",
+	);
 }
 
 function showLaunch(
@@ -496,6 +508,18 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					throw new Error(
 						"Repository changed during recovery. Resume again from a clean, unchanged branch.",
 					);
+				}
+				if (recovered.state === "integrating") {
+					ctx.ui.setStatus(
+						runUiKey(runId),
+						"task commits integrated and ready for review",
+					);
+					ctx.ui.setStatus("pi-build-conductor", undefined);
+					ctx.ui.notify(
+						`Build ${runId} is integrated on ${recovered.integrationBranch}`,
+						"info",
+					);
+					return;
 				}
 				ctx.ui.setStatus("pi-build-conductor", "launching retries");
 				const result = await conductor.resumeAndLaunch(

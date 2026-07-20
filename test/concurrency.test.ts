@@ -259,6 +259,29 @@ describe("bounded dependency-aware concurrency", () => {
 		expect((await result.completion).state).toBe("integrating");
 	});
 
+	it("refills a slot with a dependent while an unrelated worker is still running", async () => {
+		const { conductor, run, workers } = await setup([
+			task("foundation"),
+			task("dependent", ["foundation"]),
+			task("unrelated"),
+		]);
+		const result = await conductor.approveAndLaunch(run, repository);
+		expect(workers.startOrder).toEqual(["foundation", "unrelated"]);
+
+		workers.settle("foundation", { status: "succeeded" });
+		await vi.waitFor(() =>
+			expect(workers.startOrder).toEqual([
+				"foundation",
+				"unrelated",
+				"dependent",
+			]),
+		);
+		workers.settle("dependent", { status: "succeeded" });
+		workers.settle("unrelated", { status: "succeeded" });
+
+		expect((await result.completion).state).toBe("integrating");
+	});
+
 	it("supports a four-worker bound with isolated workers and worktrees", async () => {
 		const { conductor, run, workers, worktrees } = await setup(
 			[task("one"), task("two"), task("three"), task("four"), task("five")],

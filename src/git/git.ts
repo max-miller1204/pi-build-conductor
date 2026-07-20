@@ -59,6 +59,12 @@ export interface GitClient {
 		commit: string,
 		baseCommit: string,
 	): Promise<void>;
+	integrateCommit(
+		repositoryRoot: string,
+		branch: string,
+		expectedHead: string,
+		commit: string,
+	): Promise<string>;
 	commitAll(worktreePath: string, message: string): Promise<string>;
 	cherryPick(worktreePath: string, commit: string): Promise<void>;
 }
@@ -543,6 +549,96 @@ export class GitCli implements GitClient {
 				`Task commit ${commit} does not have expected parent ${baseCommit}`,
 			);
 		}
+	}
+
+	async integrateCommit(
+		repositoryRoot: string,
+		branch: string,
+		expectedHead: string,
+		commit: string,
+	): Promise<string> {
+		const repository = await this.inspect(repositoryRoot);
+		if (repository.currentBranch === branch) {
+			throw new Error(
+				`Refusing to integrate into checked-out user branch ${branch}`,
+			);
+		}
+		const actualHead = await this.branchHead(repositoryRoot, branch);
+		if (actualHead !== expectedHead) {
+			throw new Error(
+				`Integration branch ${branch} moved from expected head ${expectedHead} to ${actualHead}`,
+			);
+		}
+		const temporaryRoot = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-integration-"),
+		);
+		const worktreePath = join(temporaryRoot, "worktree");
+		let worktreeAdded = false;
+		let temporaryRootRemoved = false;
+		let integratedCommit: string | undefined;
+		let operationError: unknown;
+		try {
+			await this.execute(repositoryRoot, [
+				"worktree",
+				"add",
+				"--detach",
+				worktreePath,
+				expectedHead,
+			]);
+			worktreeAdded = true;
+			try {
+				await this.cherryPick(worktreePath, commit);
+			} catch (error) {
+				try {
+					await this.execute(worktreePath, ["cherry-pick", "--abort"]);
+				} catch {
+					// Forced worktree removal below clears any remaining conflict state.
+				}
+				throw error;
+			}
+			integratedCommit = await this.execute(worktreePath, [
+				"rev-parse",
+				"HEAD",
+			]);
+			await this.removeWorktree(repositoryRoot, worktreePath);
+			worktreeAdded = false;
+			await rm(temporaryRoot, { recursive: true, force: true });
+			temporaryRootRemoved = true;
+			await this.execute(repositoryRoot, [
+				"update-ref",
+				`refs/heads/${branch}`,
+				integratedCommit,
+				expectedHead,
+			]);
+		} catch (error) {
+			operationError = error;
+		}
+
+		let cleanupError: unknown;
+		if (worktreeAdded) {
+			try {
+				await this.removeWorktree(repositoryRoot, worktreePath);
+			} catch (error) {
+				cleanupError = error;
+			}
+		}
+		if (!temporaryRootRemoved) {
+			try {
+				await rm(temporaryRoot, { recursive: true, force: true });
+			} catch (error) {
+				cleanupError ??= error;
+			}
+		}
+		if (operationError) {
+			throw operationError;
+		}
+		if (cleanupError) {
+			throw cleanupError;
+		}
+		if (!integratedCommit) {
+			throw new Error(`Git did not create an integration commit for ${commit}`);
+		}
+		return integratedCommit;
 	}
 
 	async commitAll(worktreePath: string, message: string): Promise<string> {

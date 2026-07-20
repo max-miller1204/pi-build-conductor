@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { validateTaskPlan } from "../domain/dag.js";
+import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
@@ -147,6 +147,15 @@ export function validateStoredRun(value: unknown): BuildRun {
 	] as const) {
 		assertString(value[field], `run.${field}`);
 	}
+	const expectedIntegrationBranch = `conductor/${value.id}/integration`;
+	if (value.integrationBranch !== expectedIntegrationBranch) {
+		throw new Error(
+			`run.integrationBranch must be ${expectedIntegrationBranch}`,
+		);
+	}
+	if (value.integrationBranch === value.baseBranch) {
+		throw new Error("run.integrationBranch must differ from run.baseBranch");
+	}
 	const plan = validateTaskPlan(value.plan);
 	if (!isRecord(value.tasks)) {
 		throw new Error("run.tasks must be an object");
@@ -172,6 +181,39 @@ export function validateStoredRun(value: unknown): BuildRun {
 			task.attemptIds.some((attemptId) => typeof attemptId !== "string")
 		) {
 			throw new Error(`Invalid attempt ids for task ${id}`);
+		}
+		for (const field of ["integratedCommit", "integrationError"] as const) {
+			if (task[field] !== undefined) {
+				assertString(task[field], `run.tasks.${id}.${field}`);
+			}
+		}
+		if (
+			task.integratedCommit !== undefined &&
+			task.integrationError !== undefined
+		) {
+			throw new Error(
+				`Task ${id} cannot have both an integrated commit and integration error`,
+			);
+		}
+		if (task.integratedCommit !== undefined && task.state !== "succeeded") {
+			throw new Error(`Integrated task ${id} must be succeeded`);
+		}
+		if (task.integrationError !== undefined && task.state !== "failed") {
+			throw new Error(`Task ${id} has an integration error without failing`);
+		}
+	}
+	let foundUnintegratedTask = false;
+	for (const taskId of topologicalTaskIds(plan)) {
+		const task = value.tasks[taskId];
+		if (!isRecord(task)) {
+			continue;
+		}
+		if (task.integratedCommit === undefined) {
+			foundUnintegratedTask = true;
+		} else if (foundUnintegratedTask) {
+			throw new Error(
+				`Integrated tasks must form a deterministic topological prefix; ${taskId} is out of order`,
+			);
 		}
 	}
 	if (!Array.isArray(value.attempts)) {

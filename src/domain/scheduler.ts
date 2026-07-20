@@ -19,17 +19,17 @@ function nextState(task: RunTask, tasks: Record<string, RunTask>): TaskState {
 	) {
 		return task.state;
 	}
-	const dependencyStates = task.definition.dependencies.map(
-		(id) => tasks[id]?.state,
-	);
+	const dependencies = task.definition.dependencies.map((id) => tasks[id]);
 	if (
-		dependencyStates.some(
-			(state) => state === undefined || TERMINAL_FAILURE_STATES.has(state),
+		dependencies.some(
+			(dependency) =>
+				dependency === undefined ||
+				TERMINAL_FAILURE_STATES.has(dependency.state),
 		)
 	) {
 		return "blocked";
 	}
-	if (dependencyStates.every((state) => state === "succeeded")) {
+	if (dependencies.every((dependency) => dependency?.integratedCommit)) {
 		return "ready";
 	}
 	return "planned";
