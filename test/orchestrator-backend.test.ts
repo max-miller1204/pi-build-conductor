@@ -24,7 +24,9 @@ afterEach(async () => {
 	);
 });
 
-async function fakeOrchestrator(): Promise<{
+async function fakeOrchestrator(
+	options: { failSetModel?: boolean } = {},
+): Promise<{
 	socketPath: string;
 	requests: unknown[];
 }> {
@@ -65,8 +67,18 @@ async function fakeOrchestrator(): Promise<{
 				return;
 			}
 			if (request.type === "rpc") {
+				const failed =
+					options.failSetModel && request.command?.type === "set_model";
 				socket.end(
-					`${JSON.stringify({ type: "rpc_result", ok: true, response: { success: true, command: request.command?.type } })}\n`,
+					`${JSON.stringify({
+						type: "rpc_result",
+						ok: true,
+						response: {
+							success: !failed,
+							command: request.command?.type,
+							...(failed ? { error: "model unavailable" } : {}),
+						},
+					})}\n`,
 				);
 				return;
 			}
@@ -139,5 +151,24 @@ describe("OfficialOrchestratorBackend", () => {
 			{ type: "list" },
 			{ type: "stop", instanceId: "worker-1" },
 		]);
+	});
+
+	it("stops a spawned worker when model configuration fails", async () => {
+		const fake = await fakeOrchestrator({ failSetModel: true });
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+
+		await expect(
+			backend.spawn({
+				cwd: "/repo/worktree",
+				provider: "anthropic",
+				model: "missing-model",
+			}),
+		).rejects.toThrow(/model unavailable/);
+		expect(fake.requests.at(-1)).toEqual({
+			type: "stop",
+			instanceId: "worker-1",
+		});
 	});
 });

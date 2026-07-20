@@ -125,10 +125,59 @@ export class BuildConductor {
 			if (integrationBranch !== run.integrationBranch) {
 				throw new Error(`Unexpected integration branch: ${integrationBranch}`);
 			}
+		} catch (error) {
+			current = { ...current, state: "failed", updatedAt: this.now() };
+			await this.dependencies.store.save(current);
+			throw error;
+		}
+		return this.launchReadyTask(current, repository, model);
+	}
+
+	async recoverRun(runId: string): Promise<BuildRun> {
+		const run = await this.dependencies.store.load(runId);
+		const liveWorkerIds = new Set(
+			(await this.dependencies.workers.list())
+				.filter((worker) =>
+					["starting", "online", "stopping"].includes(worker.status),
+				)
+				.map((worker) => worker.id),
+		);
+		const activeWorkerIds = run.attempts.flatMap((attempt) =>
+			attempt.workerId &&
+			["prepared", "launched", "running"].includes(attempt.state) &&
+			liveWorkerIds.has(attempt.workerId)
+				? [attempt.workerId]
+				: [],
+		);
+		for (const workerId of activeWorkerIds) {
+			await this.dependencies.workers.stop(workerId);
+		}
+		return this.dependencies.store.recover(runId, this.now());
+	}
+
+	async resumeAndLaunch(
+		run: BuildRun,
+		repository: RepositoryInfo,
+		model?: WorkerModelSelection,
+	): Promise<LaunchResult> {
+		if (run.state !== "running") {
+			throw new Error(`Cannot resume run in state ${run.state}`);
+		}
+		return this.launchReadyTask(run, repository, model);
+	}
+
+	private async launchReadyTask(
+		run: BuildRun,
+		repository: RepositoryInfo,
+		model?: WorkerModelSelection,
+	): Promise<LaunchResult> {
+		let current = run;
+		let currentAttemptId: string | undefined;
+		try {
 			const taskId = getLaunchableTaskIds(current)[0];
 			const taskRecord = taskId ? current.tasks[taskId] : undefined;
 			if (!taskId || !taskRecord) {
-				throw new Error("Approved plan has no launchable task");
+				throw new Error("Run has no launchable task");
 			}
 			const attemptNumber = taskRecord.attemptIds.length + 1;
 			const allocation = await this.dependencies.worktrees.prepareTaskWorktree({
@@ -147,6 +196,7 @@ export class BuildConductor {
 				worktreePath: allocation.path,
 				startedAt: this.now(),
 			};
+			currentAttemptId = attempt.id;
 			current = {
 				...current,
 				tasks: {
@@ -190,10 +240,9 @@ export class BuildConductor {
 				attempt: launchedAttempt,
 			};
 		} catch (error) {
-			const activeAttempt = current.attempts.find(
-				(attempt) =>
-					attempt.state === "prepared" || attempt.state === "launched",
-			);
+			const activeAttempt = currentAttemptId
+				? current.attempts.find((attempt) => attempt.id === currentAttemptId)
+				: undefined;
 			let failureMessage =
 				error instanceof Error ? error.message : String(error);
 			if (activeAttempt?.workerId) {

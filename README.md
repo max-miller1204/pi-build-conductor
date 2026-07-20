@@ -10,7 +10,7 @@ This repository is an early MVP.
 
 Implemented:
 
-- `/build <handoff-file>` Pi command
+- `/build <handoff-file>` and `/build-resume <run-id>` Pi commands
 - Planning through the selected Pi model
 - Optional `<handoff-file>.plan.json` sidecar loading
 - Editable plan and explicit approval gate
@@ -32,7 +32,7 @@ Sequential integration, worker completion tracking, automatic commits, reviewer 
 - `src/workers` isolates the experimental orchestrator protocol behind `WorkerBackend`.
 - `src/planning` calls the selected Pi model and validates its JSON plan.
 - `src/conductor.ts` coordinates durable state transitions, Git isolation, and worker launch.
-- `src/extension.ts` provides the `/build` command and approval UI.
+- `src/extension.ts` provides the build, approval, and recovery commands.
 
 The orchestrator adapter is based on the first-party API at upstream commit [`c889eb8`](https://github.com/earendil-works/pi/blob/c889eb8809a0f40ccd937dc915b10147bec39115/packages/orchestrator/src/ipc/protocol.ts).
 
@@ -77,7 +77,7 @@ At upstream commit `c889eb8`, the Node source build has a conditional-export def
 
 Use an upstream revision or distribution that fixes that defect before invoking `/build`.
 
-The adapter smoke test uses the same upstream code with only the missing export condition corrected in a temporary checkout.
+The optional upstream smoke test uses the same upstream code with only the missing export condition corrected in a temporary checkout.
 
 ## MVP workflow
 
@@ -100,6 +100,14 @@ The command performs these steps:
 9. Spawns an independent Pi instance through the official orchestrator and sends the task prompt.
 10. Shows the run, worker, branch, and worktree in Pi's live status widget.
 
+After an interrupted conductor session, run:
+
+```text
+/build-resume <run-id>
+```
+
+Recovery checks the official orchestrator, stops any still-live worker from the interrupted attempt, marks in-flight state as interrupted, and launches a new isolated attempt.
+
 ## Plan sidecar format
 
 ```json
@@ -121,7 +129,8 @@ The command performs these steps:
 ## Safety guarantees
 
 - The conductor never checks out or merges into the user's current branch.
-- `/build` refuses to start from a dirty worktree.
+- `/build` and `/build-resume` refuse to start from a dirty worktree.
+- Git state is checked again immediately before branch or worktree side effects.
 - No Git or worker side effects occur before explicit plan approval.
 - Every worker receives a separate branch and worktree.
 - Worker prompts forbid branch switching, merging, and commits.
@@ -136,6 +145,12 @@ The command performs these steps:
 npm run format:check
 npm run typecheck
 npm test
+```
+
+With a compatible official orchestrator service running:
+
+```bash
+PI_ORCHESTRATOR_SMOKE_SOCKET=/path/to/orchestrator.sock npm run test:upstream
 ```
 
 The package intentionally does not depend on Herdr.

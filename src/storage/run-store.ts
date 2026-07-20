@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { validateTaskPlan } from "../domain/dag.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
+	type AttemptState,
 	type BuildRun,
 	RUN_SCHEMA_VERSION,
 	type RunState,
@@ -29,6 +30,14 @@ const TASK_STATES: ReadonlySet<TaskState> = new Set([
 	"failed",
 	"blocked",
 	"cancelled",
+]);
+const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
+	"prepared",
+	"launched",
+	"running",
+	"succeeded",
+	"failed",
+	"interrupted",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,11 +83,11 @@ export function validateStoredRun(value: unknown): BuildRun {
 	if (!isRecord(value.tasks)) {
 		throw new Error("run.tasks must be an object");
 	}
-	const planIds = new Set(plan.tasks.map((task) => task.id));
-	if (Object.keys(value.tasks).length !== planIds.size) {
+	const planById = new Map(plan.tasks.map((task) => [task.id, task]));
+	if (Object.keys(value.tasks).length !== planById.size) {
 		throw new Error("run.tasks must contain exactly the plan tasks");
 	}
-	for (const id of planIds) {
+	for (const [id, definition] of planById) {
 		const task = value.tasks[id];
 		if (
 			!isRecord(task) ||
@@ -86,6 +95,9 @@ export function validateStoredRun(value: unknown): BuildRun {
 			!TASK_STATES.has(task.state as TaskState)
 		) {
 			throw new Error(`Invalid state for task ${id}`);
+		}
+		if (JSON.stringify(task.definition) !== JSON.stringify(definition)) {
+			throw new Error(`Task definition does not match plan for ${id}`);
 		}
 		if (
 			!Array.isArray(task.attemptIds) ||
@@ -96,6 +108,71 @@ export function validateStoredRun(value: unknown): BuildRun {
 	}
 	if (!Array.isArray(value.attempts)) {
 		throw new Error("run.attempts must be an array");
+	}
+	const attemptsById = new Map<string, Record<string, unknown>>();
+	for (const [index, attempt] of value.attempts.entries()) {
+		const path = `run.attempts[${index}]`;
+		if (!isRecord(attempt)) {
+			throw new Error(`${path} must be an object`);
+		}
+		for (const field of [
+			"id",
+			"taskId",
+			"branch",
+			"worktreePath",
+			"startedAt",
+		] as const) {
+			assertString(attempt[field], `${path}.${field}`);
+		}
+		if (!planById.has(attempt.taskId as string)) {
+			throw new Error(`${path}.taskId references an unknown task`);
+		}
+		if (!Number.isInteger(attempt.number) || (attempt.number as number) < 1) {
+			throw new Error(`${path}.number must be a positive integer`);
+		}
+		if (
+			typeof attempt.state !== "string" ||
+			!ATTEMPT_STATES.has(attempt.state as AttemptState)
+		) {
+			throw new Error(`${path}.state is invalid`);
+		}
+		for (const field of [
+			"workerId",
+			"finishedAt",
+			"error",
+			"commit",
+		] as const) {
+			if (attempt[field] !== undefined && typeof attempt[field] !== "string") {
+				throw new Error(`${path}.${field} must be a string when present`);
+			}
+		}
+		if (attemptsById.has(attempt.id as string)) {
+			throw new Error(`Duplicate attempt id: ${String(attempt.id)}`);
+		}
+		attemptsById.set(attempt.id as string, attempt);
+	}
+	const referencedAttemptIds = new Set<string>();
+	for (const [taskId, task] of Object.entries(value.tasks)) {
+		if (!isRecord(task) || !Array.isArray(task.attemptIds)) {
+			continue;
+		}
+		const uniqueAttemptIds = new Set(task.attemptIds);
+		if (uniqueAttemptIds.size !== task.attemptIds.length) {
+			throw new Error(`Task ${taskId} has duplicate attempt ids`);
+		}
+		for (const attemptId of uniqueAttemptIds) {
+			const normalizedAttemptId = String(attemptId);
+			const attempt = attemptsById.get(normalizedAttemptId);
+			if (!attempt || attempt.taskId !== taskId) {
+				throw new Error(
+					`Task ${taskId} references invalid attempt ${normalizedAttemptId}`,
+				);
+			}
+			referencedAttemptIds.add(normalizedAttemptId);
+		}
+	}
+	if (referencedAttemptIds.size !== attemptsById.size) {
+		throw new Error("Every run attempt must be referenced by its task");
 	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||

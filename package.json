@@ -34,6 +34,7 @@
 		"format": "biome check --write .",
 		"format:check": "biome check .",
 		"test": "vitest run",
+		"test:upstream": "vitest run test/orchestrator-upstream.test.ts",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit"
 	},

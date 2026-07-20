@@ -6,10 +6,14 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { BuildConductor } from "./conductor.js";
+import {
+	BuildConductor,
+	type LaunchResult,
+	type WorkerModelSelection,
+} from "./conductor.js";
 import { validateTaskPlan } from "./domain/dag.js";
 import type { TaskPlan } from "./domain/types.js";
-import { GitCli } from "./git/git.js";
+import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import { RunStore } from "./storage/run-store.js";
@@ -106,6 +110,45 @@ function errorMessage(error: unknown): string {
 	return `${error.message}${cause}`;
 }
 
+function selectedWorkerModel(
+	ctx: ExtensionCommandContext,
+): WorkerModelSelection | undefined {
+	return ctx.model
+		? { provider: ctx.model.provider, model: ctx.model.id }
+		: undefined;
+}
+
+function createRuntime(git: GitCli, repository: RepositoryInfo) {
+	const store = new RunStore(
+		join(repository.commonDirectory, "pi-build-conductor", "runs"),
+	);
+	const workers = new OfficialOrchestratorBackend();
+	const conductor = new BuildConductor({
+		store,
+		workers,
+		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
+	});
+	return { conductor, store, workers };
+}
+
+function showLaunch(
+	ctx: ExtensionCommandContext,
+	result: LaunchResult,
+	store: RunStore,
+): void {
+	ctx.ui.setStatus("pi-build-conductor", `worker: ${result.task.id}`);
+	ctx.ui.setWidget("pi-build-conductor", [
+		`Build ${result.run.id}`,
+		`Task: ${result.task.title}`,
+		`Worker: ${result.attempt.workerId ?? "starting"}`,
+		`Branch: ${result.attempt.branch}`,
+	]);
+	ctx.ui.notify(
+		`Launched ${result.task.id} in ${result.attempt.worktreePath}. Run state: ${store.directory}`,
+		"info",
+	);
+}
+
 export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	pi.registerCommand("build", {
 		description: "Plan and launch an isolated build worker from a handoff file",
@@ -147,15 +190,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("Build cancelled before approval", "info");
 					return;
 				}
-				const store = new RunStore(
-					join(repository.commonDirectory, "pi-build-conductor", "runs"),
-				);
-				const workers = new OfficialOrchestratorBackend();
-				const conductor = new BuildConductor({
-					store,
-					workers,
-					worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
-				});
+				const { conductor, store, workers } = createRuntime(git, repository);
 				let run = await conductor.createRun({
 					repository,
 					handoffPath,
@@ -174,25 +209,80 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				}
 				ctx.ui.setStatus("pi-build-conductor", "checking orchestrator");
 				await workers.list();
+				const freshRepository = await git.inspect(ctx.cwd);
+				if (
+					!freshRepository.isClean ||
+					freshRepository.root !== repository.root ||
+					freshRepository.head !== repository.head ||
+					freshRepository.currentBranch !== repository.currentBranch
+				) {
+					await conductor.cancelRun(run);
+					throw new Error(
+						"Repository changed during planning. Start /build again from a clean, unchanged branch.",
+					);
+				}
 				ctx.ui.setStatus("pi-build-conductor", "launching worker");
 				const result = await conductor.approveAndLaunch(
 					run,
-					repository,
-					ctx.model
-						? { provider: ctx.model.provider, model: ctx.model.id }
-						: undefined,
+					freshRepository,
+					selectedWorkerModel(ctx),
 				);
-				ctx.ui.setStatus("pi-build-conductor", `worker: ${result.task.id}`);
-				ctx.ui.setWidget("pi-build-conductor", [
-					`Build ${result.run.id}`,
-					`Task: ${result.task.title}`,
-					`Worker: ${result.attempt.workerId ?? "starting"}`,
-					`Branch: ${result.attempt.branch}`,
-				]);
-				ctx.ui.notify(
-					`Launched ${result.task.id} in ${result.attempt.worktreePath}. Run state: ${store.directory}`,
-					"info",
+				showLaunch(ctx, result, store);
+			} catch (error) {
+				ctx.ui.setStatus("pi-build-conductor", "failed");
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-resume", {
+		description: "Recover an interrupted build run and launch its next retry",
+		handler: async (args, ctx) => {
+			const runId = args.trim();
+			if (!runId) {
+				ctx.ui.notify("Usage: /build-resume <run-id>", "error");
+				return;
+			}
+			ctx.ui.setStatus("pi-build-conductor", "recovering run");
+			try {
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				if (!repository.isClean) {
+					throw new Error(
+						"Commit or stash all changes before resuming a build",
+					);
+				}
+				const { conductor, store } = createRuntime(git, repository);
+				const stored = await store.load(runId);
+				if (stored.repositoryRoot !== repository.root) {
+					throw new Error(`Run ${runId} belongs to a different repository`);
+				}
+				if (
+					!(await git.branchExists(repository.root, stored.integrationBranch))
+				) {
+					throw new Error(
+						`Missing integration branch: ${stored.integrationBranch}`,
+					);
+				}
+				const recovered = await conductor.recoverRun(runId);
+				const freshRepository = await git.inspect(ctx.cwd);
+				if (
+					!freshRepository.isClean ||
+					freshRepository.root !== repository.root ||
+					freshRepository.head !== repository.head ||
+					freshRepository.currentBranch !== repository.currentBranch
+				) {
+					throw new Error(
+						"Repository changed during recovery. Resume again from a clean, unchanged branch.",
+					);
+				}
+				ctx.ui.setStatus("pi-build-conductor", "launching retry");
+				const result = await conductor.resumeAndLaunch(
+					recovered,
+					freshRepository,
+					selectedWorkerModel(ctx),
 				);
+				showLaunch(ctx, result, store);
 			} catch (error) {
 				ctx.ui.setStatus("pi-build-conductor", "failed");
 				ctx.ui.notify(errorMessage(error), "error");

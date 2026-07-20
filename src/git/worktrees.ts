@@ -35,9 +35,19 @@ export class GitWorktreeManager implements WorktreeManager {
 		repository: RepositoryInfo,
 		runId: string,
 	): Promise<string> {
-		if (!repository.isClean) {
+		const freshRepository = await this.git.inspect(repository.root);
+		if (!freshRepository.isClean) {
 			throw new Error(
 				"The current worktree must be clean before starting a build run",
+			);
+		}
+		if (
+			freshRepository.root !== repository.root ||
+			freshRepository.head !== repository.head ||
+			freshRepository.currentBranch !== repository.currentBranch
+		) {
+			throw new Error(
+				"The repository changed before integration branch creation",
 			);
 		}
 		const branch = `conductor/${runId}/integration`;

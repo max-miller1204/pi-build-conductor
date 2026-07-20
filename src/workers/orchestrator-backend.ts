@@ -71,25 +71,24 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 		this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
 	}
 
-	private request(payload: object): Promise<WireResponse> {
+	private request(
+		payload: object,
+		options: { timeoutAfterConnect?: boolean } = {},
+	): Promise<WireResponse> {
 		return new Promise<WireResponse>((resolve, reject) => {
 			const socket = createConnection(this.socketPath);
 			let buffer = "";
 			let settled = false;
-			const timer = setTimeout(() => {
-				finish(
-					new Error(
-						`Official orchestrator request timed out at ${this.socketPath}`,
-					),
-				);
-			}, this.requestTimeoutMs);
+			let timer: NodeJS.Timeout | undefined;
 
 			const finish = (error?: Error, response?: WireResponse) => {
 				if (settled) {
 					return;
 				}
 				settled = true;
-				clearTimeout(timer);
+				if (timer) {
+					clearTimeout(timer);
+				}
 				socket.destroy();
 				if (error) {
 					reject(error);
@@ -102,7 +101,19 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				resolve(response);
 			};
 
+			timer = setTimeout(() => {
+				finish(
+					new Error(
+						`Official orchestrator request timed out at ${this.socketPath}`,
+					),
+				);
+			}, this.requestTimeoutMs);
+
 			socket.on("connect", () => {
+				if (options.timeoutAfterConnect === false && timer) {
+					clearTimeout(timer);
+					timer = undefined;
+				}
 				socket.write(`${JSON.stringify(payload)}\n`);
 			});
 			socket.on("data", (chunk: Buffer | string) => {
@@ -163,15 +174,31 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 			payload.provider = request.provider;
 			payload.model = request.model;
 		}
-		const instance = requireInstance(await this.request(payload), "spawn");
-		if (request.provider && request.model) {
+		const instance = requireInstance(
+			await this.request(payload, { timeoutAfterConnect: false }),
+			"spawn",
+		);
+		if (!request.provider || !request.model) {
+			return instance;
+		}
+		try {
 			await this.rpc(instance.id, {
 				type: "set_model",
 				provider: request.provider,
 				modelId: request.model,
 			});
+			return instance;
+		} catch (error) {
+			try {
+				await this.stop(instance.id);
+			} catch (stopError) {
+				throw new Error(
+					`Failed to configure worker ${instance.id}, then failed to stop it: ${stopError instanceof Error ? stopError.message : String(stopError)}`,
+					{ cause: error },
+				);
+			}
+			throw error;
 		}
-		return instance;
 	}
 
 	async list(): Promise<WorkerInstance[]> {

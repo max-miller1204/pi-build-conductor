@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { approveRun, createBuildRun } from "../src/domain/run.js";
 import type { BuildRun, TaskPlan } from "../src/domain/types.js";
-import { RunStore } from "../src/storage/run-store.js";
+import { RunStore, validateStoredRun } from "../src/storage/run-store.js";
 
 const directories: string[] = [];
 
@@ -66,6 +66,16 @@ describe("RunStore", () => {
 		await writeFile(join(store.directory, ".run-2.partial.tmp"), "{", "utf8");
 
 		expect(await store.list()).toEqual([run]);
+	});
+
+	it("rejects malformed attempt records", () => {
+		const run = createRun();
+		expect(() =>
+			validateStoredRun({
+				...run,
+				attempts: [null],
+			}),
+		).toThrow(/run\.attempts\[0\] must be an object/);
 	});
 
 	it.each(["prepared", "launched", "running"] as const)(

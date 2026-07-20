@@ -81,4 +81,21 @@ describe("GitWorktreeManager", () => {
 			manager.prepareIntegrationBranch(repository, "run-1"),
 		).rejects.toThrow(/must be clean/);
 	});
+
+	it("refuses stale repository metadata before creating a branch", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		await writeFile(join(repositoryRoot, "change.txt"), "new commit", "utf8");
+		await execute("git", ["add", "change.txt"], { cwd: repositoryRoot });
+		await execute("git", ["commit", "-m", "Change"], { cwd: repositoryRoot });
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+
+		await expect(
+			manager.prepareIntegrationBranch(repository, "run-1"),
+		).rejects.toThrow(/repository changed/);
+	});
 });

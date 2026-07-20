@@ -77,7 +77,7 @@ afterEach(async () => {
 });
 
 describe("BuildConductor vertical slice", () => {
-	it("persists approval, allocates isolation, and starts one ready worker", async () => {
+	it("launches one worker and safely recovers it for retry", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-service-"),
 		);
@@ -143,5 +143,15 @@ describe("BuildConductor vertical slice", () => {
 		});
 		expect(workers.calls[1]).toMatchObject({ operation: "prompt" });
 		expect(await store.load(run.id)).toEqual(result.run);
+
+		const recovered = await conductor.recoverRun(run.id);
+		expect(recovered.tasks.implementation?.state).toBe("ready");
+		expect(recovered.attempts[0]?.state).toBe("interrupted");
+		expect(workers.calls[2]).toEqual({ operation: "stop", value: "worker-1" });
+
+		const resumed = await conductor.resumeAndLaunch(recovered, repository);
+		expect(resumed.attempt.number).toBe(2);
+		expect(resumed.attempt.state).toBe("running");
+		expect(resumed.attempt.branch).toContain("attempt-2");
 	});
 });
