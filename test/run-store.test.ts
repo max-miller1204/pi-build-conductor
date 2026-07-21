@@ -1,4 +1,11 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -60,6 +67,100 @@ describe("RunStore", () => {
 
 		expect(await store.load(run.id)).toEqual(run);
 		expect(await store.list()).toEqual([run]);
+	});
+
+	it("migrates schema 4 snapshots durably and idempotently", async () => {
+		const store = await temporaryStore();
+		const run = createRun();
+		const { revision: _revision, ...current } = run;
+		await writeFile(
+			join(store.directory, `${run.id}.json`),
+			`${JSON.stringify({ ...current, schemaVersion: 4 }, null, 2)}\n`,
+			"utf8",
+		);
+
+		const first = await store.load(run.id);
+		const second = await store.load(run.id);
+		expect(first).toMatchObject({ schemaVersion: 5, revision: 0 });
+		expect(second).toEqual(first);
+		const persisted = await readFile(
+			join(store.directory, `${run.id}.json`),
+			"utf8",
+		);
+		expect(persisted).toContain('"schemaVersion": 5');
+		expect(persisted).toContain('"revision": 0');
+	});
+
+	it("serializes concurrent transactions without losing updates", async () => {
+		const store = await temporaryStore();
+		const otherProcessStore = new RunStore(store.directory);
+		const run = await store.create(createRun());
+
+		await Promise.all(
+			Array.from({ length: 20 }, (_, index) =>
+				(index % 2 === 0 ? store : otherProcessStore).transaction(
+					run.id,
+					(current) => ({
+						...current,
+						updatedAt: `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+					}),
+				),
+			),
+		);
+
+		expect((await store.load(run.id)).revision).toBe(20);
+	});
+
+	it("holds an exclusive lifecycle lease across store instances", async () => {
+		const store = await temporaryStore();
+		const otherProcessStore = new RunStore(store.directory);
+		const release = await store.acquireLifecycleLease("run-1");
+		let acquired = false;
+		const waiting = otherProcessStore
+			.acquireLifecycleLease("run-1")
+			.then((releaseWaiting) => {
+				acquired = true;
+				return releaseWaiting;
+			});
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+		expect(acquired).toBe(false);
+
+		await release();
+		const releaseWaiting = await waiting;
+		expect(acquired).toBe(true);
+		await releaseWaiting();
+	});
+
+	it("reclaims a stale lifecycle lease left by a crashed process", async () => {
+		const store = await temporaryStore();
+		const lockPath = join(store.directory, ".run-1.lifecycle.lock");
+		await mkdir(lockPath, { recursive: true });
+		const staleTime = new Date(Date.now() - 60_000);
+		await utimes(lockPath, staleTime, staleTime);
+
+		const release = await store.acquireLifecycleLease("run-1");
+		await release();
+		await expect(readFile(lockPath, "utf8")).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+
+	it("rejects stale snapshots and duplicate run creation", async () => {
+		const store = await temporaryStore();
+		const run = await store.create(createRun());
+		const stale = await store.load(run.id);
+		await store.transaction(run.id, (current) => ({
+			...current,
+			updatedAt: "2026-01-01T00:01:00.000Z",
+		}));
+
+		await expect(
+			store.save({
+				...stale,
+				updatedAt: "2026-01-01T00:02:00.000Z",
+			}),
+		).rejects.toThrow(/Stale run revision/);
+		await expect(store.create(run)).rejects.toThrow(/Run already exists/);
 	});
 
 	it("rejects legacy runs that lack an approved final validation suite", () => {

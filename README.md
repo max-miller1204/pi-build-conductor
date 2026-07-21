@@ -15,7 +15,8 @@ Implemented:
 - Optional `<handoff-file>.plan.json` sidecar loading
 - Editable plan and explicit approval gate
 - DAG validation and deterministic scheduling
-- Durable, atomic run-state storage and interrupted-attempt recovery
+- Durable, atomic run-state storage with cross-process transactions, revision checks, schema migration, and interrupted-attempt recovery
+- Exclusive per-run lifecycle leases that prevent concurrent resume and duplicate side effects
 - Git branch and worktree isolation
 - A narrow `WorkerBackend` interface
 - An adapter for the official orchestrator JSONL socket API
@@ -34,7 +35,8 @@ Implemented:
 - Strict, versioned, bounded reviewer reports with deterministic finding identifiers
 - Deterministic finding prioritization and isolated repair attempts for important findings
 - Conductor-owned repair validation, commits, integration, and fresh post-repair review rounds
-- Successful worktree cleanup with failed worktrees retained for inspection
+- Idempotent worktree allocation and successful worktree cleanup with failed worktrees retained for inspection
+- Safe reconciliation of clean orphan worktrees and branches inside the exact conductor run namespace
 - Detached final validation at the exact integration head with a separately configurable timeout
 - Strict linear integration history and untouched user worktree verification
 - Durable versioned merge-ready evidence for commits, reviews, risks, checks, and Git state
@@ -166,16 +168,17 @@ After an interrupted conductor session, run:
 /build-resume <run-id>
 ```
 
-Recovery checks the official orchestrator and stops all still-live task, review, and repair workers from interrupted attempts.
+Recovery checks the official orchestrator and stops every still-live worker owned by the run, including workers spawned just before their identifier could be persisted.
 Uncommitted in-flight attempts become interrupted and retryable.
 Succeeded reviewer reports remain durable, while interrupted categories are relaunched with fresh workers.
 A validating task attempt with a recorded task commit is verified and cleanup is retried without creating a duplicate commit.
 A repair attempt with passing evidence and a recorded source commit is verified, cleanup is retried, and an already-created integration commit is reconciled without recommitting.
-Recovery fails safely when the integration branch cannot be proven to contain the exact single-parent repair commit.
+Recovery reconciles task and repair integration refs that advanced immediately before state persistence, but fails safely when the exact single-parent source mapping cannot be proven.
 An active final validation attempt becomes interrupted after restart.
-Resume safely removes its stale recorded worktree and launches a fresh numbered attempt at the same integration head.
-Legacy run schema 3 and plan schema 2 snapshots require a new explicitly approved run and are never silently labeled merge-ready.
-Broader orphan-resource reconciliation remains part of the dedicated restart-hardening stage.
+Passing final-validation evidence is persisted before cleanup, so resume can reuse it at the same immutable integration head and rerun only Git and user-worktree verification.
+Recovery removes unreferenced resources only below the configured conductor worktree root and `conductor/<run-id>/` branch namespace when their refs still equal a proven allocation start commit.
+Dirty orphan worktrees and clean orphan branches containing unexpected commits are retained for manual inspection.
+Run schema 4 snapshots migrate deterministically to schema 5 with an initial revision, while run schemas 2 and 3 and plan schema 2 still require a new explicitly approved run.
 
 ## Review and repair policy
 
@@ -243,9 +246,13 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Task commits use a controlled temporary index, bypass repository hooks, and reject clean filters that would alter validated bytes.
 - Validation commands execute directly without a shell, receive a reduced environment, have bounded output and time, and may not modify the validated snapshot.
 - Focused validation executes repository code and is not a security sandbox.
-- Run state is written atomically outside the checked-out file tree.
+- Run state is written atomically outside the checked-out file tree with file and parent-directory synchronization.
+- Every state mutation is serialized by a cross-process lock and advances a monotonic snapshot revision.
+- A separate crash-recoverable lifecycle lease prevents two conductor processes from resuming the same run concurrently.
 - Active uncommitted attempts are marked interrupted and retryable during recovery.
 - A conductor-owned commit and its passing evidence are persisted before successful worktree cleanup.
+- Passing final-validation evidence is persisted before worktree cleanup and can only be reused for the exact recorded integration commit.
+- Worker labels include the run and attempt identifiers so daemon restart reconciliation can stop unrecorded orphan workers.
 - Failed validation worktrees are retained for inspection.
 - Successful task branches and source commits are retained after integration.
 - Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.

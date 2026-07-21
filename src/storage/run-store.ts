@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { lock } from "proper-lockfile";
 import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
@@ -167,10 +168,19 @@ export function validateStoredRun(value: unknown): BuildRun {
 			"Legacy run snapshots cannot become merge-ready because they lack an explicitly approved final validation suite; start a new approved run",
 		);
 	}
+	if (value.schemaVersion === 4) {
+		value = { ...value, schemaVersion: RUN_SCHEMA_VERSION, revision: 0 };
+	}
+	if (!isRecord(value)) {
+		throw new Error("run must be an object");
+	}
 	if (value.schemaVersion !== RUN_SCHEMA_VERSION) {
 		throw new Error(
 			`Unsupported run schema version: ${String(value.schemaVersion)}`,
 		);
+	}
+	if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0) {
+		throw new Error("run.revision must be a non-negative safe integer");
 	}
 	assertString(value.id, "run.id");
 	if (!SAFE_RUN_ID.test(value.id)) {
@@ -1057,6 +1067,19 @@ export function validateStoredRun(value: unknown): BuildRun {
 	return value as unknown as BuildRun;
 }
 
+const LOCK_STALE_MS = 5_000;
+const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
+const LOCK_RETRY_MS = 20;
+const LOCK_UPDATE_MS = 2_000;
+
+function parseJson(text: string, context: string): unknown {
+	try {
+		return JSON.parse(text) as unknown;
+	} catch (error) {
+		throw new Error(`Invalid JSON in ${context}`, { cause: error });
+	}
+}
+
 export class RunStore {
 	constructor(readonly directory: string) {}
 
@@ -1067,7 +1090,14 @@ export class RunStore {
 		return join(this.directory, `${runId}.json`);
 	}
 
-	async save(run: BuildRun): Promise<void> {
+	private lockPathFor(runId: string, kind: "state" | "lifecycle"): string {
+		return join(
+			this.directory,
+			kind === "state" ? `.${runId}.lock` : `.${runId}.lifecycle.lock`,
+		);
+	}
+
+	private async writeAtomic(run: BuildRun): Promise<void> {
 		const validated = validateStoredRun(run);
 		await mkdir(this.directory, { recursive: true });
 		const destination = this.pathFor(validated.id);
@@ -1084,15 +1114,149 @@ export class RunStore {
 		}
 		try {
 			await rename(temporary, destination);
+			const directoryHandle = await open(this.directory, "r");
+			try {
+				await directoryHandle.sync();
+			} finally {
+				await directoryHandle.close();
+			}
 		} finally {
 			await rm(temporary, { force: true });
 		}
 	}
 
+	private async readValidated(runId: string): Promise<BuildRun> {
+		const path = this.pathFor(runId);
+		return validateStoredRun(parseJson(await readFile(path, "utf8"), path));
+	}
+
+	private async acquireLock(
+		runId: string,
+		kind: "state" | "lifecycle" = "state",
+	): Promise<() => Promise<void>> {
+		await mkdir(this.directory, { recursive: true });
+		try {
+			return await lock(join(this.directory, `.${runId}.${kind}`), {
+				realpath: false,
+				lockfilePath: this.lockPathFor(runId, kind),
+				stale: LOCK_STALE_MS,
+				update: LOCK_UPDATE_MS,
+				retries: {
+					retries: Math.ceil(LOCK_ACQUIRE_TIMEOUT_MS / LOCK_RETRY_MS),
+					factor: 1,
+					minTimeout: LOCK_RETRY_MS,
+					maxTimeout: LOCK_RETRY_MS,
+					randomize: false,
+				},
+			});
+		} catch (error) {
+			throw new Error(`Failed to acquire ${kind} lock for run ${runId}`, {
+				cause: error,
+			});
+		}
+	}
+
+	async acquireLifecycleLease(runId: string): Promise<() => Promise<void>> {
+		if (!SAFE_RUN_ID.test(runId)) {
+			throw new Error(`Unsafe run id: ${runId}`);
+		}
+		return this.acquireLock(runId, "lifecycle");
+	}
+
+	private async withLock<T>(
+		runId: string,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		const release = await this.acquireLock(runId);
+		try {
+			return await operation();
+		} finally {
+			await release();
+		}
+	}
+
+	async create(run: BuildRun): Promise<BuildRun> {
+		const validated = validateStoredRun(run);
+		return this.withLock(validated.id, async () => {
+			try {
+				await readFile(this.pathFor(validated.id), "utf8");
+				throw new Error(`Run already exists: ${validated.id}`);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+			}
+			await this.writeAtomic(validated);
+			return validated;
+		});
+	}
+
+	async save(run: BuildRun): Promise<void> {
+		const validated = validateStoredRun(run);
+		await this.withLock(validated.id, async () => {
+			let current: BuildRun | undefined;
+			try {
+				current = await this.readValidated(validated.id);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+			}
+			if (!current) {
+				await this.writeAtomic(validated);
+				return;
+			}
+			if (current.revision !== validated.revision) {
+				throw new Error(
+					`Stale run revision ${validated.revision}; current revision is ${current.revision}`,
+				);
+			}
+			if (JSON.stringify(current) === JSON.stringify(validated)) {
+				return;
+			}
+			await this.writeAtomic({ ...validated, revision: current.revision + 1 });
+		});
+	}
+
+	async transaction(
+		runId: string,
+		mutate: (current: BuildRun) => BuildRun | Promise<BuildRun>,
+	): Promise<BuildRun> {
+		return this.withLock(runId, async () => {
+			const current = await this.readValidated(runId);
+			const proposed = await mutate(current);
+			if (proposed === current) {
+				return current;
+			}
+			if (proposed.id !== current.id) {
+				throw new Error("A run transaction cannot change the run id");
+			}
+			const updated = validateStoredRun({
+				...proposed,
+				schemaVersion: RUN_SCHEMA_VERSION,
+				revision: current.revision + 1,
+			});
+			await this.writeAtomic(updated);
+			return updated;
+		});
+	}
+
 	async load(runId: string): Promise<BuildRun> {
 		const path = this.pathFor(runId);
 		try {
-			return validateStoredRun(JSON.parse(await readFile(path, "utf8")));
+			const raw = parseJson(await readFile(path, "utf8"), path);
+			const validated = validateStoredRun(raw);
+			if (isRecord(raw) && raw.schemaVersion === 4) {
+				return this.withLock(runId, async () => {
+					const latestRaw = parseJson(await readFile(path, "utf8"), path);
+					const migrated = validateStoredRun(latestRaw);
+					if (isRecord(latestRaw) && latestRaw.schemaVersion === 4) {
+						await this.writeAtomic(migrated);
+					}
+					return migrated;
+				});
+			}
+			return validated;
 		} catch (error) {
 			throw new Error(`Failed to load run ${runId} from ${path}`, {
 				cause: error,
@@ -1122,11 +1286,6 @@ export class RunStore {
 		runId: string,
 		now = new Date().toISOString(),
 	): Promise<BuildRun> {
-		const run = await this.load(runId);
-		const recovered = recoverInterruptedRun(run, now);
-		if (recovered !== run) {
-			await this.save(recovered);
-		}
-		return recovered;
+		return this.transaction(runId, (run) => recoverInterruptedRun(run, now));
 	}
 }

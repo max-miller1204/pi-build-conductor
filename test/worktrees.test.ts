@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitCli } from "../src/git/git.js";
+import { createBuildRun } from "../src/domain/run.js";
+import type { TaskPlan } from "../src/domain/types.js";
+import { GitCli, integrationScratchDirectoryPrefix } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 
 const execute = promisify(execFile);
@@ -23,6 +25,36 @@ async function createRepository(): Promise<string> {
 	await execute("git", ["add", "README.md"], { cwd: repository });
 	await execute("git", ["commit", "-m", "Initial"], { cwd: repository });
 	return repository;
+}
+
+function createRun(repositoryRoot: string, baseCommit: string) {
+	const plan: TaskPlan = {
+		version: 3,
+		title: "Fixture",
+		finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
+		tasks: [
+			{
+				id: "implementation",
+				title: "Implementation",
+				description: "Implement it",
+				dependencies: [],
+				acceptanceCriteria: ["Done"],
+				allowedPaths: ["src/"],
+				validationCommands: [{ command: process.execPath, args: ["-e", ""] }],
+			},
+		],
+	};
+	return createBuildRun({
+		id: "run-1",
+		repositoryRoot,
+		baseBranch: "main",
+		baseCommit,
+		integrationBranch: "conductor/run-1/integration",
+		handoff: { sourcePath: "handoff.md", text: "Build it" },
+		plan,
+		maxConcurrentWorkers: 2,
+		now: "2026-01-01T00:00:00.000Z",
+	});
 }
 
 afterEach(async () => {
@@ -65,6 +97,177 @@ describe("GitWorktreeManager", () => {
 		);
 		expect(originalWorktree.currentBranch).toBe("main");
 		expect(taskWorktree.currentBranch).toBe(allocation.branch);
+	});
+
+	it("adopts an exact existing allocation after an interrupted create", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const input = {
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		};
+
+		const first = await manager.prepareTaskWorktree(input);
+		const second = await manager.prepareTaskWorktree(input);
+
+		expect(second).toEqual(first);
+		expect(await git.listWorktrees(repositoryRoot)).toHaveLength(2);
+	});
+
+	it("removes clean orphan worktrees and branches in the run namespace", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const orphan = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "orphan",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.removedWorktrees).toEqual([orphan.path]);
+		expect(report.removedBranches).toEqual([orphan.branch]);
+		await expect(lstat(orphan.path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await git.branchExists(repositoryRoot, orphan.branch)).toBe(false);
+	});
+
+	it("removes integration scratch worktrees left by a crash", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		const integrationBranch = await manager.prepareIntegrationBranch(
+			repository,
+			"run-1",
+		);
+		const temporaryRoot = await mkdtemp(
+			integrationScratchDirectoryPrefix(repositoryRoot, integrationBranch),
+		);
+		const scratchWorktree = join(temporaryRoot, "worktree");
+		await git.addDetachedWorktree(
+			repositoryRoot,
+			scratchWorktree,
+			repository.head,
+		);
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.removedWorktrees).toContain(scratchWorktree);
+		await expect(lstat(temporaryRoot)).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+
+	it("retains dirty orphan worktrees for manual inspection", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const orphan = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "orphan",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		await writeFile(join(orphan.path, "untracked.txt"), "retain", "utf8");
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.retainedDirtyWorktrees).toEqual([orphan.path]);
+		expect(report.removedWorktrees).toEqual([]);
+		expect(await git.branchExists(repositoryRoot, orphan.branch)).toBe(true);
+	});
+
+	it("retains clean orphan worktrees whose branch contains unique commits", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const orphan = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "orphan",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		await writeFile(join(orphan.path, "committed.txt"), "retain", "utf8");
+		await execute("git", ["add", "committed.txt"], { cwd: orphan.path });
+		await execute("git", ["commit", "-m", "Unique orphan work"], {
+			cwd: orphan.path,
+		});
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.retainedUnexpectedWorktrees).toEqual([orphan.path]);
+		expect(report.removedWorktrees).toEqual([]);
+		expect(await git.branchExists(repositoryRoot, orphan.branch)).toBe(true);
+		expect((await git.inspect(orphan.path)).isClean).toBe(true);
+	});
+
+	it("retains detached final-validation worktrees with unexpected commits", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const path = await manager.prepareFinalValidationWorktree(
+			repository,
+			"run-1",
+			1,
+			repository.head,
+		);
+		await writeFile(join(path, "committed.txt"), "retain", "utf8");
+		await execute("git", ["add", "committed.txt"], { cwd: path });
+		await execute("git", ["commit", "-m", "Unexpected validation commit"], {
+			cwd: path,
+		});
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.retainedUnexpectedWorktrees).toEqual([path]);
+		expect((await git.inspect(path)).isClean).toBe(true);
 	});
 
 	it("creates and safely removes a detached final validation worktree", async () => {

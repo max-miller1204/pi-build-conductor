@@ -364,6 +364,10 @@ describe("bounded dependency-aware concurrency", () => {
 			cwd: "/worktrees/second",
 			label: `${run.id}:second`,
 		});
+		await workers.spawn({
+			cwd: "/worktrees/orphan",
+			label: `pi-build-conductor:${run.id}:orphan-attempt:orphan`,
+		});
 		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
 		const first = approved.tasks.first;
 		const second = approved.tasks.second;
@@ -413,7 +417,7 @@ describe("bounded dependency-aware concurrency", () => {
 
 		const recovered = await conductor.recoverRun(run.id);
 
-		expect(workers.stopOrder).toEqual(["worker-1", "worker-2"]);
+		expect(workers.stopOrder).toEqual(["worker-1", "worker-2", "worker-3"]);
 		expect(recovered.attempts.map((attempt) => attempt.state)).toEqual([
 			"interrupted",
 			"interrupted",

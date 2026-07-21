@@ -38,6 +38,7 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 	);
 	return reconcileTaskStates({
 		schemaVersion: RUN_SCHEMA_VERSION,
+		revision: 0,
 		id: input.id,
 		state: "awaiting_approval",
 		repositoryRoot: input.repositoryRoot,

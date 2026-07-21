@@ -6,6 +6,7 @@ import {
 	type BuildConductorDependencies,
 	BuildConductor as ProductionBuildConductor,
 } from "../src/conductor.js";
+import { approveRun } from "../src/domain/run.js";
 import type { GitClient, RepositoryInfo } from "../src/git/git.js";
 import type {
 	PrepareTaskWorktreeInput,
@@ -263,6 +264,146 @@ describe("BuildConductor vertical slice", () => {
 			operation: "stop",
 			value: "worker-1",
 		});
+	});
+
+	it("reconciles a task integration ref advanced before state persistence", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-integration-recovery-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const finalization = createFakeFinalizationDependencies();
+		const integratedCommit = "integrated-source-commit";
+		const verifyIntegratedCommit = vi.fn(async () => {});
+		const git = {
+			...finalization.git,
+			async branchExists() {
+				return true;
+			},
+			async branchHead(_repositoryRoot: string, branch: string) {
+				return branch.endsWith("/integration")
+					? integratedCommit
+					: "source-commit";
+			},
+			verifyIntegratedCommit,
+		};
+		const conductor = new ProductionBuildConductor({
+			store,
+			workers: new FakeWorkers(),
+			worktrees: new FakeWorktrees(),
+			...finalization,
+			git,
+			now: () => "2026-01-01T01:00:00.000Z",
+		});
+		const run = await createSingleTaskRun(conductor);
+		const approved = approveRun(run, "2026-01-01T00:01:00.000Z");
+		const implementation = approved.tasks.implementation;
+		if (!implementation) {
+			throw new Error("Missing implementation task");
+		}
+		await store.save({
+			...approved,
+			tasks: {
+				implementation: {
+					...implementation,
+					state: "succeeded",
+					attemptIds: ["implementation-1"],
+				},
+			},
+			attempts: [
+				{
+					id: "implementation-1",
+					taskId: "implementation",
+					number: 1,
+					state: "succeeded",
+					branch: "conductor/run/task/implementation/attempt-1",
+					worktreePath: "/worktree",
+					baseCommit: approved.baseCommit,
+					startedAt: approved.updatedAt,
+					finishedAt: approved.updatedAt,
+					commit: "source-commit",
+					evidence: {
+						startedAt: approved.updatedAt,
+						finishedAt: approved.updatedAt,
+						passed: true,
+						changedFiles: [],
+						diffHash: "diff",
+						checks: [],
+					},
+				},
+			],
+		});
+
+		const recovered = await conductor.recoverRun(run.id);
+
+		expect(recovered.state).toBe("integrating");
+		expect(recovered.integrationHead).toBe(integratedCommit);
+		expect(recovered.tasks.implementation?.integratedCommit).toBe(
+			integratedCommit,
+		);
+		expect(verifyIntegratedCommit).toHaveBeenCalledWith(
+			approved.repositoryRoot,
+			integratedCommit,
+			approved.baseCommit,
+			"source-commit",
+		);
+	});
+
+	it("reuses persisted passing final-validation evidence after restart", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-final-recovery-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const worktrees = new FakeWorktrees();
+		const conductor = new BuildConductor({
+			store,
+			workers: new FakeWorkers({ status: "succeeded" }),
+			worktrees,
+			now: () => "2026-01-01T00:00:00.000Z",
+		});
+		const run = await createSingleTaskRun(conductor);
+		const launch = await conductor.approveAndLaunch(run, repository);
+		const completed = await launch.completion;
+		const completedAttempt = completed.finalValidationAttempts.at(-1);
+		if (!completedAttempt?.evidence) {
+			throw new Error("Missing completed final-validation evidence");
+		}
+		const { mergeReadyEvidence: _mergeReadyEvidence, ...withoutEvidence } =
+			completed;
+		await store.save({
+			...withoutEvidence,
+			state: "reviewed",
+			finalValidationAttempts: completed.finalValidationAttempts.map(
+				(attempt) =>
+					attempt.id === completedAttempt.id
+						? {
+								...attempt,
+								state: "interrupted" as const,
+								error: "Conductor restarted after validation",
+							}
+						: attempt,
+			),
+		});
+		const interrupted = await store.load(run.id);
+		const dependencies = createFakeFinalizationDependencies();
+		const validate = vi.spyOn(dependencies.finalValidator, "validate");
+		const recovering = new ProductionBuildConductor({
+			store,
+			workers: new FakeWorkers(),
+			worktrees,
+			...dependencies,
+			now: () => "2026-01-01T01:00:00.000Z",
+		});
+
+		const resumed = await recovering.resumeAndLaunch(interrupted, repository);
+		const recovered = await resumed.completion;
+
+		expect(recovered.state).toBe("completed");
+		expect(recovered.finalValidationAttempts).toHaveLength(
+			completed.finalValidationAttempts.length,
+		);
+		expect(validate).not.toHaveBeenCalled();
 	});
 
 	it("retains a committed attempt when cleanup fails and recovers it without recommitting", async () => {
@@ -733,7 +874,7 @@ describe("BuildConductor vertical slice", () => {
 			operation: "spawn",
 			value: {
 				cwd: "/worktree",
-				label: `${run.id}:implementation`,
+				label: `pi-build-conductor:${run.id}:${launch?.attempt.id}:implementation`,
 				provider: "anthropic",
 				model: "claude-sonnet-4-5",
 			},

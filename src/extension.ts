@@ -359,6 +359,12 @@ function showCompletion(
 		evidence?.remainingRisks.map(
 			(risk) => `Remaining risk ${risk.id}: ${risk.title}`,
 		) ?? [];
+	let finalValidationWorktreeLine: string | undefined;
+	if (finalAttempt) {
+		const disposition =
+			run.state === "completed" ? " (cleaned)" : " (retained if created)";
+		finalValidationWorktreeLine = `Final validation worktree${disposition}: ${finalAttempt.worktreePath}`;
+	}
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
 		`Run: ${run.state}`,
@@ -372,11 +378,7 @@ function showCompletion(
 		...commitLines,
 		...reviewSummaryLines,
 		`Final checks: ${passedChecks}/${finalChecks.length} passed`,
-		...(finalAttempt
-			? [
-					`Final validation worktree${run.state === "completed" ? " (cleaned)" : " (retained if created)"}: ${finalAttempt.worktreePath}`,
-				]
-			: []),
+		...(finalValidationWorktreeLine ? [finalValidationWorktreeLine] : []),
 		...finalCheckLines,
 		...(riskLines.length > 0 ? riskLines : ["Remaining deferred risks: none"]),
 		...(evidence
@@ -603,13 +605,6 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				const stored = await store.load(runId);
 				if (stored.repositoryRoot !== repository.root) {
 					throw new Error(`Run ${runId} belongs to a different repository`);
-				}
-				if (
-					!(await git.branchExists(repository.root, stored.integrationBranch))
-				) {
-					throw new Error(
-						`Missing integration branch: ${stored.integrationBranch}`,
-					);
 				}
 				const recovered = await conductor.recoverRun(runId);
 				const freshRepository = await git.inspect(ctx.cwd);

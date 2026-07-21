@@ -61,9 +61,9 @@
       "id": "goal-mrtf4qyc-e58a8184",
       "title": "Harden restart recovery and idempotency",
       "description": "Add locked state transitions, schema migrations, daemon restart reconciliation, idempotent retries, orphan branch and worktree cleanup, and safe resume behavior across every run phase.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:48.084Z",
-      "updatedAt": "2026-07-20T16:07:48.084Z"
+      "updatedAt": "2026-07-21T05:06:26.243Z"
     },
     {
       "id": "goal-mrtf4swz-f12261f9",

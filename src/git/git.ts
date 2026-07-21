@@ -14,6 +14,19 @@ import type {
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
 
+export function integrationScratchDirectoryPrefix(
+	repositoryRoot: string,
+	branch: string,
+): string {
+	const identity = createHash("sha256")
+		.update(resolve(repositoryRoot))
+		.update("\0")
+		.update(branch)
+		.digest("hex")
+		.slice(0, 16);
+	return join(tmpdir(), `pi-build-conductor-integration-${identity}-`);
+}
+
 export interface RepositoryInfo {
 	root: string;
 	commonDirectory: string;
@@ -27,6 +40,19 @@ export interface TaskWorktreeSnapshot {
 	baseCommit: string;
 	changedFiles: ChangedFileEvidence[];
 	diffHash: string;
+}
+
+export interface GitWorktreeInfo {
+	path: string;
+	head: string;
+	branch?: string;
+	bare: boolean;
+	prunable: boolean;
+}
+
+export interface GitBranchInfo {
+	name: string;
+	head: string;
 }
 
 export interface VerifyMergeReadyHistoryInput {
@@ -53,13 +79,30 @@ export interface GitClient {
 		path: string,
 		branch: string,
 		startPoint: string,
+		createBranch?: boolean,
 	): Promise<void>;
+	resolveCommit?(repositoryRoot: string, revision: string): Promise<string>;
+	listWorktrees?(repositoryRoot: string): Promise<GitWorktreeInfo[]>;
+	listBranches?(
+		repositoryRoot: string,
+		prefix: string,
+	): Promise<GitBranchInfo[]>;
+	deleteBranch?(
+		repositoryRoot: string,
+		branch: string,
+		expectedHead: string,
+	): Promise<void>;
+	pruneWorktrees?(repositoryRoot: string): Promise<void>;
 	addDetachedWorktree(
 		repositoryRoot: string,
 		path: string,
 		commit: string,
 	): Promise<void>;
-	removeWorktree(repositoryRoot: string, path: string): Promise<void>;
+	removeWorktree(
+		repositoryRoot: string,
+		path: string,
+		force?: boolean,
+	): Promise<void>;
 	status(repositoryRoot: string): Promise<string>;
 	verifyDetachedWorktree(
 		worktreePath: string,
@@ -131,8 +174,7 @@ function validateChangedPath(path: string): void {
 
 function parsePorcelainV1Z(output: string): ChangedFileEvidence[] {
 	const files: ChangedFileEvidence[] = [];
-	let offset = 0;
-	while (offset < output.length) {
+	for (let offset = 0; offset < output.length; ) {
 		const end = output.indexOf("\0", offset);
 		if (end < 0) {
 			throw new Error("Git status returned a malformed NUL-delimited record");
@@ -411,15 +453,112 @@ export class GitCli implements GitClient {
 		path: string,
 		branch: string,
 		startPoint: string,
+		createBranch = true,
 	): Promise<void> {
-		await this.execute(repositoryRoot, [
-			"worktree",
-			"add",
-			"-b",
-			branch,
-			path,
-			startPoint,
+		await this.execute(
+			repositoryRoot,
+			createBranch
+				? ["worktree", "add", "-b", branch, path, startPoint]
+				: ["worktree", "add", path, branch],
+		);
+	}
+
+	async resolveCommit(
+		repositoryRoot: string,
+		revision: string,
+	): Promise<string> {
+		return this.execute(repositoryRoot, [
+			"rev-parse",
+			"--verify",
+			`${revision}^{commit}`,
 		]);
+	}
+
+	async listWorktrees(repositoryRoot: string): Promise<GitWorktreeInfo[]> {
+		const output = await this.executeRaw(repositoryRoot, [
+			"worktree",
+			"list",
+			"--porcelain",
+			"-z",
+		]);
+		const worktrees: GitWorktreeInfo[] = [];
+		let current: Partial<GitWorktreeInfo> | undefined;
+		for (const field of output.split("\0")) {
+			if (field.startsWith("worktree ")) {
+				if (current?.path && current.head) {
+					worktrees.push({
+						path: current.path,
+						head: current.head,
+						...(current.branch ? { branch: current.branch } : {}),
+						bare: current.bare ?? false,
+						prunable: current.prunable ?? false,
+					});
+				}
+				current = { path: field.slice("worktree ".length) };
+			} else if (current && field.startsWith("HEAD ")) {
+				current.head = field.slice("HEAD ".length);
+			} else if (current && field.startsWith("branch refs/heads/")) {
+				current.branch = field.slice("branch refs/heads/".length);
+			} else if (current && field === "bare") {
+				current.bare = true;
+			} else if (current && field.startsWith("prunable")) {
+				current.prunable = true;
+			}
+		}
+		if (current?.path && current.head) {
+			worktrees.push({
+				path: current.path,
+				head: current.head,
+				...(current.branch ? { branch: current.branch } : {}),
+				bare: current.bare ?? false,
+				prunable: current.prunable ?? false,
+			});
+		}
+		return worktrees;
+	}
+
+	async listBranches(
+		repositoryRoot: string,
+		prefix: string,
+	): Promise<GitBranchInfo[]> {
+		const output = await this.executeRaw(repositoryRoot, [
+			"for-each-ref",
+			"--format=%(refname:short)%00%(objectname)",
+			`refs/heads/${prefix}`,
+		]);
+		return output.split("\n").flatMap((line) => {
+			if (!line) {
+				return [];
+			}
+			const [name, head] = line.split("\0");
+			if (!name || !head) {
+				throw new Error("Git returned a malformed branch inventory");
+			}
+			return [{ name, head }];
+		});
+	}
+
+	async deleteBranch(
+		repositoryRoot: string,
+		branch: string,
+		expectedHead: string,
+	): Promise<void> {
+		const actualHead = await this.branchHead(repositoryRoot, branch);
+		if (actualHead !== expectedHead) {
+			throw new Error(
+				`Refusing to delete branch ${branch}: expected ${expectedHead}, found ${actualHead}`,
+			);
+		}
+		await this.execute(repositoryRoot, [
+			"update-ref",
+			"-d",
+			`refs/heads/${branch}`,
+			expectedHead,
+		]);
+	}
+
+	async pruneWorktrees(repositoryRoot: string): Promise<void> {
+		await this.execute(repositoryRoot, ["worktree", "prune"]);
 	}
 
 	async addDetachedWorktree(
@@ -436,8 +575,17 @@ export class GitCli implements GitClient {
 		]);
 	}
 
-	async removeWorktree(repositoryRoot: string, path: string): Promise<void> {
-		await this.execute(repositoryRoot, ["worktree", "remove", "--force", path]);
+	async removeWorktree(
+		repositoryRoot: string,
+		path: string,
+		force = true,
+	): Promise<void> {
+		await this.execute(
+			repositoryRoot,
+			force
+				? ["worktree", "remove", "--force", path]
+				: ["worktree", "remove", path],
+		);
 	}
 
 	async status(repositoryRoot: string): Promise<string> {
@@ -843,27 +991,28 @@ export class GitCli implements GitClient {
 		expectedParent: string,
 		sourceCommit: string,
 	): Promise<void> {
-		const [parentLine, integratedTree, sourceTree] = await Promise.all([
-			this.execute(repositoryRoot, [
-				"rev-list",
-				"--parents",
-				"-n",
-				"1",
-				integratedCommit,
-			]),
-			this.execute(repositoryRoot, ["rev-parse", `${integratedCommit}^{tree}`]),
-			this.execute(repositoryRoot, ["rev-parse", `${sourceCommit}^{tree}`]),
+		const parentLine = await this.execute(repositoryRoot, [
+			"rev-list",
+			"--parents",
+			"-n",
+			"1",
+			integratedCommit,
 		]);
 		const commitAndParents = parentLine.split(" ");
 		if (
 			commitAndParents.length !== 2 ||
-			commitAndParents[1] !== expectedParent ||
-			integratedTree !== sourceTree
+			commitAndParents[1] !== expectedParent
 		) {
 			throw new Error(
-				`Integrated commit ${integratedCommit} does not match source repair ${sourceCommit}`,
+				`Integrated commit ${integratedCommit} does not have expected parent ${expectedParent}`,
 			);
 		}
+		await this.verifySourceCommitMapping(
+			repositoryRoot,
+			sourceCommit,
+			integratedCommit,
+			expectedParent,
+		);
 	}
 
 	async integrateCommit(
@@ -885,7 +1034,7 @@ export class GitCli implements GitClient {
 			);
 		}
 		const temporaryRoot = await mkdtemp(
-			join(tmpdir(), "pi-build-conductor-integration-"),
+			integrationScratchDirectoryPrefix(repositoryRoot, branch),
 		);
 		const worktreePath = join(temporaryRoot, "worktree");
 		let worktreeAdded = false;

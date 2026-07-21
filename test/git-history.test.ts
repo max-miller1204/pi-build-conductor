@@ -206,6 +206,48 @@ describe("GitCli.verifyMergeReadyHistory", () => {
 		).resolves.toMatchObject({ integrationHead: integrated });
 	});
 
+	it("verifies a source patch cherry-picked onto an advanced integration head", async () => {
+		const { repositoryRoot, baseCommit } = await createRepository();
+		await execute("git", ["checkout", "-b", "concurrent-source", baseCommit], {
+			cwd: repositoryRoot,
+		});
+		await writeFile(join(repositoryRoot, "feature.txt"), "feature\n");
+		await execute("git", ["add", "feature.txt"], { cwd: repositoryRoot });
+		await execute("git", ["commit", "-m", "Concurrent source"], {
+			cwd: repositoryRoot,
+		});
+		const sourceCommit = (
+			await execute("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot })
+		).stdout.trim();
+		await execute("git", ["checkout", "main"], { cwd: repositoryRoot });
+		await writeFile(join(repositoryRoot, "earlier.txt"), "earlier\n");
+		await execute("git", ["add", "earlier.txt"], { cwd: repositoryRoot });
+		await execute("git", ["commit", "-m", "Earlier integration"], {
+			cwd: repositoryRoot,
+		});
+		const advancedParent = (
+			await execute("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot })
+		).stdout.trim();
+		await execute("git", ["checkout", "-b", "advanced-integration"], {
+			cwd: repositoryRoot,
+		});
+		await execute("git", ["cherry-pick", sourceCommit], {
+			cwd: repositoryRoot,
+		});
+		const integratedCommit = (
+			await execute("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot })
+		).stdout.trim();
+
+		await expect(
+			new GitCli().verifyIntegratedCommit(
+				repositoryRoot,
+				integratedCommit,
+				advancedParent,
+				sourceCommit,
+			),
+		).resolves.toBeUndefined();
+	});
+
 	it("rejects merge commits in the integration range", async () => {
 		const { repositoryRoot, baseCommit } = await createRepository();
 		const left = await commitTree(repositoryRoot, baseCommit, "Left");

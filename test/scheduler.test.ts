@@ -39,7 +39,8 @@ function runWith(
 		tasks: definitions,
 	};
 	return {
-		schemaVersion: 4,
+		schemaVersion: 5,
+		revision: 0,
 		id: "run-1",
 		state: "running",
 		repositoryRoot: "/repo",

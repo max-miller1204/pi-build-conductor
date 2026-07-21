@@ -154,7 +154,6 @@ Do not commit changes; the conductor will validate and commit them.
 When finished, summarize changed files and test evidence.`;
 }
 
-const runMutationTails = new Map<string, Promise<void>>();
 const activeSchedulingRuns = new Set<string>();
 const recoveringRuns = new Set<string>();
 const activeFinalValidations = new Map<string, AbortController>();
@@ -180,28 +179,7 @@ async function mutateStoredRun(
 	runId: string,
 	mutate: (current: BuildRun) => BuildRun,
 ): Promise<BuildRun> {
-	const key = `${store.directory}:${runId}`;
-	const previous = runMutationTails.get(key) ?? Promise.resolve();
-	let release = () => {};
-	const turn = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => turn);
-	runMutationTails.set(key, queued);
-	await previous;
-	try {
-		const current = await store.load(runId);
-		const updated = mutate(current);
-		if (updated !== current) {
-			await store.save(updated);
-		}
-		return updated;
-	} finally {
-		release();
-		if (runMutationTails.get(key) === queued) {
-			runMutationTails.delete(key);
-		}
-	}
+	return store.transaction(runId, mutate);
 }
 
 function updateAttempt(
@@ -347,8 +325,7 @@ export class BuildConductor {
 			maxConcurrentWorkers: input.maxConcurrentWorkers ?? 2,
 			now: this.now(),
 		});
-		await this.dependencies.store.save(run);
-		return run;
+		return this.dependencies.store.create(run);
 	}
 
 	async cancelRun(run: BuildRun): Promise<BuildRun> {
@@ -547,9 +524,36 @@ export class BuildConductor {
 				`Cannot recover run ${runId} while it has active lifecycle work`,
 			);
 		}
+		const releaseLifecycle =
+			await this.dependencies.store.acquireLifecycleLease(runId);
 		recoveringRuns.add(key);
 		try {
 			let run = await this.dependencies.store.load(runId);
+			if (
+				this.dependencies.git.branchExists &&
+				!(await this.dependencies.git.branchExists(
+					run.repositoryRoot,
+					run.integrationBranch,
+				))
+			) {
+				const repository = await this.dependencies.git.inspect(
+					run.repositoryRoot,
+				);
+				if (
+					!repository.isClean ||
+					repository.currentBranch !== run.baseBranch ||
+					repository.head !== run.baseCommit
+				) {
+					throw new Error(
+						`Cannot recreate missing integration branch ${run.integrationBranch}: the user worktree no longer matches the approved base`,
+					);
+				}
+				await this.dependencies.git.createBranch(
+					run.repositoryRoot,
+					run.integrationBranch,
+					expectedIntegrationHead(run),
+				);
+			}
 			const workers = await this.dependencies.workers.list();
 			const liveWorkerIds = new Set(
 				workers.flatMap((worker) =>
@@ -558,17 +562,24 @@ export class BuildConductor {
 						: [],
 				),
 			);
-			const referencedLiveWorkerIds = [
-				...run.attempts,
-				...run.reviewAttempts,
-				...run.repairAttempts,
-			].flatMap((attempt) =>
-				attempt.workerId && liveWorkerIds.has(attempt.workerId)
-					? [attempt.workerId]
-					: [],
+			const referencedWorkerIds = new Set(
+				[...run.attempts, ...run.reviewAttempts, ...run.repairAttempts].flatMap(
+					(attempt) => (attempt.workerId ? [attempt.workerId] : []),
+				),
 			);
+			const ownedLiveWorkerIds = workers.flatMap((worker) => {
+				if (!liveWorkerIds.has(worker.id)) {
+					return [];
+				}
+				const ownedByLabel =
+					worker.label?.startsWith(`pi-build-conductor:${run.id}:`) === true ||
+					worker.label?.startsWith(`${run.id}:`) === true;
+				return referencedWorkerIds.has(worker.id) || ownedByLabel
+					? [worker.id]
+					: [];
+			});
 			await Promise.all(
-				[...new Set(referencedLiveWorkerIds)].map((workerId) =>
+				[...new Set(ownedLiveWorkerIds)].map((workerId) =>
 					this.dependencies.workers.stop(workerId),
 				),
 			);
@@ -754,7 +765,61 @@ export class BuildConductor {
 					);
 				}
 			}
+			while (true) {
+				const nextTaskId = topologicalTaskIds(run.plan).find(
+					(id) => !run.tasks[id]?.integratedCommit,
+				);
+				const task = nextTaskId ? run.tasks[nextTaskId] : undefined;
+				const attempt = nextTaskId
+					? succeededTaskAttempt(run, nextTaskId)
+					: undefined;
+				if (!nextTaskId || task?.state !== "succeeded" || !attempt?.commit) {
+					break;
+				}
+				const expectedHead = expectedIntegrationHead(run);
+				const actualHead = await this.dependencies.git.branchHead(
+					run.repositoryRoot,
+					run.integrationBranch,
+				);
+				if (actualHead === expectedHead) {
+					break;
+				}
+				await this.dependencies.git.verifyIntegratedCommit(
+					run.repositoryRoot,
+					actualHead,
+					expectedHead,
+					attempt.commit,
+				);
+				run = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) => {
+						const storedTask = stored.tasks[nextTaskId];
+						if (storedTask?.integratedCommit) {
+							return stored;
+						}
+						if (
+							!storedTask ||
+							expectedIntegrationHead(stored) !== expectedHead
+						) {
+							throw new Error(
+								`Task ${nextTaskId} changed during integration recovery`,
+							);
+						}
+						return {
+							...stored,
+							integrationHead: actualHead,
+							tasks: {
+								...stored.tasks,
+								[nextTaskId]: { ...storedTask, integratedCommit: actualHead },
+							},
+							updatedAt: this.now(),
+						};
+					},
+				);
+			}
 			let recovered = await this.dependencies.store.recover(runId, this.now());
+			await this.dependencies.worktrees.reconcileRunResources?.(recovered);
 			if (
 				recovered.state === "integrating" &&
 				Object.values(recovered.tasks).some((task) => !task.integratedCommit)
@@ -808,6 +873,7 @@ export class BuildConductor {
 				: recovered;
 		} finally {
 			recoveringRuns.delete(key);
+			await releaseLifecycle();
 		}
 	}
 
@@ -1382,7 +1448,7 @@ export class BuildConductor {
 		try {
 			const worker = await this.dependencies.workers.spawn({
 				cwd: allocation.path,
-				label: `${runId}:review:${round.number}:${category}`,
+				label: `pi-build-conductor:${runId}:${attempt.id}:${category}`,
 				...(model ? { provider: model.provider, model: model.model } : {}),
 			});
 			workerId = worker.id;
@@ -1722,7 +1788,7 @@ export class BuildConductor {
 		try {
 			const worker = await this.dependencies.workers.spawn({
 				cwd: allocation.path,
-				label: `${runId}:repair:${round.number}:${number}`,
+				label: `pi-build-conductor:${runId}:${attempt.id}:repair`,
 				...(model ? { provider: model.provider, model: model.model } : {}),
 			});
 			workerId = worker.id;
@@ -1965,26 +2031,29 @@ export class BuildConductor {
 			current = await mutateStoredRun(
 				this.dependencies.store,
 				runId,
-				(stored) =>
-					stored.state !== "integrating"
-						? stored
-						: {
-								...stored,
-								state: "reviewing",
-								reviewRounds:
-									stored.reviewRounds.length > 0
-										? stored.reviewRounds
-										: [
-												{
-													number: 1,
-													state: "running",
-													baseCommit: stored.integrationHead,
-													attemptIds: [],
-													startedAt: this.now(),
-												},
-											],
-								updatedAt: this.now(),
-							},
+				(stored) => {
+					if (stored.state !== "integrating") {
+						return stored;
+					}
+					const reviewRounds =
+						stored.reviewRounds.length > 0
+							? stored.reviewRounds
+							: [
+									{
+										number: 1,
+										state: "running" as const,
+										baseCommit: stored.integrationHead,
+										attemptIds: [],
+										startedAt: this.now(),
+									},
+								];
+					return {
+						...stored,
+						state: "reviewing",
+						reviewRounds,
+						updatedAt: this.now(),
+					};
+				},
 			);
 			notifyRunUpdated(options, current);
 		}
@@ -2162,6 +2231,107 @@ export class BuildConductor {
 		return [...taskCommits, ...repairCommits];
 	}
 
+	private async completeFinalValidationAttempt(
+		runId: string,
+		attemptId: string,
+		evidence: FinalValidationEvidence,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		if (!evidence.passed) {
+			throw new Error("Cannot complete final validation with failing evidence");
+		}
+		const current = await this.dependencies.store.load(runId);
+		const attempt = current.finalValidationAttempts.find(
+			(item) => item.id === attemptId,
+		);
+		if (!attempt || !["running", "interrupted"].includes(attempt.state)) {
+			return current;
+		}
+		if (attempt.integrationCommit !== current.integrationHead) {
+			throw new Error(
+				`Final validation evidence is for ${attempt.integrationCommit}, expected ${current.integrationHead}`,
+			);
+		}
+		const commits = this.integratedCommitEvidence(current);
+		const git = await this.dependencies.git.verifyMergeReadyHistory({
+			repositoryRoot: current.repositoryRoot,
+			integrationBranch: current.integrationBranch,
+			integrationHead: current.integrationHead,
+			baseBranch: current.baseBranch,
+			baseCommit: current.baseCommit,
+			commits,
+			verifiedAt: this.now(),
+		});
+		const finalRound = current.reviewRounds.at(-1)?.number;
+		const finalReviews = REVIEW_CATEGORIES.map((category) => {
+			const review = current.reviewAttempts.find(
+				(item) =>
+					item.round === finalRound &&
+					item.category === category &&
+					item.state === "succeeded",
+			);
+			if (!review?.summary) {
+				throw new Error(`Missing final ${category} review summary`);
+			}
+			return { category, summary: review.summary };
+		});
+		const remainingRisks = current.reviewAttempts
+			.filter(
+				(review) => review.round === finalRound && review.state === "succeeded",
+			)
+			.flatMap((review) => review.findings ?? [])
+			.filter((finding) => finding.status === "deferred")
+			.sort((left, right) => left.id.localeCompare(right.id));
+		const completed = await mutateStoredRun(
+			this.dependencies.store,
+			runId,
+			(stored) => {
+				const storedAttempt = stored.finalValidationAttempts.find(
+					(item) => item.id === attemptId,
+				);
+				if (
+					!["reviewed", "validating"].includes(stored.state) ||
+					!storedAttempt ||
+					!["running", "interrupted"].includes(storedAttempt.state) ||
+					storedAttempt.integrationCommit !== stored.integrationHead
+				) {
+					return stored;
+				}
+				const generatedAt = this.now();
+				return {
+					...stored,
+					state: "completed",
+					finalValidationAttempts: stored.finalValidationAttempts.map((item) =>
+						item.id === attemptId
+							? {
+									...item,
+									state: "succeeded" as const,
+									finishedAt: generatedAt,
+									evidence,
+								}
+							: item,
+					),
+					mergeReadyEvidence: {
+						version: MERGE_READY_EVIDENCE_VERSION,
+						generatedAt,
+						integrationBranch: stored.integrationBranch,
+						integrationHead: stored.integrationHead,
+						baseBranch: stored.baseBranch,
+						baseCommit: stored.baseCommit,
+						commits,
+						finalReviews,
+						remainingRisks,
+						finalChecks: evidence.checks,
+						git,
+					},
+					updatedAt: generatedAt,
+				};
+			},
+		);
+		notifyRunUpdated(options, completed);
+		return completed;
+	}
+
 	private async runFinalValidation(
 		runId: string,
 		repository: RepositoryInfo,
@@ -2198,6 +2368,17 @@ export class BuildConductor {
 					),
 					updatedAt: this.now(),
 				}));
+			}
+			if (
+				stale.evidence?.passed === true &&
+				stale.integrationCommit === current.integrationHead
+			) {
+				return this.completeFinalValidationAttempt(
+					runId,
+					stale.id,
+					stale.evidence,
+					options,
+				);
 			}
 			if (stale.state === "running") {
 				current = await mutateStoredRun(
@@ -2292,110 +2473,53 @@ export class BuildConductor {
 				signal: controller.signal,
 			});
 			const successfulEvidence = evidence;
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => ({
+					...stored,
+					finalValidationAttempts: stored.finalValidationAttempts.map((item) =>
+						item.id === attempt.id && item.state === "running"
+							? { ...item, evidence: successfulEvidence }
+							: item,
+					),
+					updatedAt: this.now(),
+				}),
+			);
 			await this.dependencies.worktrees.removeTaskWorktree(
 				current.repositoryRoot,
 				path,
 			);
-			const commits = this.integratedCommitEvidence(current);
-			const git = await this.dependencies.git.verifyMergeReadyHistory({
-				repositoryRoot: current.repositoryRoot,
-				integrationBranch: current.integrationBranch,
-				integrationHead: current.integrationHead,
-				baseBranch: current.baseBranch,
-				baseCommit: current.baseCommit,
-				commits,
-				verifiedAt: this.now(),
-			});
-			const finalRound = current.reviewRounds.at(-1)?.number;
-			const finalReviews = REVIEW_CATEGORIES.map((category) => {
-				const review = current.reviewAttempts.find(
-					(item) =>
-						item.round === finalRound &&
-						item.category === category &&
-						item.state === "succeeded",
-				);
-				if (!review?.summary) {
-					throw new Error(`Missing final ${category} review summary`);
-				}
-				return { category, summary: review.summary };
-			});
-			const remainingRisks = current.reviewAttempts
-				.filter(
-					(review) =>
-						review.round === finalRound && review.state === "succeeded",
-				)
-				.flatMap((review) => review.findings ?? [])
-				.filter((finding) => finding.status === "deferred")
-				.sort((left, right) => left.id.localeCompare(right.id));
-			const completed = await mutateStoredRun(
-				this.dependencies.store,
+			return this.completeFinalValidationAttempt(
 				runId,
-				(stored) => {
-					const storedAttempt = stored.finalValidationAttempts.find(
-						(item) => item.id === attempt.id,
-					);
-					if (
-						stored.state !== "validating" ||
-						storedAttempt?.state !== "running"
-					) {
-						return stored;
-					}
-					const generatedAt = this.now();
-					return {
-						...stored,
-						state: "completed",
-						finalValidationAttempts: stored.finalValidationAttempts.map(
-							(item) =>
-								item.id === attempt.id
-									? {
-											...item,
-											state: "succeeded" as const,
-											finishedAt: generatedAt,
-											evidence: successfulEvidence,
-										}
-									: item,
-						),
-						mergeReadyEvidence: {
-							version: MERGE_READY_EVIDENCE_VERSION,
-							generatedAt,
-							integrationBranch: stored.integrationBranch,
-							integrationHead: stored.integrationHead,
-							baseBranch: stored.baseBranch,
-							baseCommit: stored.baseCommit,
-							commits,
-							finalReviews,
-							remainingRisks,
-							finalChecks: successfulEvidence.checks,
-							git,
-						},
-						updatedAt: generatedAt,
-					};
-				},
+				attempt.id,
+				successfulEvidence,
+				options,
 			);
-			notifyRunUpdated(options, completed);
-			return completed;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			const failedEvidence =
+				evidence ??
+				(error instanceof FinalValidationError ? error.evidence : undefined);
 			const failed = await mutateStoredRun(
 				this.dependencies.store,
 				runId,
 				(stored) => ({
 					...stored,
 					state: stored.state === "cancelled" ? "cancelled" : "failed",
-					finalValidationAttempts: stored.finalValidationAttempts.map((item) =>
-						item.id === attempt.id && item.state === "running"
-							? {
-									...item,
-									state: "failed" as const,
-									finishedAt: this.now(),
-									error: message,
-									...(evidence
-										? { evidence }
-										: error instanceof FinalValidationError
-											? { evidence: error.evidence }
-											: {}),
-								}
-							: item,
+					finalValidationAttempts: stored.finalValidationAttempts.map(
+						(item) => {
+							if (item.id !== attempt.id || item.state !== "running") {
+								return item;
+							}
+							return {
+								...item,
+								state: "failed" as const,
+								finishedAt: this.now(),
+								error: message,
+								...(failedEvidence ? { evidence: failedEvidence } : {}),
+							};
+						},
 					),
 					updatedAt: this.now(),
 				}),
@@ -2539,17 +2663,29 @@ export class BuildConductor {
 		if (activeSchedulingRuns.has(key) || recoveringRuns.has(key)) {
 			throw new Error(`Run ${run.id} already has active lifecycle work`);
 		}
+		const releaseLifecycle =
+			await this.dependencies.store.acquireLifecycleLease(run.id);
 		activeSchedulingRuns.add(key);
 		try {
-			const initial = [
-				"integrating",
-				"reviewing",
-				"repairing",
-				"reviewed",
-				"validating",
-			].includes(run.state)
-				? { run, launches: [] }
-				: await this.dispatchAvailableTasks(run.id, repository, model, options);
+			let initial: DispatchResult;
+			if (
+				[
+					"integrating",
+					"reviewing",
+					"repairing",
+					"reviewed",
+					"validating",
+				].includes(run.state)
+			) {
+				initial = { run, launches: [] };
+			} else {
+				initial = await this.dispatchAvailableTasks(
+					run.id,
+					repository,
+					model,
+					options,
+				);
+			}
 			const active = new Map<string, Promise<string>>();
 			for (const scheduled of initial.launches) {
 				active.set(
@@ -2557,14 +2693,25 @@ export class BuildConductor {
 					scheduled.completion.then(() => scheduled.launch.attempt.id),
 				);
 			}
-			const completion = (
+			let lifecycle: Promise<BuildRun>;
+			if (
 				["integrating", "reviewing", "repairing"].includes(initial.run.state)
-					? this.runReviewLifecycle(run.id, repository, model, options)
-					: ["reviewed", "validating"].includes(initial.run.state)
-						? this.runFinalValidation(run.id, repository, options)
-						: this.runSchedulingLoop(run.id, repository, model, options, active)
-			).finally(() => {
+			) {
+				lifecycle = this.runReviewLifecycle(run.id, repository, model, options);
+			} else if (["reviewed", "validating"].includes(initial.run.state)) {
+				lifecycle = this.runFinalValidation(run.id, repository, options);
+			} else {
+				lifecycle = this.runSchedulingLoop(
+					run.id,
+					repository,
+					model,
+					options,
+					active,
+				);
+			}
+			const completion = lifecycle.finally(async () => {
 				activeSchedulingRuns.delete(key);
+				await releaseLifecycle();
 			});
 			return {
 				run: initial.run,
@@ -2573,6 +2720,7 @@ export class BuildConductor {
 			};
 		} catch (error) {
 			activeSchedulingRuns.delete(key);
+			await releaseLifecycle();
 			throw error;
 		}
 	}
@@ -2747,7 +2895,7 @@ export class BuildConductor {
 			notifyRunUpdated(options, current);
 			const worker = await this.dependencies.workers.spawn({
 				cwd: allocation.path,
-				label: `${current.id}:${taskId}`,
+				label: `pi-build-conductor:${current.id}:${attempt.id}:${taskId}`,
 				...(model ? { provider: model.provider, model: model.model } : {}),
 			});
 			spawnedWorkerId = worker.id;

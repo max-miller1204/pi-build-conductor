@@ -1,4 +1,4 @@
-export const RUN_SCHEMA_VERSION = 4 as const;
+export const RUN_SCHEMA_VERSION = 5 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
 export const MERGE_READY_EVIDENCE_VERSION = 1 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
@@ -280,6 +280,7 @@ export interface MergeReadyEvidence {
 
 export interface BuildRun {
 	schemaVersion: typeof RUN_SCHEMA_VERSION;
+	revision: number;
 	id: string;
 	state: RunState;
 	repositoryRoot: string;
