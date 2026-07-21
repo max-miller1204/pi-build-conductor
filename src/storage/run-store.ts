@@ -24,6 +24,10 @@ import {
 } from "../domain/types.js";
 
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+export type StoredRunEntry =
+	| { kind: "run"; run: BuildRun }
+	| { kind: "unreadable"; runId: string; error: string };
 const RUN_STATES: ReadonlySet<RunState> = new Set([
 	"planning",
 	"awaiting_approval",
@@ -1450,7 +1454,7 @@ export class RunStore {
 		}
 	}
 
-	async list(): Promise<BuildRun[]> {
+	async scan(): Promise<StoredRunEntry[]> {
 		let entries: string[];
 		try {
 			entries = await readdir(this.directory);
@@ -1465,7 +1469,32 @@ export class RunStore {
 				entry.endsWith(".json") ? [entry.slice(0, -".json".length)] : [],
 			)
 			.sort((left, right) => left.localeCompare(right));
-		return Promise.all(runIds.map((runId) => this.load(runId)));
+		return Promise.all(
+			runIds.map(async (runId): Promise<StoredRunEntry> => {
+				try {
+					return { kind: "run", run: await this.load(runId) };
+				} catch (error) {
+					return {
+						kind: "unreadable",
+						runId,
+						error: error instanceof Error ? error.message : String(error),
+					};
+				}
+			}),
+		);
+	}
+
+	async list(): Promise<BuildRun[]> {
+		const entries = await this.scan();
+		const unreadable = entries.find((entry) => entry.kind === "unreadable");
+		if (unreadable) {
+			throw new Error(
+				`Failed to list run ${unreadable.runId}: ${unreadable.error}`,
+			);
+		}
+		return entries.flatMap((entry) =>
+			entry.kind === "run" ? [entry.run] : [],
+		);
 	}
 
 	async recover(

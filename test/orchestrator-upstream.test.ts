@@ -29,5 +29,5 @@ describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
 		} finally {
 			await backend.stop(worker.id);
 		}
-	});
+	}, 90_000);
 });

@@ -426,6 +426,23 @@ describe("RunStore", () => {
 		);
 	});
 
+	it("scans valid runs even when another snapshot is unreadable", async () => {
+		const store = await temporaryStore();
+		const run = createRun();
+		await store.save(run);
+		await writeFile(join(store.directory, "broken.json"), "{", "utf8");
+
+		expect(await store.scan()).toEqual([
+			{
+				kind: "unreadable",
+				runId: "broken",
+				error: expect.stringContaining("Failed to load run broken"),
+			},
+			{ kind: "run", run },
+		]);
+		await expect(store.list()).rejects.toThrow(/Failed to list run broken/);
+	});
+
 	it("ignores incomplete temporary writes during listing", async () => {
 		const store = await temporaryStore();
 		const run = createRun();

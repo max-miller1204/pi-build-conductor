@@ -6,6 +6,7 @@ import {
 	restoreRunPlanRevision,
 	reviseRunPlan,
 } from "./domain/run.js";
+import { prepareFailedRunRetry } from "./domain/run-control.js";
 import {
 	getLaunchableTaskIds,
 	reconcileTaskStates,
@@ -29,13 +30,17 @@ import {
 	type TaskPlan,
 } from "./domain/types.js";
 import type { GitClient, RepositoryInfo } from "./git/git.js";
-import type { WorktreeManager } from "./git/worktrees.js";
+import type {
+	ResourceReconciliationReport,
+	WorktreeManager,
+} from "./git/worktrees.js";
 import { buildRepairPrompt, buildReviewerPrompt } from "./review/prompts.js";
 import { prioritizeFindings } from "./review/review-policy.js";
 import {
 	materializeReviewFindings,
 	parseReviewReport,
 } from "./review/review-report.js";
+import type { AttemptLogStore } from "./storage/attempt-log-store.js";
 import type { RunStore } from "./storage/run-store.js";
 import {
 	FinalValidationError,
@@ -64,6 +69,7 @@ export interface BuildConductorDependencies {
 	now?: () => string;
 	workerTimeoutMs?: number;
 	workerPollIntervalMs?: number;
+	attemptLogs?: AttemptLogStore;
 	verifyReviewWorktree?: (
 		path: string,
 		expectedBranch: string,
@@ -321,6 +327,41 @@ export class BuildConductor {
 		}
 	}
 
+	private recordAttemptProgress(
+		runId: string,
+		attemptId: string,
+		event: WorkerProgressEvent,
+	): void {
+		try {
+			this.dependencies.attemptLogs?.record(runId, attemptId, event);
+		} catch {
+			// Output capture must never affect worker execution.
+		}
+	}
+
+	private async finishAttemptLog(
+		runId: string,
+		attemptId: string,
+		result: WorkerExecutionResult,
+		message?: string,
+	): Promise<void> {
+		const logs = this.dependencies.attemptLogs;
+		if (!logs) {
+			return;
+		}
+		try {
+			logs.recordTerminal(
+				runId,
+				attemptId,
+				result.status === "aborted" ? "aborted" : result.status,
+				message ?? (result.status === "succeeded" ? undefined : result.error),
+			);
+			await logs.flush(runId, attemptId);
+		} catch {
+			// Output capture must never invalidate otherwise correct work.
+		}
+	}
+
 	async createRun(input: CreateConductorRunInput): Promise<BuildRun> {
 		const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 		const run = createBuildRun({
@@ -530,6 +571,71 @@ export class BuildConductor {
 			);
 		}
 		return cancelled;
+	}
+
+	async pruneRunResources(
+		runId: string,
+	): Promise<ResourceReconciliationReport> {
+		const key = schedulingKey(this.dependencies.store, runId);
+		if (activeSchedulingRuns.has(key) || recoveringRuns.has(key)) {
+			throw new Error(
+				`Cannot prune run ${runId} while it has active lifecycle work`,
+			);
+		}
+		if (!this.dependencies.worktrees.pruneRunResources) {
+			throw new Error(
+				"The configured worktree manager does not support pruning",
+			);
+		}
+		const releaseLifecycle =
+			await this.dependencies.store.acquireLifecycleLease(runId);
+		try {
+			const run = await this.dependencies.store.load(runId);
+			if (!["completed", "failed", "cancelled"].includes(run.state)) {
+				throw new Error(
+					`Cannot prune non-terminal run ${runId} in state ${run.state}`,
+				);
+			}
+			const activeAttempts = [
+				...run.attempts,
+				...run.reviewAttempts,
+				...run.repairAttempts,
+			].filter((attempt) => isActiveAttemptState(attempt.state));
+			if (
+				activeAttempts.length > 0 ||
+				run.finalValidationAttempts.some(
+					(attempt) => attempt.state === "running",
+				)
+			) {
+				throw new Error(`Cannot prune run ${runId} with active attempts`);
+			}
+
+			const referencedWorkerIds = new Set(
+				[...run.attempts, ...run.reviewAttempts, ...run.repairAttempts].flatMap(
+					(attempt) => (attempt.workerId ? [attempt.workerId] : []),
+				),
+			);
+			let workers: Awaited<ReturnType<WorkerBackend["list"]>> = [];
+			try {
+				workers = await this.dependencies.workers.list();
+			} catch {
+				// Terminal Git cleanup remains useful when the orchestrator is offline.
+			}
+			for (const worker of workers) {
+				const ownedByLabel =
+					worker.label?.startsWith(`pi-build-conductor:${run.id}:`) === true ||
+					worker.label?.startsWith(`${run.id}:`) === true;
+				if (
+					["starting", "online", "stopping"].includes(worker.status) &&
+					(referencedWorkerIds.has(worker.id) || ownedByLabel)
+				) {
+					await this.dependencies.workers.stop(worker.id);
+				}
+			}
+			return await this.dependencies.worktrees.pruneRunResources(run);
+		} finally {
+			await releaseLifecycle();
+		}
 	}
 
 	async approveAndLaunch(
@@ -938,6 +1044,28 @@ export class BuildConductor {
 		} finally {
 			recoveringRuns.delete(key);
 			await releaseLifecycle();
+		}
+	}
+
+	async retryAndLaunch(
+		runId: string,
+		repository: RepositoryInfo,
+		model?: WorkerModelSelection,
+		options: LaunchOptions = {},
+	): Promise<LaunchResult> {
+		const retried = await this.dependencies.store.transaction(runId, (run) => {
+			if (run.repositoryRoot !== repository.root) {
+				throw new Error(`Run ${runId} belongs to a different repository`);
+			}
+			return prepareFailedRunRetry(run, this.now());
+		});
+		try {
+			return await this.startScheduling(retried, repository, model, options);
+		} catch (error) {
+			throw new Error(
+				`Run ${runId} was prepared for retry but could not launch; resume it with /build-resume ${runId}`,
+				{ cause: error },
+			);
 		}
 	}
 
@@ -1351,6 +1479,15 @@ export class BuildConductor {
 				},
 			);
 			const cleanupError = await this.stopWorker(execution.workerId);
+			await this.finishAttemptLog(
+				execution.runId,
+				execution.attemptId,
+				result,
+				cleanupError ??
+					(timedOut
+						? `Worker execution timed out after ${this.workerTimeoutMs}ms`
+						: undefined),
+			);
 			const transitioned = await this.persistExecutionResult(
 				execution,
 				result,
@@ -1390,6 +1527,7 @@ export class BuildConductor {
 		}, this.workerTimeoutMs);
 		timeout.unref();
 		const poll = this.startWorkerStatusPolling(runId, workerId, controller);
+		let outcome: AuxiliaryExecution;
 		try {
 			const execution = await this.dependencies.workers.startPrompt(
 				workerId,
@@ -1397,6 +1535,7 @@ export class BuildConductor {
 				{
 					signal: controller.signal,
 					onEvent: (event) => {
+						this.recordAttemptProgress(runId, attemptId, event);
 						try {
 							options.onProgress?.({
 								runId,
@@ -1413,13 +1552,13 @@ export class BuildConductor {
 				},
 			);
 			const result = await this.waitForExecution(execution.completion);
-			return {
+			outcome = {
 				result,
 				timedOut,
 				cleanupError: await this.stopWorker(workerId),
 			};
 		} catch (error) {
-			return {
+			outcome = {
 				result: {
 					status: controller.signal.aborted ? "aborted" : "failed",
 					error: error instanceof Error ? error.message : String(error),
@@ -1432,6 +1571,16 @@ export class BuildConductor {
 			clearInterval(poll);
 			this.activeExecutions.delete(attemptId);
 		}
+		await this.finishAttemptLog(
+			runId,
+			attemptId,
+			outcome.result,
+			outcome.cleanupError ??
+				(timedOut
+					? `Worker execution timed out after ${this.workerTimeoutMs}ms`
+					: undefined),
+		);
+		return outcome;
 	}
 
 	private async launchReviewPass(
@@ -2992,6 +3141,7 @@ export class BuildConductor {
 				{
 					signal: executionController.signal,
 					onEvent: (event) => {
+						this.recordAttemptProgress(current.id, attempt.id, event);
 						try {
 							options.onProgress?.({
 								runId: current.id,

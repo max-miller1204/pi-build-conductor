@@ -242,6 +242,26 @@ describe("failed run retry control", () => {
 		expect(validateStoredRun(retried)).toBe(retried);
 	});
 
+	it("retries integration without rerunning an already validated task", () => {
+		const run = taskFailureRun();
+		const attempt = run.attempts.find((item) => item.taskId === "failed");
+		if (!attempt) {
+			throw new Error("Missing failed task attempt");
+		}
+		attempt.state = "succeeded";
+		attempt.commit = "source-failed";
+		attempt.evidence = { ...failedEvidence(), passed: true, checks: [] };
+
+		const retried = prepareFailedRunRetry(run, RETRIED_AT);
+
+		expect(retried.tasks.failed).toMatchObject({
+			state: "succeeded",
+			attemptIds: ["failed-1"],
+		});
+		expect(retried.tasks.failed).not.toHaveProperty("integrationError");
+		expect(validateStoredRun(retried)).toBe(retried);
+	});
+
 	it("returns reviewed for a failed final-validation attempt", () => {
 		const run = failedFinalValidationRun();
 		const finalAttempts = run.finalValidationAttempts;

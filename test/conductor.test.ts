@@ -12,6 +12,7 @@ import type {
 	PrepareTaskWorktreeInput,
 	WorktreeManager,
 } from "../src/git/worktrees.js";
+import { AttemptLogStore } from "../src/storage/attempt-log-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import type {
 	SpawnWorkerRequest,
@@ -98,6 +99,18 @@ class FakeWorkers implements WorkerBackend {
 	}
 }
 
+class ProgressWorkers extends FakeWorkers {
+	override startPrompt(
+		workerId: string,
+		prompt: string,
+		options: WorkerExecutionOptions = {},
+	): Promise<WorkerExecution> {
+		options.onEvent?.({ type: "agent_started" });
+		options.onEvent?.({ type: "text_delta", text: "working on it" });
+		return super.startPrompt(workerId, prompt, options);
+	}
+}
+
 class SlowStartWorkers extends FakeWorkers {
 	override startPrompt(
 		workerId: string,
@@ -123,6 +136,7 @@ class SlowStartWorkers extends FakeWorkers {
 class FakeWorktrees implements WorktreeManager {
 	integrationBranch?: string;
 	allocationInput?: PrepareTaskWorktreeInput;
+	prunedRunId?: string;
 
 	async prepareIntegrationBranch(
 		_repository: RepositoryInfo,
@@ -153,6 +167,17 @@ class FakeWorktrees implements WorktreeManager {
 	}
 
 	async removeTaskWorktree(): Promise<void> {}
+
+	async pruneRunResources(run: import("../src/domain/types.js").BuildRun) {
+		this.prunedRunId = run.id;
+		return {
+			removedWorktrees: ["/worktree"],
+			removedBranches: [],
+			retainedDirtyWorktrees: [],
+			retainedUnexpectedWorktrees: [],
+			retainedUnexpectedBranches: [],
+		};
+	}
 }
 
 class FailOnceWorktrees extends FakeWorktrees {
@@ -551,6 +576,101 @@ describe("BuildConductor vertical slice", () => {
 		expect(workers.calls.filter((call) => call.operation === "stop")).toEqual([
 			{ operation: "stop", value: "worker-1" },
 		]);
+	});
+
+	it("retries a failed task with a new immutable attempt", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-retry-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const worktrees = new FakeWorktrees();
+		const failing = new BuildConductor({
+			store,
+			workers: new FakeWorkers({ status: "failed", error: "worker failed" }),
+			worktrees,
+		});
+		const run = await createSingleTaskRun(failing);
+		const firstLaunch = await failing.approveAndLaunch(run, repository);
+		const failed = await firstLaunch.completion;
+		expect(failed.state).toBe("failed");
+		expect(failed.attempts).toHaveLength(1);
+
+		const retrying = new BuildConductor({
+			store,
+			workers: new FakeWorkers(),
+			worktrees,
+		});
+		const retry = await retrying.retryAndLaunch(run.id, repository);
+
+		expect(retry.run.attempts).toHaveLength(2);
+		expect(retry.run.attempts[0]).toEqual(failed.attempts[0]);
+		expect(retry.run.attempts[1]).toMatchObject({
+			number: 2,
+			state: "running",
+		});
+		await retrying.cancelRun(retry.run);
+		await retry.completion;
+	});
+
+	it("persists worker output before the attempt becomes terminal", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-output-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(join(directory, "runs"));
+		const attemptLogs = new AttemptLogStore(join(directory, "output"));
+		const workers = new ProgressWorkers({
+			status: "failed",
+			error: "worker failed",
+		});
+		const conductor = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+			attemptLogs,
+		});
+		const run = await createSingleTaskRun(conductor);
+
+		const launch = await conductor.approveAndLaunch(run, repository);
+		const failed = await launch.completion;
+		const attempt = failed.attempts[0];
+		if (!attempt) {
+			throw new Error("Missing failed attempt");
+		}
+		const entries = await attemptLogs.readTail(run.id, attempt.id);
+
+		expect(entries).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "progress",
+					event: { type: "text_delta", text: "working on it" },
+				}),
+				expect.objectContaining({ kind: "terminal", status: "failed" }),
+			]),
+		);
+	});
+
+	it("prunes terminal run resources through the lifecycle lease", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-prune-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const worktrees = new FakeWorktrees();
+		const workers = new FakeWorkers();
+		const conductor = new BuildConductor({ store, workers, worktrees });
+		const run = await createSingleTaskRun(conductor);
+		await store.transaction(run.id, (current) => ({
+			...current,
+			state: "cancelled",
+			updatedAt: "2026-01-01T00:01:00.000Z",
+		}));
+
+		const report = await conductor.pruneRunResources(run.id);
+
+		expect(report.removedWorktrees).toEqual(["/worktree"]);
+		expect(worktrees.prunedRunId).toBe(run.id);
 	});
 
 	it("serializes cancellation after a commit that has already started", async () => {

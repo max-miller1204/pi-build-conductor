@@ -77,9 +77,9 @@
       "id": "goal-mrtf4und-fa85808e",
       "title": "Add run inspection and control commands",
       "description": "Add commands and UI for listing runs, viewing task and attempt details, following worker output, retrying or cancelling work, pruning completed resources, and resuming interrupted runs.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:52.873Z",
-      "updatedAt": "2026-07-20T16:07:52.873Z"
+      "updatedAt": "2026-07-21T14:56:50.805Z"
     },
     {
       "id": "goal-mrtf4w5v-fa87f418",

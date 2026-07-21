@@ -14,6 +14,7 @@ import {
 	type WorkerModelSelection,
 } from "./conductor.js";
 import { validateTaskPlan } from "./domain/dag.js";
+import { retryableRunWork } from "./domain/run-control.js";
 import {
 	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
@@ -22,12 +23,24 @@ import {
 } from "./domain/types.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
+import {
+	latestWorkerAttempt,
+	renderAttemptDetails,
+	renderRunList,
+	renderRunOverview,
+	renderTaskDetails,
+	resolveRunAttempt,
+} from "./inspection/run-presentation.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import {
 	type PlanEditorSnapshot,
 	reviewPlanInteractively,
 } from "./planning/plan-editor.js";
 import { renderApprovalSummary } from "./planning/plan-presentation.js";
+import {
+	type AttemptLogEntry,
+	AttemptLogStore,
+} from "./storage/attempt-log-store.js";
 import { RunStore } from "./storage/run-store.js";
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
@@ -149,10 +162,15 @@ function configuredMaxConcurrentWorkers(): number {
 	return maximum;
 }
 
-function createRuntime(git: GitCli, repository: RepositoryInfo) {
-	const store = new RunStore(
+function createStore(repository: RepositoryInfo): RunStore {
+	return new RunStore(
 		join(repository.commonDirectory, "pi-build-conductor", "runs"),
 	);
+}
+
+function createRuntime(git: GitCli, repository: RepositoryInfo) {
+	const store = createStore(repository);
+	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
 	const workers = new OfficialOrchestratorBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
@@ -172,9 +190,311 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 				: { commandTimeoutMs: finalValidationTimeoutMs }),
 		}),
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
+		attemptLogs,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
-	return { conductor, store, workers };
+	return { attemptLogs, conductor, store, workers };
+}
+
+function assertRunRepository(run: BuildRun, repository: RepositoryInfo): void {
+	if (run.repositoryRoot !== repository.root) {
+		throw new Error(`Run ${run.id} belongs to a different repository`);
+	}
+}
+
+function assertRunBase(run: BuildRun, repository: RepositoryInfo): void {
+	assertRunRepository(run, repository);
+	if (
+		!repository.isClean ||
+		repository.currentBranch !== run.baseBranch ||
+		repository.head !== run.baseCommit
+	) {
+		throw new Error(
+			`Run ${run.id} must be resumed from clean ${run.baseBranch} at ${run.baseCommit}`,
+		);
+	}
+}
+
+function characterWidth(character: string): number {
+	const codePoint = character.codePointAt(0) ?? 0;
+	return codePoint <= 0x7f ? 1 : 2;
+}
+
+function truncateTerminalLine(value: string, width: number): string {
+	let output = "";
+	let used = 0;
+	for (const character of value) {
+		const next = characterWidth(character);
+		if (used + next > width) {
+			return width > 1 ? `${output.slice(0, -1)}…` : "";
+		}
+		output += character;
+		used += next;
+	}
+	return output;
+}
+
+function wrapTerminalLine(value: string, width: number): string[] {
+	if (!value) {
+		return [""];
+	}
+	const lines: string[] = [];
+	let current = "";
+	let used = 0;
+	for (const character of value) {
+		const next = characterWidth(character);
+		if (current && used + next > width) {
+			lines.push(current);
+			current = "";
+			used = 0;
+		}
+		if (next <= width) {
+			current += character;
+			used += next;
+		}
+	}
+	lines.push(current);
+	return lines;
+}
+
+function attemptLogText(entries: readonly AttemptLogEntry[]): string {
+	let output = "";
+	const line = (text: string) => {
+		if (output && !output.endsWith("\n")) {
+			output += "\n";
+		}
+		output += `${text}\n`;
+	};
+	for (const entry of entries) {
+		if (entry.kind === "truncated") {
+			line(`[truncated] ${entry.message}`);
+			continue;
+		}
+		if (entry.kind === "terminal") {
+			line(
+				`[${entry.timestamp}] worker ${entry.status}${entry.message ? `: ${entry.message}` : ""}`,
+			);
+			continue;
+		}
+		switch (entry.event.type) {
+			case "agent_started":
+				line(`[${entry.timestamp}] agent started`);
+				break;
+			case "text_delta":
+				output += entry.event.text;
+				break;
+			case "tool_started":
+				line(`[${entry.timestamp}] tool started: ${entry.event.toolName}`);
+				break;
+			case "tool_finished":
+				line(
+					`[${entry.timestamp}] tool ${entry.event.isError ? "failed" : "finished"}: ${entry.event.toolName}`,
+				);
+				break;
+			case "retrying":
+				line(`[${entry.timestamp}] retrying: ${entry.event.message}`);
+				break;
+		}
+	}
+	return output.trimEnd();
+}
+
+async function followAttemptOutput(
+	ctx: ExtensionCommandContext,
+	store: RunStore,
+	logs: AttemptLogStore,
+	runId: string,
+	attemptId: string,
+): Promise<void> {
+	const initial = await store.load(runId);
+	const resolution = resolveRunAttempt(initial, attemptId);
+	if (resolution.kind === "final-validation" || !resolution.attempt.workerId) {
+		throw new Error(`Attempt ${attemptId} has no worker output stream`);
+	}
+
+	if (ctx.mode !== "tui") {
+		const entries = await logs.readTail(runId, attemptId);
+		const captured = attemptLogText(entries);
+		ctx.ui.setWidget(`${runUiKey(runId)}:output`, [
+			`Worker output: ${attemptId}`,
+			...(captured ? captured.split("\n").slice(-40) : ["No captured output."]),
+		]);
+		ctx.ui.notify(
+			entries.length > 0
+				? `Showing captured output for ${attemptId}`
+				: `No captured output is available for ${attemptId}`,
+			"info",
+		);
+		return;
+	}
+
+	let interval: ReturnType<typeof setInterval> | undefined;
+	try {
+		await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+			let output = "Loading captured output...";
+			let state = resolution.attempt.state;
+			let refreshing = false;
+			const refresh = async () => {
+				if (refreshing) {
+					return;
+				}
+				refreshing = true;
+				try {
+					const [entries, fresh] = await Promise.all([
+						logs.readTail(runId, attemptId),
+						store.load(runId),
+					]);
+					output = attemptLogText(entries) || "No captured output yet.";
+					state = resolveRunAttempt(fresh, attemptId).attempt.state;
+					tui.requestRender();
+				} catch (error) {
+					output = errorMessage(error);
+					tui.requestRender();
+				} finally {
+					refreshing = false;
+				}
+			};
+			interval = setInterval(() => void refresh(), 500);
+			interval.unref();
+			void refresh();
+			return {
+				render: (width: number) => {
+					const contentWidth = Math.max(1, width);
+					const body = output
+						.split("\n")
+						.flatMap((value) => wrapTerminalLine(value, contentWidth))
+						.slice(-40)
+						.map((value) => truncateTerminalLine(value, contentWidth));
+					return [
+						truncateTerminalLine(
+							`Worker ${attemptId} (${state}) - Esc, Enter, or q to close`,
+							contentWidth,
+						),
+						...body,
+					];
+				},
+				handleInput: (data: string) => {
+					if (
+						data === "\u001b" ||
+						data === "\r" ||
+						data === "\n" ||
+						data === "q"
+					) {
+						done(undefined);
+					}
+				},
+				invalidate: () => {},
+			};
+		});
+	} finally {
+		if (interval) {
+			clearInterval(interval);
+		}
+	}
+}
+
+async function inspectRunInteractively(
+	ctx: ExtensionCommandContext,
+	store: RunStore,
+	logs: AttemptLogStore,
+	runId: string,
+): Promise<void> {
+	for (;;) {
+		const run = await store.load(runId);
+		ctx.ui.setWidget(runUiKey(run.id), renderRunOverview(run));
+		if (!ctx.hasUI) {
+			return;
+		}
+		const latest = latestWorkerAttempt(run);
+		const choice = await ctx.ui.select(`Build ${run.id}`, [
+			"Inspect task",
+			"Inspect attempt",
+			...(latest ? ["Follow latest worker output"] : []),
+			...(run.state === "failed" ? ["Prepare retry command"] : []),
+			...([
+				"running",
+				"integrating",
+				"reviewing",
+				"repairing",
+				"reviewed",
+				"validating",
+			].includes(run.state)
+				? ["Prepare cancel command"]
+				: []),
+			...([
+				"planning",
+				"awaiting_approval",
+				"running",
+				"integrating",
+				"reviewing",
+				"repairing",
+				"reviewed",
+				"validating",
+			].includes(run.state)
+				? ["Prepare resume command"]
+				: []),
+			...(["completed", "failed", "cancelled"].includes(run.state)
+				? ["Prepare prune command"]
+				: []),
+			"Close",
+		]);
+		if (!choice || choice === "Close") {
+			return;
+		}
+		if (choice === "Inspect task") {
+			const taskId = await ctx.ui.select(
+				"Task",
+				run.plan.tasks.map(
+					(task) => `${task.id} | ${run.tasks[task.id]?.state ?? "missing"}`,
+				),
+			);
+			if (taskId) {
+				ctx.ui.setWidget(
+					runUiKey(run.id),
+					renderTaskDetails(run, taskId.split(" | ")[0] ?? taskId),
+				);
+			}
+			continue;
+		}
+		if (choice === "Inspect attempt") {
+			const attempts = [
+				...run.attempts,
+				...run.reviewAttempts,
+				...run.repairAttempts,
+				...run.finalValidationAttempts,
+			];
+			if (attempts.length === 0) {
+				ctx.ui.notify("This run has no attempts yet", "info");
+				continue;
+			}
+			const attemptId = await ctx.ui.select(
+				"Attempt",
+				attempts.map((attempt) => `${attempt.id} | ${attempt.state}`),
+			);
+			if (attemptId) {
+				ctx.ui.setWidget(
+					runUiKey(run.id),
+					renderAttemptDetails(run, attemptId.split(" | ")[0] ?? attemptId),
+				);
+			}
+			continue;
+		}
+		if (choice === "Follow latest worker output" && latest) {
+			await followAttemptOutput(ctx, store, logs, run.id, latest.attempt.id);
+			continue;
+		}
+		const command =
+			choice === "Prepare retry command"
+				? `/build-retry ${run.id}`
+				: choice === "Prepare cancel command"
+					? `/build-cancel ${run.id}`
+					: choice === "Prepare prune command"
+						? `/build-prune ${run.id}`
+						: `/build-resume ${run.id}`;
+		ctx.ui.setEditorText(command);
+		ctx.ui.notify(`Prepared ${command}`, "info");
+		return;
+	}
 }
 
 function editorSnapshot(run: BuildRun): PlanEditorSnapshot {
@@ -529,6 +849,235 @@ function showLaunch(
 }
 
 export default function piBuildConductorExtension(pi: ExtensionAPI) {
+	pi.registerCommand("build-list", {
+		description: "List and inspect build runs for this repository",
+		handler: async (_args, ctx) => {
+			try {
+				const repository = await new GitCli().inspect(ctx.cwd);
+				const store = createStore(repository);
+				const entries = await store.scan();
+				const runs = entries.flatMap((entry) =>
+					entry.kind === "run" && entry.run.repositoryRoot === repository.root
+						? [entry.run]
+						: [],
+				);
+				const unreadable = entries.flatMap((entry) =>
+					entry.kind === "unreadable"
+						? [`Unreadable ${entry.runId}: ${entry.error}`]
+						: [],
+				);
+				ctx.ui.setWidget("pi-build-conductor:runs", [
+					...renderRunList(runs),
+					...unreadable,
+				]);
+				if (!ctx.hasUI || runs.length === 0) {
+					ctx.ui.notify(
+						runs.length === 0
+							? "No build runs found"
+							: `Found ${runs.length} runs`,
+						"info",
+					);
+					return;
+				}
+				const sorted = [...runs].sort(
+					(left, right) =>
+						right.updatedAt.localeCompare(left.updatedAt) ||
+						left.id.localeCompare(right.id),
+				);
+				const selected = await ctx.ui.select(
+					"Build runs",
+					sorted.map(
+						(run) =>
+							`${run.id} | ${run.state} | ${run.plan.title} | ${run.updatedAt}`,
+					),
+				);
+				if (selected) {
+					const runId = selected.split(" | ")[0];
+					if (runId) {
+						await inspectRunInteractively(
+							ctx,
+							store,
+							new AttemptLogStore(join(store.directory, "output")),
+							runId,
+						);
+					}
+				}
+			} catch (error) {
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-show", {
+		description: "Show run, task, or attempt details",
+		handler: async (args, ctx) => {
+			const [runId, subject, subjectId, ...extra] = args.trim().split(/\s+/);
+			if (!runId || extra.length > 0 || (subject && !subjectId)) {
+				ctx.ui.notify(
+					"Usage: /build-show <run-id> [task <task-id> | attempt <attempt-id>]",
+					"error",
+				);
+				return;
+			}
+			try {
+				const repository = await new GitCli().inspect(ctx.cwd);
+				const store = createStore(repository);
+				const run = await store.load(runId);
+				assertRunRepository(run, repository);
+				let lines: string[];
+				if (!subject) {
+					lines = renderRunOverview(run);
+				} else if (subject === "task" && subjectId) {
+					lines = renderTaskDetails(run, subjectId);
+				} else if (subject === "attempt" && subjectId) {
+					lines = renderAttemptDetails(run, subjectId);
+				} else {
+					throw new Error(
+						"Detail selector must be 'task <task-id>' or 'attempt <attempt-id>'",
+					);
+				}
+				ctx.ui.setWidget(runUiKey(run.id), lines);
+				ctx.ui.notify(`Showing build ${run.id}`, "info");
+			} catch (error) {
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-follow", {
+		description: "Replay and follow captured worker output",
+		handler: async (args, ctx) => {
+			const [runId, requestedAttemptId, ...extra] = args.trim().split(/\s+/);
+			if (!runId || extra.length > 0) {
+				ctx.ui.notify("Usage: /build-follow <run-id> [attempt-id]", "error");
+				return;
+			}
+			try {
+				const repository = await new GitCli().inspect(ctx.cwd);
+				const store = createStore(repository);
+				const run = await store.load(runId);
+				assertRunRepository(run, repository);
+				const attemptId =
+					requestedAttemptId ?? latestWorkerAttempt(run)?.attempt.id;
+				if (!attemptId) {
+					throw new Error(`Run ${runId} has no worker attempts to follow`);
+				}
+				await followAttemptOutput(
+					ctx,
+					store,
+					new AttemptLogStore(join(store.directory, "output")),
+					runId,
+					attemptId,
+				);
+			} catch (error) {
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-retry", {
+		description: "Retry safe failed work while preserving attempt history",
+		handler: async (args, ctx) => {
+			const [runId, requestedTaskId, ...extra] = args.trim().split(/\s+/);
+			if (!runId || extra.length > 0) {
+				ctx.ui.notify("Usage: /build-retry <run-id> [task-id]", "error");
+				return;
+			}
+			ctx.ui.setStatus("pi-build-conductor", "preparing retry");
+			try {
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				const runtime = createRuntime(git, repository);
+				const run = await runtime.store.load(runId);
+				assertRunBase(run, repository);
+				const assessment = retryableRunWork(run);
+				if (!assessment.retryable) {
+					throw new Error(assessment.reason);
+				}
+				if (
+					requestedTaskId &&
+					(assessment.phase !== "tasks" ||
+						!assessment.failedTaskIds.includes(requestedTaskId))
+				) {
+					throw new Error(
+						`Task ${requestedTaskId} is not part of this run's retryable failed work`,
+					);
+				}
+				if (ctx.hasUI) {
+					const confirmed = await ctx.ui.confirm(
+						`Retry build ${run.id}?`,
+						assessment.phase === "tasks"
+							? `New attempts will be created for failed tasks: ${assessment.failedTaskIds.join(", ")}`
+							: "A new final-validation attempt will run the approved complete suite.",
+					);
+					if (!confirmed) {
+						ctx.ui.setStatus("pi-build-conductor", undefined);
+						ctx.ui.notify("Retry cancelled", "info");
+						return;
+					}
+				}
+				const result = await runtime.conductor.retryAndLaunch(
+					run.id,
+					repository,
+					selectedWorkerModel(ctx),
+					lifecycleUi(ctx),
+				);
+				showLaunch(ctx, result, runtime.store);
+			} catch (error) {
+				ctx.ui.setStatus("pi-build-conductor", "retry failed");
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("build-prune", {
+		description: "Prune safe resources retained by a terminal build run",
+		handler: async (args, ctx) => {
+			const runId = args.trim();
+			if (!runId || /\s/.test(runId)) {
+				ctx.ui.notify("Usage: /build-prune <run-id>", "error");
+				return;
+			}
+			try {
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				const runtime = createRuntime(git, repository);
+				const run = await runtime.store.load(runId);
+				assertRunRepository(run, repository);
+				if (!["completed", "failed", "cancelled"].includes(run.state)) {
+					throw new Error(`Run ${runId} is not terminal and cannot be pruned`);
+				}
+				if (
+					ctx.hasUI &&
+					!(await ctx.ui.confirm(
+						`Prune build ${runId}?`,
+						"Clean terminal worktrees and expendable branches will be removed. Integration and source-evidence branches, dirty worktrees, snapshots, and output logs are retained.",
+					))
+				) {
+					ctx.ui.notify("Prune cancelled", "info");
+					return;
+				}
+				const report = await runtime.conductor.pruneRunResources(runId);
+				ctx.ui.setWidget(`${runUiKey(runId)}:prune`, [
+					`Pruned build ${runId}`,
+					`Removed worktrees: ${report.removedWorktrees.length}`,
+					...report.removedWorktrees.map((path) => `- ${path}`),
+					`Removed branches: ${report.removedBranches.length}`,
+					...report.removedBranches.map((branch) => `- ${branch}`),
+					`Retained dirty worktrees: ${report.retainedDirtyWorktrees.length}`,
+					...report.retainedDirtyWorktrees.map((path) => `- ${path}`),
+					`Retained unexpected worktrees: ${report.retainedUnexpectedWorktrees.length}`,
+					...report.retainedUnexpectedWorktrees.map((path) => `- ${path}`),
+					`Retained unexpected branches: ${report.retainedUnexpectedBranches.length}`,
+					...report.retainedUnexpectedBranches.map((branch) => `- ${branch}`),
+				]);
+				ctx.ui.notify(`Finished pruning build ${runId}`, "info");
+			} catch (error) {
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
 	pi.registerCommand("build", {
 		description: "Plan and launch isolated build workers from a handoff file",
 		handler: async (args, ctx) => {
@@ -590,7 +1139,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 		description: "Cancel a build run and stop its active workers",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
-			if (!runId) {
+			if (!runId || /\s/.test(runId)) {
 				ctx.ui.notify("Usage: /build-cancel <run-id>", "error");
 				return;
 			}
@@ -600,19 +1149,30 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				const repository = await git.inspect(ctx.cwd);
 				const { conductor, store } = createRuntime(git, repository);
 				const stored = await store.load(runId);
-				if (stored.repositoryRoot !== repository.root) {
-					throw new Error(`Run ${runId} belongs to a different repository`);
+				assertRunRepository(stored, repository);
+				if (
+					!["completed", "failed", "cancelled"].includes(stored.state) &&
+					ctx.hasUI &&
+					!(await ctx.ui.confirm(
+						`Cancel build ${runId}?`,
+						`The run is ${stored.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
+					))
+				) {
+					ctx.ui.setStatus("pi-build-conductor", undefined);
+					ctx.ui.notify("Cancellation declined", "info");
+					return;
 				}
 				const cancelled = await conductor.cancelRun(stored);
 				const key = runUiKey(runId);
 				ctx.ui.setStatus("pi-build-conductor", undefined);
-				ctx.ui.setStatus(key, `build ${runId}: cancelled`);
-				ctx.ui.setWidget(key, [
-					`Build ${runId}`,
-					`Run: ${cancelled.state}`,
-					`State file: ${store.directory}`,
-				]);
-				ctx.ui.notify(`Build ${runId} cancelled and workers stopped`, "info");
+				ctx.ui.setStatus(key, `build ${runId}: ${cancelled.state}`);
+				ctx.ui.setWidget(key, renderRunOverview(cancelled));
+				ctx.ui.notify(
+					cancelled.state === "cancelled"
+						? `Build ${runId} cancelled and workers stopped`
+						: `Build ${runId} was already ${cancelled.state}; no lifecycle work was changed`,
+					"info",
+				);
 			} catch (error) {
 				ctx.ui.setStatus("pi-build-conductor", "cancellation failed");
 				ctx.ui.notify(errorMessage(error), "error");
@@ -624,7 +1184,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 		description: "Recover an interrupted build run and launch ready retries",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
-			if (!runId) {
+			if (!runId || /\s/.test(runId)) {
 				ctx.ui.notify("Usage: /build-resume <run-id>", "error");
 				return;
 			}
@@ -640,10 +1200,17 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				const runtime = createRuntime(git, repository);
 				const { conductor, store } = runtime;
 				const stored = await store.load(runId);
-				if (stored.repositoryRoot !== repository.root) {
-					throw new Error(`Run ${runId} belongs to a different repository`);
+				assertRunRepository(stored, repository);
+				if (stored.state === "failed") {
+					throw new Error(
+						`Run ${runId} failed; inspect it with /build-show ${runId} and retry safe failed work with /build-retry ${runId}`,
+					);
+				}
+				if (stored.state === "cancelled") {
+					throw new Error(`Cancelled run ${runId} cannot be resumed`);
 				}
 				if (["planning", "awaiting_approval"].includes(stored.state)) {
+					assertRunBase(stored, repository);
 					if (!ctx.hasUI) {
 						throw new Error(
 							`Run ${runId} still requires interactive plan approval`,
@@ -673,6 +1240,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					);
 					return;
 				}
+				assertRunBase(recovered, freshRepository);
 				ctx.ui.setStatus("pi-build-conductor", "launching retries");
 				const result = await conductor.resumeAndLaunch(
 					recovered,

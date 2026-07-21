@@ -45,6 +45,7 @@ export interface WorktreeManager {
 	): Promise<string>;
 	removeTaskWorktree(repositoryRoot: string, path: string): Promise<void>;
 	reconcileRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
+	pruneRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
 }
 
 export class GitWorktreeManager implements WorktreeManager {
@@ -229,6 +230,169 @@ export class GitWorktreeManager implements WorktreeManager {
 			throw new Error(`Refusing to remove an unexpected worktree: ${path}`);
 		}
 		await this.git.removeWorktree(repository.root, target);
+	}
+
+	async pruneRunResources(
+		run: BuildRun,
+	): Promise<ResourceReconciliationReport> {
+		if (!["completed", "failed", "cancelled"].includes(run.state)) {
+			throw new Error(`Cannot prune resources for non-terminal run ${run.id}`);
+		}
+		if (
+			!this.git.listWorktrees ||
+			!this.git.listBranches ||
+			!this.git.deleteBranch
+		) {
+			return {
+				removedWorktrees: [],
+				removedBranches: [],
+				retainedDirtyWorktrees: [],
+				retainedUnexpectedWorktrees: [],
+				retainedUnexpectedBranches: [],
+			};
+		}
+
+		const orphanReport = await this.reconcileRunResources(run);
+		const runRoot = resolve(this.worktreeRoot, run.id);
+		const prefix = `conductor/${run.id}/`;
+		const expectedWorktreeHeads = new Map<string, string>();
+		const deletableBranchHeads = new Map<string, string>();
+		for (const attempt of run.attempts) {
+			expectedWorktreeHeads.set(
+				resolve(attempt.worktreePath),
+				attempt.commit ?? attempt.baseCommit,
+			);
+			if (!attempt.commit) {
+				deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
+			}
+		}
+		for (const attempt of run.reviewAttempts) {
+			expectedWorktreeHeads.set(
+				resolve(attempt.worktreePath),
+				attempt.baseCommit,
+			);
+			deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
+		}
+		for (const attempt of run.repairAttempts) {
+			expectedWorktreeHeads.set(
+				resolve(attempt.worktreePath),
+				attempt.commit ?? attempt.baseCommit,
+			);
+			if (!attempt.commit) {
+				deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
+			}
+		}
+		for (const attempt of run.finalValidationAttempts) {
+			expectedWorktreeHeads.set(
+				resolve(attempt.worktreePath),
+				attempt.integrationCommit,
+			);
+		}
+
+		const removedWorktrees: string[] = [];
+		const retainedDirtyWorktrees: string[] = [];
+		const retainedUnexpectedWorktrees: string[] = [];
+		for (const worktree of await this.git.listWorktrees(run.repositoryRoot)) {
+			const target = resolve(worktree.path);
+			const fromRunRoot = relative(runRoot, target);
+			if (
+				fromRunRoot === "" ||
+				fromRunRoot === ".." ||
+				fromRunRoot.startsWith(
+					`..${process.platform === "win32" ? "\\" : "/"}`,
+				) ||
+				isAbsolute(fromRunRoot)
+			) {
+				continue;
+			}
+			const expectedHead = expectedWorktreeHeads.get(target);
+			if (!expectedHead) {
+				continue;
+			}
+			const status = await this.git.status(target);
+			if (status.length > 0) {
+				retainedDirtyWorktrees.push(target);
+				continue;
+			}
+			if (worktree.head !== expectedHead) {
+				retainedUnexpectedWorktrees.push(target);
+				continue;
+			}
+			try {
+				await this.git.removeWorktree(run.repositoryRoot, target, false);
+				removedWorktrees.push(target);
+			} catch {
+				retainedUnexpectedWorktrees.push(target);
+			}
+		}
+		await this.git.pruneWorktrees?.(run.repositoryRoot);
+
+		const checkedOutBranches = new Set(
+			(await this.git.listWorktrees(run.repositoryRoot)).flatMap((worktree) =>
+				worktree.branch ? [worktree.branch] : [],
+			),
+		);
+		const removedBranches: string[] = [];
+		const retainedUnexpectedBranches: string[] = [];
+		for (const branch of await this.git.listBranches(
+			run.repositoryRoot,
+			prefix,
+		)) {
+			if (
+				branch.name === run.integrationBranch ||
+				checkedOutBranches.has(branch.name)
+			) {
+				continue;
+			}
+			const expectedHead = deletableBranchHeads.get(branch.name);
+			if (!expectedHead) {
+				continue;
+			}
+			if (branch.head !== expectedHead) {
+				retainedUnexpectedBranches.push(branch.name);
+				continue;
+			}
+			try {
+				await this.git.deleteBranch(
+					run.repositoryRoot,
+					branch.name,
+					expectedHead,
+				);
+				removedBranches.push(branch.name);
+			} catch {
+				retainedUnexpectedBranches.push(branch.name);
+			}
+		}
+		const allRemovedWorktrees = new Set([
+			...orphanReport.removedWorktrees,
+			...removedWorktrees,
+		]);
+		const allRemovedBranches = new Set([
+			...orphanReport.removedBranches,
+			...removedBranches,
+		]);
+		return {
+			removedWorktrees: [...allRemovedWorktrees],
+			removedBranches: [...allRemovedBranches],
+			retainedDirtyWorktrees: [
+				...new Set([
+					...orphanReport.retainedDirtyWorktrees,
+					...retainedDirtyWorktrees,
+				]),
+			].filter((path) => !allRemovedWorktrees.has(path)),
+			retainedUnexpectedWorktrees: [
+				...new Set([
+					...orphanReport.retainedUnexpectedWorktrees,
+					...retainedUnexpectedWorktrees,
+				]),
+			].filter((path) => !allRemovedWorktrees.has(path)),
+			retainedUnexpectedBranches: [
+				...new Set([
+					...orphanReport.retainedUnexpectedBranches,
+					...retainedUnexpectedBranches,
+				]),
+			].filter((branch) => !allRemovedBranches.has(branch)),
+		};
 	}
 
 	async reconcileRunResources(

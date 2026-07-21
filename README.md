@@ -10,7 +10,7 @@ This repository is an early MVP.
 
 Implemented:
 
-- `/build <handoff-file>`, `/build-resume <run-id>`, and `/build-cancel <run-id>` Pi commands
+- `/build <handoff-file>`, `/build-list`, `/build-show`, `/build-follow`, `/build-retry`, `/build-resume`, `/build-cancel`, and `/build-prune` Pi commands
 - Planning through the selected Pi model
 - Optional `<handoff-file>.plan.json` sidecar loading
 - Structured DAG review with task, dependency, ordering, command, title, and worker-limit editing
@@ -44,6 +44,10 @@ Implemented:
 - Strict linear integration history and untouched user worktree verification
 - Durable versioned merge-ready evidence for commits, reviews, risks, checks, and Git state
 - Live Pi status and widget updates for task, review, repair, validation, and terminal state
+- Durable, bounded worker activity journals with replay and live terminal following
+- Repository-scoped run browsing with task, attempt, evidence, branch, worktree, and failure details
+- Safe failed-task and final-validation retries that preserve immutable attempt history
+- Explicit terminal-run pruning that retains dirty, unexpected, integration, and source-evidence resources
 - Tests for DAG validation, scheduling, recovery, Git isolation, focused and final validation, conductor-owned commits, integration history, review, repair, worker launch, completion, failure, timeout, and cancellation
 
 ## Architecture
@@ -125,7 +129,7 @@ The command performs these steps:
 9. Selects ready tasks in deterministic plan order, up to the approved concurrency limit.
 10. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/` for each selected task.
 11. Spawns an independent Pi instance for each task through the official orchestrator and sends its task prompt.
-12. Streams concurrent worker activity into Pi's live status UI.
+12. Streams concurrent worker activity into Pi's live status UI and a durable per-attempt journal.
 13. Detects terminal Pi events and stops each worker process before inspecting its output.
 14. Verifies the assigned branch and base commit, rejects conflicts or out-of-scope changes, and records a diff fingerprint.
 15. Runs `git diff --check` and the exact focused validation commands approved in the plan.
@@ -204,6 +208,69 @@ Dirty orphan worktrees and clean orphan branches containing unexpected commits a
 Run schema 4 and 5 snapshots migrate deterministically to schema 6 with one imported plan revision.
 Run schemas 2 and 3 and plan schema 2 still require a new explicitly approved run.
 The monotonic run snapshot `revision` remains separate from the immutable `planRevision` history.
+
+## Run inspection and control
+
+List repository-scoped runs and open the interactive inspector with:
+
+```text
+/build-list
+```
+
+The list is ordered by most recent update and remains usable when another run snapshot is malformed.
+The inspector shows repository and Git refs, plan revision, task states, review and validation progress, attempt counts, and the recommended next command.
+It provides menus for task and attempt details, worker output, and preparing applicable control commands.
+
+Show deterministic details directly with:
+
+```text
+/build-show <run-id>
+/build-show <run-id> task <task-id>
+/build-show <run-id> attempt <attempt-id>
+```
+
+Attempt details include worker identifiers, timestamps, branches, worktrees, source and integrated commits, errors, changed files, diff fingerprints, and bounded validation output tails.
+
+Replay a completed worker journal or follow an active worker in the terminal with:
+
+```text
+/build-follow <run-id> [attempt-id]
+```
+
+The journal records assistant text deltas, tool start and finish markers, retry notices, and terminal worker status.
+It does not contain raw subprocess output that the orchestrator protocol did not emit.
+Journal text is stripped of terminal control sequences, each file is capped at 5 MiB, and display tails are bounded.
+Runs created before journal support report that no captured output is available.
+
+Retry safe failed work with:
+
+```text
+/build-retry <run-id> [task-id]
+```
+
+Task-phase retry resets every concurrently failed task and its blocked descendants in one transaction, then creates new attempts through the normal dependency-aware scheduler.
+The optional task identifier verifies that the requested task belongs to the retry set, but all failed tasks are retried together so the run cannot remain stranded.
+Integration failures reuse an already validated source commit rather than rerunning the worker.
+Final-validation failure creates a new detached attempt for the approved complete suite.
+Historical attempts and evidence are never rewritten.
+Review and repair policy failures are deliberately not retried under the same approved plan because doing so requires changing review-round authority.
+Interrupted work must use `/build-resume` so recovery can reconcile workers, commits, and resources first.
+
+Cancellation now requests confirmation in interactive modes and remains idempotent:
+
+```text
+/build-cancel <run-id>
+```
+
+Prune clean disposable resources from a completed, failed, or cancelled run with:
+
+```text
+/build-prune <run-id>
+```
+
+Pruning retains the integration branch, task and repair source-evidence branches, dirty worktrees, resources with unexpected commits, run snapshots, and worker journals.
+It removes only recorded clean terminal worktrees and expendable branches at their proven expected heads.
+Repeated pruning is harmless.
 
 ## Review and repair policy
 

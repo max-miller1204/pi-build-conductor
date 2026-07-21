@@ -270,6 +270,113 @@ describe("GitWorktreeManager", () => {
 		expect((await git.inspect(path)).isClean).toBe(true);
 	});
 
+	it("explicitly prunes clean terminal attempt resources", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const allocation = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		const run = createRun(repositoryRoot, repository.head);
+		const task = run.tasks.implementation;
+		if (!task) {
+			throw new Error("Missing task fixture");
+		}
+		run.state = "failed";
+		run.tasks.implementation = {
+			...task,
+			state: "failed",
+			attemptIds: ["implementation-1"],
+		};
+		run.attempts = [
+			{
+				id: "implementation-1",
+				taskId: "implementation",
+				number: 1,
+				state: "failed",
+				branch: allocation.branch,
+				worktreePath: allocation.path,
+				baseCommit: repository.head,
+				startedAt: run.createdAt,
+				finishedAt: run.updatedAt,
+				error: "worker failed",
+			},
+		];
+
+		const report = await manager.pruneRunResources(run);
+
+		expect(report.removedWorktrees).toEqual([allocation.path]);
+		expect(report.removedBranches).toEqual([allocation.branch]);
+		expect(await git.branchExists(repositoryRoot, run.integrationBranch)).toBe(
+			true,
+		);
+		expect(await git.branchExists(repositoryRoot, allocation.branch)).toBe(
+			false,
+		);
+		await expect(lstat(allocation.path)).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		expect(await manager.pruneRunResources(run)).toMatchObject({
+			removedWorktrees: [],
+			removedBranches: [],
+		});
+	});
+
+	it("retains dirty terminal attempt resources during explicit pruning", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const allocation = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		await writeFile(
+			join(allocation.path, "worker-output.txt"),
+			"retain",
+			"utf8",
+		);
+		const run = createRun(repositoryRoot, repository.head);
+		run.state = "cancelled";
+		run.attempts = [
+			{
+				id: "implementation-1",
+				taskId: "implementation",
+				number: 1,
+				state: "cancelled",
+				branch: allocation.branch,
+				worktreePath: allocation.path,
+				baseCommit: repository.head,
+				startedAt: run.createdAt,
+				finishedAt: run.updatedAt,
+			},
+		];
+
+		const report = await manager.pruneRunResources(run);
+
+		expect(report.retainedDirtyWorktrees).toEqual([allocation.path]);
+		expect(report.removedWorktrees).toEqual([]);
+		expect(await git.branchExists(repositoryRoot, allocation.branch)).toBe(
+			true,
+		);
+	});
+
 	it("creates and safely removes a detached final validation worktree", async () => {
 		const repositoryRoot = await createRepository();
 		const git = new GitCli();

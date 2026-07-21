@@ -236,8 +236,21 @@ export function recommendedRunAction(run: BuildRun): RecommendedRunAction {
 	return { action: "none", reason: assessment.reason };
 }
 
-function resetFailedTask(task: RunTask): RunTask {
-	const { integrationError: _integrationError, ...historicalTask } = task;
+function resetFailedTask(run: BuildRun, task: RunTask): RunTask {
+	const { integrationError, ...historicalTask } = task;
+	if (
+		integrationError &&
+		task.attemptIds.some((attemptId) =>
+			run.attempts.some(
+				(attempt) =>
+					attempt.id === attemptId &&
+					attempt.state === "succeeded" &&
+					attempt.commit !== undefined,
+			),
+		)
+	) {
+		return { ...historicalTask, state: "succeeded" };
+	}
 	return { ...historicalTask, state: "planned" };
 }
 
@@ -260,7 +273,7 @@ export function prepareFailedRunRetry(run: BuildRun, now: string): BuildRun {
 	const tasks = Object.fromEntries(
 		Object.entries(run.tasks).map(([taskId, task]) => {
 			if (failedIds.has(taskId)) {
-				return [taskId, resetFailedTask(task)];
+				return [taskId, resetFailedTask(run, task)];
 			}
 			if (resetIds.has(taskId)) {
 				return [taskId, { ...task, state: "planned" as const }];
