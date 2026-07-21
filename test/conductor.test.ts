@@ -469,6 +469,110 @@ describe("BuildConductor vertical slice", () => {
 		expect(cancelled.tasks.implementation?.integratedCommit).toBeUndefined();
 	});
 
+	it("cancels final validation from a separately constructed conductor", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-final-cancel-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new FakeWorkers({ status: "succeeded" });
+		const finalization = createFakeFinalizationDependencies();
+		let markValidationStarted = () => {};
+		const validationStarted = new Promise<void>((resolve) => {
+			markValidationStarted = resolve;
+		});
+		let aborted = false;
+		const finalValidator = {
+			validate(input: { signal?: AbortSignal }) {
+				markValidationStarted();
+				return new Promise<never>((_resolve, reject) => {
+					input.signal?.addEventListener(
+						"abort",
+						() => {
+							aborted = true;
+							reject(new Error("Final validation aborted"));
+						},
+						{ once: true },
+					);
+				});
+			},
+		};
+		const dependencies = {
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+			git: finalization.git,
+			validator: finalization.validator,
+			finalValidator,
+			verifyReviewWorktree: finalization.verifyReviewWorktree,
+		};
+		const conductor = new ProductionBuildConductor(dependencies);
+		const cancellingConductor = new ProductionBuildConductor(dependencies);
+		const run = await createSingleTaskRun(conductor);
+		const launch = await conductor.approveAndLaunch(run, repository);
+		await Promise.race([
+			validationStarted,
+			launch.completion.then((result) => {
+				throw new Error(
+					`Run ended before final validation: ${result.state}; ${result.finalValidationAttempts.at(-1)?.error ?? result.reviewRounds.at(-1)?.error ?? result.reviewAttempts.find((attempt) => attempt.error)?.error ?? result.repairAttempts.find((attempt) => attempt.error)?.error ?? result.attempts.find((attempt) => attempt.error)?.error ?? "no lifecycle error"}`,
+				);
+			}),
+		]);
+
+		const cancelled = await cancellingConductor.cancelRun(launch.run);
+		const completed = await launch.completion;
+
+		expect(aborted).toBe(true);
+		expect(cancelled.state).toBe("cancelled");
+		expect(completed.state).toBe("cancelled");
+		expect(completed.mergeReadyEvidence).toBeUndefined();
+	});
+
+	it("re-verifies Git evidence before reporting a completed run on resume", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-completed-resume-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const finalization = createFakeFinalizationDependencies();
+		const dependencies = {
+			store,
+			workers: new FakeWorkers({ status: "succeeded" }),
+			worktrees: new FakeWorktrees(),
+			git: finalization.git,
+			validator: finalization.validator,
+			finalValidator: finalization.finalValidator,
+			verifyReviewWorktree: finalization.verifyReviewWorktree,
+		};
+		const conductor = new ProductionBuildConductor(dependencies);
+		const run = await createSingleTaskRun(conductor);
+		const launch = await conductor.approveAndLaunch(run, repository);
+		const completed = await launch.completion;
+		if (completed.state !== "completed") {
+			throw new Error(
+				completed.finalValidationAttempts.at(-1)?.error ??
+					completed.reviewRounds.at(-1)?.error ??
+					completed.reviewAttempts.find((attempt) => attempt.error)?.error ??
+					completed.attempts.find((attempt) => attempt.error)?.error ??
+					`Run ended in ${completed.state}`,
+			);
+		}
+		const movedGit = {
+			...finalization.git,
+			async verifyMergeReadyHistory(): Promise<never> {
+				throw new Error("Integration branch moved");
+			},
+		} as GitClient;
+		const recovering = new ProductionBuildConductor({
+			...dependencies,
+			git: movedGit,
+		});
+
+		await expect(recovering.recoverRun(run.id)).rejects.toThrow(
+			/Integration branch moved/,
+		);
+	});
+
 	it("preserves cancellation while a prompt is starting", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-start-cancel-"),

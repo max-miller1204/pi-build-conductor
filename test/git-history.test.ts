@@ -185,7 +185,7 @@ describe("GitCli.verifyMergeReadyHistory", () => {
 				],
 				verifiedAt: "2026-01-01T00:00:00.000Z",
 			}),
-		).rejects.toThrow(/does not match source commit/);
+		).rejects.toThrow(/does not exactly match source commit/);
 		await expect(
 			git.verifyMergeReadyHistory({
 				repositoryRoot,

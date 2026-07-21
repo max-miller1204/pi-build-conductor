@@ -67,7 +67,9 @@ export async function executeValidationCommand(
 		let timedOut = false;
 		let aborted = false;
 		let settled = false;
+		let closeExitCode: number | null | undefined;
 		let forceKill: NodeJS.Timeout | undefined;
+		let forceKillCompleted = false;
 		const detached = process.platform !== "win32";
 		const child = spawn(command.command, command.args, {
 			cwd,
@@ -86,11 +88,32 @@ export async function executeValidationCommand(
 			}
 			child.kill(signalName);
 		};
+		const finish = () => {
+			if (
+				settled ||
+				closeExitCode === undefined ||
+				((timedOut || aborted) && !forceKillCompleted)
+			) {
+				return;
+			}
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			resolvePromise({
+				exitCode: closeExitCode,
+				stdoutTail: stdout.toString("utf8"),
+				stderrTail: stderr.toString("utf8"),
+				timedOut,
+				aborted,
+			});
+		};
 		const terminate = () => {
 			kill("SIGTERM");
 			if (!forceKill) {
-				forceKill = setTimeout(() => kill("SIGKILL"), 1_000);
-				forceKill.unref();
+				forceKill = setTimeout(() => {
+					kill("SIGKILL");
+					forceKillCompleted = true;
+					finish();
+				}, 1_000);
 			}
 		};
 		const timeout = setTimeout(() => {
@@ -116,22 +139,9 @@ export async function executeValidationCommand(
 			stderr = appendTail(stderr, Buffer.from(error.message), outputTailBytes);
 		});
 		child.on("close", (exitCode) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
+			closeExitCode = exitCode;
 			clearTimeout(timeout);
-			if (forceKill) {
-				clearTimeout(forceKill);
-			}
-			signal?.removeEventListener("abort", onAbort);
-			resolvePromise({
-				exitCode,
-				stdoutTail: stdout.toString("utf8"),
-				stderrTail: stderr.toString("utf8"),
-				timedOut,
-				aborted,
-			});
+			finish();
 		});
 	});
 }

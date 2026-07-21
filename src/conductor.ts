@@ -157,6 +157,7 @@ When finished, summarize changed files and test evidence.`;
 const runMutationTails = new Map<string, Promise<void>>();
 const activeSchedulingRuns = new Set<string>();
 const recoveringRuns = new Set<string>();
+const activeFinalValidations = new Map<string, AbortController>();
 const lifecycleFinalizations = new Map<
 	string,
 	{ runKey: string; completion: Promise<void> }
@@ -312,7 +313,6 @@ export class BuildConductor {
 		string,
 		{ runId: string; controller: AbortController }
 	>();
-	private readonly activeFinalValidations = new Map<string, AbortController>();
 	private readonly workerCleanup = new Map<
 		string,
 		Promise<string | undefined>
@@ -447,9 +447,7 @@ export class BuildConductor {
 				active.controller.abort(new Error("Run cancelled"));
 			}
 		}
-		this.activeFinalValidations
-			.get(activeRun.id)
-			?.abort(new Error("Run cancelled"));
+		activeFinalValidations.get(runKey)?.abort(new Error("Run cancelled"));
 		const cleanupErrors: string[] = [];
 		const workerIds = new Set(
 			[
@@ -786,6 +784,21 @@ export class BuildConductor {
 						`Integration branch ${recovered.integrationBranch} is at ${actualHead}, expected ${recordedHead}`,
 					);
 				}
+			}
+			if (recovered.state === "completed") {
+				const evidence = recovered.mergeReadyEvidence;
+				if (!evidence) {
+					throw new Error(`Completed run ${runId} has no merge-ready evidence`);
+				}
+				await this.dependencies.git.verifyMergeReadyHistory({
+					repositoryRoot: recovered.repositoryRoot,
+					integrationBranch: recovered.integrationBranch,
+					integrationHead: recovered.integrationHead,
+					baseBranch: recovered.baseBranch,
+					baseCommit: recovered.baseCommit,
+					commits: evidence.commits,
+					verifiedAt: this.now(),
+				});
 			}
 			return recovered.state === "running" &&
 				!recovered.attempts.some((attempt) =>
@@ -2222,7 +2235,8 @@ export class BuildConductor {
 			startedAt: this.now(),
 		};
 		const controller = new AbortController();
-		this.activeFinalValidations.set(runId, controller);
+		const finalValidationKey = schedulingKey(this.dependencies.store, runId);
+		activeFinalValidations.set(finalValidationKey, controller);
 		try {
 			current = await mutateStoredRun(
 				this.dependencies.store,
@@ -2241,7 +2255,7 @@ export class BuildConductor {
 							},
 			);
 		} catch (error) {
-			this.activeFinalValidations.delete(runId);
+			activeFinalValidations.delete(finalValidationKey);
 			throw error;
 		}
 		if (
@@ -2250,7 +2264,7 @@ export class BuildConductor {
 				(item) => item.id === attempt.id && item.state === "running",
 			)
 		) {
-			this.activeFinalValidations.delete(runId);
+			activeFinalValidations.delete(finalValidationKey);
 			return current;
 		}
 		notifyRunUpdated(options, current);
@@ -2389,7 +2403,7 @@ export class BuildConductor {
 			notifyRunUpdated(options, failed);
 			return failed;
 		} finally {
-			this.activeFinalValidations.delete(runId);
+			activeFinalValidations.delete(finalValidationKey);
 		}
 	}
 

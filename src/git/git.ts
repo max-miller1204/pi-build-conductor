@@ -14,90 +14,6 @@ import type {
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
 
-async function gitPatchId(cwd: string, commit: string): Promise<string> {
-	return new Promise<string>((resolvePromise, reject) => {
-		const show = spawn(
-			"git",
-			[
-				"show",
-				"--pretty=format:",
-				"--binary",
-				"--no-ext-diff",
-				"--end-of-options",
-				commit,
-			],
-			{ cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] },
-		);
-		const patchId = spawn("git", ["patch-id", "--stable"], {
-			cwd,
-			shell: false,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-		let output = "";
-		let errors = "";
-		let settled = false;
-		const fail = (error: unknown) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			show.kill("SIGKILL");
-			patchId.kill("SIGKILL");
-			reject(error instanceof Error ? error : new Error(String(error)));
-		};
-		const append = (current: string, chunk: Buffer): string => {
-			const next = current + chunk.toString("utf8");
-			if (Buffer.byteLength(next) > MAX_GIT_OUTPUT_BYTES) {
-				fail(new Error(`Git patch output exceeded the limit for ${commit}`));
-			}
-			return next;
-		};
-		show.stdout.pipe(patchId.stdin);
-		show.stderr.on("data", (chunk: Buffer) => {
-			errors = append(errors, chunk);
-		});
-		patchId.stdout.on("data", (chunk: Buffer) => {
-			output = append(output, chunk);
-		});
-		patchId.stderr.on("data", (chunk: Buffer) => {
-			errors = append(errors, chunk);
-		});
-		show.on("error", fail);
-		patchId.on("error", fail);
-		patchId.stdin.on("error", fail);
-		let showExitCode: number | null | undefined;
-		let patchExitCode: number | null | undefined;
-		const finish = () => {
-			if (
-				settled ||
-				showExitCode === undefined ||
-				patchExitCode === undefined
-			) {
-				return;
-			}
-			settled = true;
-			if (showExitCode !== 0 || patchExitCode !== 0) {
-				reject(
-					new Error(
-						`Could not compute patch id for ${commit}: ${errors.trim()}`,
-					),
-				);
-				return;
-			}
-			const id = output.trim().split(/\s+/, 1)[0];
-			resolvePromise(id || "empty");
-		};
-		show.on("close", (code) => {
-			showExitCode = code;
-			finish();
-		});
-		patchId.on("close", (code) => {
-			patchExitCode = code;
-			finish();
-		});
-	});
-}
-
 export interface RepositoryInfo {
 	root: string;
 	commonDirectory: string;
@@ -314,6 +230,133 @@ export class GitCli implements GitClient {
 		return (await this.executeRaw(cwd, args, env)).trim();
 	}
 
+	private async executeWithInput(
+		cwd: string,
+		args: string[],
+		input: string,
+		env?: NodeJS.ProcessEnv,
+	): Promise<string> {
+		return new Promise<string>((resolvePromise, reject) => {
+			const child = spawn("git", args, {
+				cwd,
+				...(env ? { env } : {}),
+				shell: false,
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			let stdout = "";
+			let stderr = "";
+			let settled = false;
+			const fail = (error: unknown) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				child.kill("SIGKILL");
+				reject(error instanceof Error ? error : new Error(String(error)));
+			};
+			const append = (current: string, chunk: Buffer): string => {
+				const next = current + chunk.toString("utf8");
+				if (Buffer.byteLength(next) > MAX_GIT_OUTPUT_BYTES) {
+					fail(new Error("Git command output exceeded the configured limit"));
+				}
+				return next;
+			};
+			child.stdout.on("data", (chunk: Buffer) => {
+				stdout = append(stdout, chunk);
+			});
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr = append(stderr, chunk);
+			});
+			child.on("error", fail);
+			child.stdin.on("error", fail);
+			child.on("close", (exitCode) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (exitCode !== 0) {
+					reject(new GitCommandError(args, cwd, stderr));
+					return;
+				}
+				resolvePromise(stdout.trim());
+			});
+			child.stdin.end(input);
+		});
+	}
+
+	private async verifySourceCommitMapping(
+		repositoryRoot: string,
+		sourceCommit: string,
+		integratedCommit: string,
+		integratedParent: string,
+	): Promise<void> {
+		const sourceDescription = await this.execute(repositoryRoot, [
+			"show",
+			"-s",
+			"--format=%H%n%P",
+			"--end-of-options",
+			sourceCommit,
+		]);
+		const [sourceHash, sourceParents = ""] = sourceDescription.split("\n");
+		if (!sourceHash || sourceParents.split(" ").filter(Boolean).length !== 1) {
+			throw new Error(`Source commit ${sourceCommit} is not single-parent`);
+		}
+		const patch = await this.executeRaw(repositoryRoot, [
+			"diff-tree",
+			"--no-commit-id",
+			"-p",
+			"--binary",
+			"--full-index",
+			sourceParents,
+			sourceHash,
+			"--",
+		]);
+		const directory = await mkdtemp(join(tmpdir(), "pi-build-source-map-"));
+		const environment = {
+			...process.env,
+			GIT_INDEX_FILE: join(directory, "index"),
+		};
+		try {
+			await this.execute(
+				repositoryRoot,
+				["read-tree", integratedParent],
+				environment,
+			);
+			await this.executeWithInput(
+				repositoryRoot,
+				[
+					"apply",
+					"--cached",
+					"--binary",
+					"--whitespace=nowarn",
+					"--allow-empty",
+					"-",
+				],
+				patch,
+				environment,
+			);
+			const [appliedTree, integratedTree] = await Promise.all([
+				this.execute(repositoryRoot, ["write-tree"], environment),
+				this.execute(repositoryRoot, [
+					"rev-parse",
+					`${integratedCommit}^{tree}`,
+				]),
+			]);
+			if (appliedTree !== integratedTree) {
+				throw new Error(
+					`Integrated commit ${integratedCommit} does not exactly match source commit ${sourceCommit}`,
+				);
+			}
+		} catch (error) {
+			throw new Error(
+				`Integrated commit ${integratedCommit} does not exactly match source commit ${sourceCommit}`,
+				{ cause: error },
+			);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	}
+
 	async inspect(cwd: string): Promise<RepositoryInfo> {
 		const root = await this.execute(cwd, ["rev-parse", "--show-toplevel"]);
 		const commonDirectoryOutput = await this.execute(root, [
@@ -495,31 +538,18 @@ export class GitCli implements GitClient {
 				"Integration history does not match persisted commit order",
 			);
 		}
-		await Promise.all(
-			input.commits.map(async (mapping) => {
-				const [sourceParents, sourcePatchId, integratedPatchId] =
-					await Promise.all([
-						this.execute(input.repositoryRoot, [
-							"show",
-							"-s",
-							"--format=%P",
-							"--end-of-options",
-							mapping.sourceCommit,
-						]),
-						gitPatchId(input.repositoryRoot, mapping.sourceCommit),
-						gitPatchId(input.repositoryRoot, mapping.integratedCommit),
-					]);
-				if (
-					sourceParents.split(" ").filter(Boolean).length !== 1 ||
-					sourcePatchId !== integratedPatchId
-				) {
-					throw new Error(
-						`Integrated commit ${mapping.integratedCommit} does not match source commit ${mapping.sourceCommit}`,
-					);
-				}
-				return undefined;
-			}),
-		);
+		for (const [index, mapping] of input.commits.entries()) {
+			const integratedCommit = commits[index];
+			if (!integratedCommit) {
+				throw new Error("Integration history lost a persisted commit");
+			}
+			await this.verifySourceCommitMapping(
+				input.repositoryRoot,
+				mapping.sourceCommit,
+				mapping.integratedCommit,
+				integratedCommit.parent,
+			);
+		}
 		return {
 			verifiedAt: input.verifiedAt,
 			integrationBranch: input.integrationBranch,
