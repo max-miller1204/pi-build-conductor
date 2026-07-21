@@ -53,9 +53,9 @@
       "id": "goal-mrtf4pcp-951916e0",
       "title": "Deliver final validation and merge-ready evidence",
       "description": "Run the complete configured test and lint suite on the integration branch, verify repository cleanliness and history, and report the final branch, commits, reviews, tests, and remaining risks.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:46.009Z",
-      "updatedAt": "2026-07-20T16:07:46.009Z"
+      "updatedAt": "2026-07-21T01:26:51.198Z"
     },
     {
       "id": "goal-mrtf4qyc-e58a8184",
