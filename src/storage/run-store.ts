@@ -9,6 +9,12 @@ import {
 	isActiveAttemptState,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
+	REVIEW_CATEGORIES,
+	type ReviewCategory,
+	type ReviewConfidence,
+	type ReviewFindingStatus,
+	type ReviewRoundState,
+	type ReviewSeverity,
 	RUN_SCHEMA_VERSION,
 	type RunState,
 	type TaskState,
@@ -20,6 +26,9 @@ const RUN_STATES: ReadonlySet<RunState> = new Set([
 	"awaiting_approval",
 	"running",
 	"integrating",
+	"reviewing",
+	"repairing",
+	"reviewed",
 	"validating",
 	"completed",
 	"failed",
@@ -33,6 +42,33 @@ const TASK_STATES: ReadonlySet<TaskState> = new Set([
 	"succeeded",
 	"failed",
 	"blocked",
+	"cancelled",
+]);
+const REVIEW_CATEGORY_SET: ReadonlySet<ReviewCategory> = new Set(
+	REVIEW_CATEGORIES,
+);
+const REVIEW_SEVERITIES: ReadonlySet<ReviewSeverity> = new Set([
+	"critical",
+	"high",
+	"medium",
+	"low",
+]);
+const REVIEW_CONFIDENCES: ReadonlySet<ReviewConfidence> = new Set([
+	"high",
+	"medium",
+	"low",
+]);
+const FINDING_STATES: ReadonlySet<ReviewFindingStatus> = new Set([
+	"repair_required",
+	"deferred",
+	"repaired",
+	"unresolved",
+]);
+const REVIEW_ROUND_STATES: ReadonlySet<ReviewRoundState> = new Set([
+	"running",
+	"repairing",
+	"succeeded",
+	"failed",
 	"cancelled",
 ]);
 const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
@@ -118,9 +154,41 @@ function validateEvidence(value: unknown, path: string): void {
 	}
 }
 
+function migrateStoredRun(
+	value: Record<string, unknown>,
+): Record<string, unknown> {
+	if (value.schemaVersion !== 2) {
+		return value;
+	}
+	assertString(value.baseCommit, "run.baseCommit");
+	const plan = validateTaskPlan(value.plan);
+	if (!isRecord(value.tasks)) {
+		throw new Error("run.tasks must be an object");
+	}
+	let integrationHead = value.baseCommit;
+	for (const taskId of topologicalTaskIds(plan)) {
+		const task = value.tasks[taskId];
+		if (!isRecord(task) || typeof task.integratedCommit !== "string") {
+			break;
+		}
+		integrationHead = task.integratedCommit;
+	}
+	return {
+		...value,
+		schemaVersion: RUN_SCHEMA_VERSION,
+		integrationHead,
+		reviewRounds: [],
+		reviewAttempts: [],
+		repairAttempts: [],
+	};
+}
+
 export function validateStoredRun(value: unknown): BuildRun {
 	if (!isRecord(value)) {
 		throw new Error("run must be an object");
+	}
+	if (value.schemaVersion === 2) {
+		return validateStoredRun(migrateStoredRun(value));
 	}
 	if (value.schemaVersion !== RUN_SCHEMA_VERSION) {
 		throw new Error(
@@ -300,6 +368,333 @@ export function validateStoredRun(value: unknown): BuildRun {
 	if (referencedAttemptIds.size !== attemptsById.size) {
 		throw new Error("Every run attempt must be referenced by its task");
 	}
+	assertString(value.integrationHead, "run.integrationHead");
+	if (!Array.isArray(value.reviewAttempts)) {
+		throw new Error("run.reviewAttempts must be an array");
+	}
+	const reviewAttemptsById = new Map<string, Record<string, unknown>>();
+	const findingIds = new Set<string>();
+	const findingRounds = new Map<string, number>();
+	for (const [index, attempt] of value.reviewAttempts.entries()) {
+		const path = `run.reviewAttempts[${index}]`;
+		if (!isRecord(attempt)) {
+			throw new Error(`${path} must be an object`);
+		}
+		for (const field of [
+			"id",
+			"branch",
+			"worktreePath",
+			"baseCommit",
+			"startedAt",
+		] as const) {
+			assertString(attempt[field], `${path}.${field}`);
+		}
+		if (!Number.isInteger(attempt.round) || (attempt.round as number) < 1) {
+			throw new Error(`${path}.round must be a positive integer`);
+		}
+		if (!Number.isInteger(attempt.number) || (attempt.number as number) < 1) {
+			throw new Error(`${path}.number must be a positive integer`);
+		}
+		if (
+			typeof attempt.category !== "string" ||
+			!REVIEW_CATEGORY_SET.has(attempt.category as ReviewCategory)
+		) {
+			throw new Error(`${path}.category is invalid`);
+		}
+		if (
+			typeof attempt.state !== "string" ||
+			!ATTEMPT_STATES.has(attempt.state as AttemptState)
+		) {
+			throw new Error(`${path}.state is invalid`);
+		}
+		for (const field of [
+			"workerId",
+			"finishedAt",
+			"error",
+			"summary",
+		] as const) {
+			if (attempt[field] !== undefined && typeof attempt[field] !== "string") {
+				throw new Error(`${path}.${field} must be a string when present`);
+			}
+		}
+		if (attempt.findings !== undefined) {
+			if (!Array.isArray(attempt.findings)) {
+				throw new Error(`${path}.findings must be an array`);
+			}
+			for (const [findingIndex, finding] of attempt.findings.entries()) {
+				const findingPath = `${path}.findings[${findingIndex}]`;
+				if (!isRecord(finding)) {
+					throw new Error(`${findingPath} must be an object`);
+				}
+				for (const field of [
+					"id",
+					"title",
+					"description",
+					"recommendation",
+				] as const) {
+					assertString(finding[field], `${findingPath}.${field}`);
+				}
+				if (finding.category !== attempt.category) {
+					throw new Error(
+						`${findingPath}.category must match its review attempt`,
+					);
+				}
+				if (
+					typeof finding.severity !== "string" ||
+					!REVIEW_SEVERITIES.has(finding.severity as ReviewSeverity)
+				) {
+					throw new Error(`${findingPath}.severity is invalid`);
+				}
+				if (
+					typeof finding.confidence !== "string" ||
+					!REVIEW_CONFIDENCES.has(finding.confidence as ReviewConfidence)
+				) {
+					throw new Error(`${findingPath}.confidence is invalid`);
+				}
+				if (
+					typeof finding.status !== "string" ||
+					!FINDING_STATES.has(finding.status as ReviewFindingStatus)
+				) {
+					throw new Error(`${findingPath}.status is invalid`);
+				}
+				if (
+					!Array.isArray(finding.paths) ||
+					finding.paths.length === 0 ||
+					finding.paths.some((item) => typeof item !== "string" || !item)
+				) {
+					throw new Error(`${findingPath}.paths must be non-empty strings`);
+				}
+				if (finding.repairAttemptId !== undefined) {
+					assertString(
+						finding.repairAttemptId,
+						`${findingPath}.repairAttemptId`,
+					);
+				}
+				if (findingIds.has(finding.id as string)) {
+					throw new Error(`Duplicate review finding id: ${String(finding.id)}`);
+				}
+				findingIds.add(finding.id as string);
+				findingRounds.set(finding.id as string, attempt.round as number);
+			}
+		}
+		if (attempt.state === "succeeded") {
+			assertString(attempt.finishedAt, `${path}.finishedAt`);
+			assertString(attempt.summary, `${path}.summary`);
+			if (!Array.isArray(attempt.findings)) {
+				throw new Error(`${path}.findings must be present when succeeded`);
+			}
+		}
+		if (reviewAttemptsById.has(attempt.id as string)) {
+			throw new Error(`Duplicate review attempt id: ${String(attempt.id)}`);
+		}
+		reviewAttemptsById.set(attempt.id as string, attempt);
+	}
+	if (!Array.isArray(value.repairAttempts)) {
+		throw new Error("run.repairAttempts must be an array");
+	}
+	const repairAttemptsById = new Map<string, Record<string, unknown>>();
+	const storedTasks = value.tasks as Record<string, unknown>;
+	let expectedIntegrationHead = topologicalTaskIds(plan).reduce(
+		(head, taskId) => {
+			const task = storedTasks[taskId];
+			return isRecord(task) && typeof task.integratedCommit === "string"
+				? task.integratedCommit
+				: head;
+		},
+		value.baseCommit as string,
+	);
+	for (const [index, attempt] of value.repairAttempts.entries()) {
+		const path = `run.repairAttempts[${index}]`;
+		if (!isRecord(attempt)) {
+			throw new Error(`${path} must be an object`);
+		}
+		for (const field of [
+			"id",
+			"branch",
+			"worktreePath",
+			"baseCommit",
+			"startedAt",
+		] as const) {
+			assertString(attempt[field], `${path}.${field}`);
+		}
+		if (!Number.isInteger(attempt.round) || (attempt.round as number) < 1) {
+			throw new Error(`${path}.round must be a positive integer`);
+		}
+		if (!Number.isInteger(attempt.number) || (attempt.number as number) < 1) {
+			throw new Error(`${path}.number must be a positive integer`);
+		}
+		if (
+			typeof attempt.state !== "string" ||
+			!ATTEMPT_STATES.has(attempt.state as AttemptState)
+		) {
+			throw new Error(`${path}.state is invalid`);
+		}
+		if (
+			!Array.isArray(attempt.findingIds) ||
+			attempt.findingIds.length === 0 ||
+			attempt.findingIds.some(
+				(id) =>
+					typeof id !== "string" ||
+					!findingIds.has(id) ||
+					findingRounds.get(id) !== attempt.round,
+			)
+		) {
+			throw new Error(`${path}.findingIds must reference review findings`);
+		}
+		for (const field of [
+			"workerId",
+			"finishedAt",
+			"error",
+			"commit",
+			"integratedCommit",
+		] as const) {
+			if (attempt[field] !== undefined && typeof attempt[field] !== "string") {
+				throw new Error(`${path}.${field} must be a string when present`);
+			}
+		}
+		if (attempt.evidence !== undefined) {
+			validateEvidence(attempt.evidence, `${path}.evidence`);
+		}
+		if (
+			attempt.commit !== undefined &&
+			(!isRecord(attempt.evidence) || attempt.evidence.passed !== true)
+		) {
+			throw new Error(
+				`${path} has a commit without passing validation evidence`,
+			);
+		}
+		if (attempt.integratedCommit !== undefined) {
+			assertString(attempt.commit, `${path}.commit`);
+			if (attempt.baseCommit !== expectedIntegrationHead) {
+				throw new Error(`${path}.baseCommit breaks the integration chain`);
+			}
+			expectedIntegrationHead = attempt.integratedCommit as string;
+		}
+		if (attempt.state === "succeeded") {
+			assertString(attempt.finishedAt, `${path}.finishedAt`);
+			assertString(attempt.integratedCommit, `${path}.integratedCommit`);
+		}
+		if (repairAttemptsById.has(attempt.id as string)) {
+			throw new Error(`Duplicate repair attempt id: ${String(attempt.id)}`);
+		}
+		repairAttemptsById.set(attempt.id as string, attempt);
+	}
+	if (value.integrationHead !== expectedIntegrationHead) {
+		throw new Error(
+			`run.integrationHead must match integrated task and repair commits (${expectedIntegrationHead})`,
+		);
+	}
+	if (!Array.isArray(value.reviewRounds)) {
+		throw new Error("run.reviewRounds must be an array");
+	}
+	const referencedReviewAttemptIds = new Set<string>();
+	for (const [index, round] of value.reviewRounds.entries()) {
+		const path = `run.reviewRounds[${index}]`;
+		if (!isRecord(round)) {
+			throw new Error(`${path} must be an object`);
+		}
+		if (round.number !== index + 1) {
+			throw new Error(`${path}.number must be sequential`);
+		}
+		assertString(round.baseCommit, `${path}.baseCommit`);
+		assertString(round.startedAt, `${path}.startedAt`);
+		if (
+			typeof round.state !== "string" ||
+			!REVIEW_ROUND_STATES.has(round.state as ReviewRoundState)
+		) {
+			throw new Error(`${path}.state is invalid`);
+		}
+		if (
+			!Array.isArray(round.attemptIds) ||
+			new Set(round.attemptIds).size !== round.attemptIds.length
+		) {
+			throw new Error(`${path}.attemptIds must be a unique array`);
+		}
+		const categories = new Set<unknown>();
+		for (const attemptId of round.attemptIds) {
+			const normalizedAttemptId = String(attemptId);
+			referencedReviewAttemptIds.add(normalizedAttemptId);
+			const attempt = reviewAttemptsById.get(normalizedAttemptId);
+			if (
+				!attempt ||
+				attempt.round !== round.number ||
+				attempt.baseCommit !== round.baseCommit
+			) {
+				throw new Error(
+					`${path} references invalid review attempt ${String(attemptId)}`,
+				);
+			}
+			if (categories.has(attempt.category)) {
+				throw new Error(`${path} has duplicate succeeded review categories`);
+			}
+			if (attempt.state === "succeeded") {
+				categories.add(attempt.category);
+			}
+		}
+		for (const field of ["finishedAt", "repairAttemptId", "error"] as const) {
+			if (round[field] !== undefined && typeof round[field] !== "string") {
+				throw new Error(`${path}.${field} must be a string when present`);
+			}
+		}
+		if (round.repairAttemptId !== undefined) {
+			const repair = repairAttemptsById.get(round.repairAttemptId as string);
+			if (!repair || repair.round !== round.number) {
+				throw new Error(`${path}.repairAttemptId is invalid`);
+			}
+		}
+		if (
+			round.state === "succeeded" &&
+			categories.size !== REVIEW_CATEGORIES.length
+		) {
+			throw new Error(`${path} succeeded without all review categories`);
+		}
+	}
+	if (referencedReviewAttemptIds.size !== reviewAttemptsById.size) {
+		throw new Error(
+			"Every review attempt must be referenced by a review round",
+		);
+	}
+	for (const attempt of reviewAttemptsById.values()) {
+		if (!Array.isArray(attempt.findings)) {
+			continue;
+		}
+		for (const finding of attempt.findings) {
+			if (!isRecord(finding) || finding.status !== "repaired") {
+				continue;
+			}
+			const repair = repairAttemptsById.get(String(finding.repairAttemptId));
+			if (
+				repair?.state !== "succeeded" ||
+				!repair.integratedCommit ||
+				!Array.isArray(repair.findingIds) ||
+				!repair.findingIds.includes(finding.id)
+			) {
+				throw new Error(
+					`Repaired finding ${String(finding.id)} must reference an integrated repair attempt`,
+				);
+			}
+		}
+	}
+	if (value.state === "reviewed") {
+		const latestRound = value.reviewRounds.at(-1);
+		if (!isRecord(latestRound) || latestRound.state !== "succeeded") {
+			throw new Error("Reviewed run must have a succeeded final review round");
+		}
+		const unresolved = [...reviewAttemptsById.values()].some(
+			(attempt) =>
+				Array.isArray(attempt.findings) &&
+				attempt.findings.some(
+					(finding) =>
+						isRecord(finding) &&
+						["repair_required", "unresolved"].includes(String(finding.status)),
+				),
+		);
+		if (unresolved) {
+			throw new Error(
+				"Reviewed run cannot contain unresolved important findings",
+			);
+		}
+	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||
 		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
@@ -309,14 +704,19 @@ export function validateStoredRun(value: unknown): BuildRun {
 			`run.maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
 		);
 	}
-	const activeAttempts = [...attemptsById.values()].filter((attempt) =>
+	const activeTaskAttempts = [...attemptsById.values()].filter((attempt) =>
 		isActiveAttemptState(attempt.state as AttemptState),
 	);
+	const activeAttempts = [
+		...activeTaskAttempts,
+		...reviewAttemptsById.values(),
+		...repairAttemptsById.values(),
+	].filter((attempt) => isActiveAttemptState(attempt.state as AttemptState));
 	if (activeAttempts.length > (value.maxConcurrentWorkers as number)) {
 		throw new Error("Run has more active attempts than its concurrency limit");
 	}
 	const activeAttemptCountByTask = new Map<string, number>();
-	for (const attempt of activeAttempts) {
+	for (const attempt of activeTaskAttempts) {
 		const taskId = String(attempt.taskId);
 		activeAttemptCountByTask.set(
 			taskId,

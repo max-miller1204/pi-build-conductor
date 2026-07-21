@@ -18,6 +18,7 @@ function changedPath(input: TaskValidationInput): string {
 export function createFakeFinalizationDependencies(): {
 	git: GitClient;
 	validator: TaskValidator;
+	verifyReviewWorktree: () => Promise<void>;
 } {
 	const integrationHeads = new Map<string, string>();
 	const validator: TaskValidator = {
@@ -79,5 +80,5 @@ export function createFakeFinalizationDependencies(): {
 			return integratedCommit;
 		},
 	} as unknown as GitClient;
-	return { git, validator };
+	return { git, validator, verifyReviewWorktree: async () => {} };
 }

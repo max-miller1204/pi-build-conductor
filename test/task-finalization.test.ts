@@ -25,6 +25,7 @@ import type {
 	WorkerExecutionOptions,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { reviewResult } from "./helpers/review.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -119,9 +120,13 @@ class WritingWorkers implements WorkerBackend {
 
 	async startPrompt(
 		_workerId: string,
-		_prompt: string,
+		prompt: string,
 		_options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
+		const review = reviewResult(prompt);
+		if (review) {
+			return { completion: Promise.resolve(review) };
+		}
 		if (!this.worker) {
 			throw new Error("worker not started");
 		}
@@ -413,7 +418,7 @@ describe("task validation and conductor-owned commits", () => {
 			throw new Error("missing finalized attempt commit");
 		}
 
-		expect(completed.state).toBe("integrating");
+		expect(completed.state).toBe("reviewed");
 		expect(attempt).toMatchObject({
 			state: "succeeded",
 			baseCommit: repository.head,

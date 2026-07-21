@@ -238,6 +238,30 @@ function taskStateSummary(run: BuildRun): string {
 		.join(", ");
 }
 
+function reviewStateSummary(run: BuildRun): string {
+	if (run.reviewRounds.length === 0) {
+		return "Reviews: not started";
+	}
+	const round = run.reviewRounds.at(-1);
+	const attempts = run.reviewAttempts.filter(
+		(attempt) => attempt.round === round?.number,
+	);
+	const succeeded = attempts.filter(
+		(attempt) => attempt.state === "succeeded",
+	).length;
+	const findings = attempts.flatMap((attempt) => attempt.findings ?? []);
+	const repairRequired = findings.filter(
+		(finding) => finding.status === "repair_required",
+	).length;
+	const deferred = findings.filter(
+		(finding) => finding.status === "deferred",
+	).length;
+	const unresolved = findings.filter(
+		(finding) => finding.status === "unresolved",
+	).length;
+	return `Review round ${round?.number ?? 0}: ${succeeded}/5 reports received, ${repairRequired} repair-required, ${unresolved} unresolved, ${deferred} deferred`;
+}
+
 function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 	return {
 		onProgress: (progress) => {
@@ -252,6 +276,8 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 				`Build ${run.id}`,
 				`Run: ${run.state}`,
 				`Tasks: ${taskStateSummary(run)}`,
+				reviewStateSummary(run),
+				`Integration head: ${run.integrationHead.slice(0, 12)}`,
 			]);
 		},
 	};
@@ -279,20 +305,32 @@ function showCompletion(
 			: "";
 		return `${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit}${integrated})`;
 	});
+	const reviewLines = run.reviewAttempts.map(
+		(attempt) =>
+			`review ${attempt.round}/${attempt.category}: ${attempt.state}, findings ${attempt.findings?.length ?? 0}`,
+	);
+	const repairLines = run.repairAttempts.map(
+		(attempt) =>
+			`repair ${attempt.round}/${attempt.number}: ${attempt.state}${attempt.integratedCommit ? `, integrated ${attempt.integratedCommit.slice(0, 12)}` : ""}`,
+	);
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
 		`Run: ${run.state}`,
 		`Tasks: ${taskStateSummary(run)}`,
+		reviewStateSummary(run),
 		...workerLines,
+		...reviewLines,
+		...repairLines,
+		`Integration head: ${run.integrationHead.slice(0, 12)}`,
 		`State file: ${store.directory}`,
 	]);
-	if (run.state === "integrating") {
+	if (run.state === "reviewed") {
 		ctx.ui.setStatus(
 			runUiKey(run.id),
-			"task commits integrated and ready for review",
+			"independent review and repair complete; awaiting full validation",
 		);
 		ctx.ui.notify(
-			`All task changes were integrated on ${run.integrationBranch}`,
+			`Independent review completed on ${run.integrationBranch}`,
 			"info",
 		);
 		return;
@@ -306,9 +344,21 @@ function showCompletion(
 	const integrationFailure = Object.values(run.tasks).find(
 		(task) => task.integrationError,
 	);
+	const reviewFailure = run.reviewAttempts.find(
+		(attempt) => attempt.state === "failed",
+	)?.error;
+	const repairFailure = run.repairAttempts.find(
+		(attempt) => attempt.state === "failed",
+	)?.error;
+	const reviewRoundFailure = run.reviewRounds.find(
+		(round) => round.state === "failed",
+	)?.error;
 	ctx.ui.setStatus(runUiKey(run.id), "build failed");
 	ctx.ui.notify(
 		integrationFailure?.integrationError ??
+			repairFailure ??
+			reviewFailure ??
+			reviewRoundFailure ??
 			failure?.error ??
 			`Build ${run.id} failed`,
 		"error",
@@ -331,11 +381,14 @@ function showLaunch(
 		`Build ${result.run.id}`,
 		`Run: ${result.run.state}`,
 		`Tasks: ${taskStateSummary(result.run)}`,
+		reviewStateSummary(result.run),
 		...launchLines,
 		`State file: ${store.directory}`,
 	]);
 	ctx.ui.notify(
-		`Launched ${result.launches.length} worker(s) for build ${result.run.id}`,
+		result.launches.length > 0
+			? `Launched ${result.launches.length} implementation worker(s) for build ${result.run.id}`
+			: `Resuming ${result.run.state} lifecycle for build ${result.run.id}`,
 		"info",
 	);
 	void result.completion.then(
@@ -398,7 +451,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				});
 				const approved = await ctx.ui.confirm(
 					`Approve build plan: ${editedPlan.title}`,
-					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches, run the exact validation commands above, and launch ready tasks up to the configured worker limit. Validation executes repository code without a sandbox.`,
+					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches, run the exact validation commands above, launch ready tasks up to the configured worker limit, then run five fresh independent reviews and isolated repairs for important findings. Validation executes repository code without a sandbox.`,
 				);
 				if (!approved) {
 					run = await conductor.cancelRun(run);
@@ -509,14 +562,14 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						"Repository changed during recovery. Resume again from a clean, unchanged branch.",
 					);
 				}
-				if (recovered.state === "integrating") {
+				if (recovered.state === "reviewed") {
 					ctx.ui.setStatus(
 						runUiKey(runId),
-						"task commits integrated and ready for review",
+						"independent review and repair complete; awaiting full validation",
 					);
 					ctx.ui.setStatus("pi-build-conductor", undefined);
 					ctx.ui.notify(
-						`Build ${runId} is integrated on ${recovered.integrationBranch}`,
+						`Build ${runId} has already completed independent review`,
 						"info",
 					);
 					return;

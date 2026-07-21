@@ -23,6 +23,7 @@ import type {
 	WorkerInstance,
 } from "../src/workers/backend.js";
 import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
+import { reviewResult } from "./helpers/review.js";
 
 const directories: string[] = [];
 
@@ -76,9 +77,13 @@ class ControlledWorkers implements WorkerBackend {
 
 	async startPrompt(
 		workerId: string,
-		_prompt: string,
+		prompt: string,
 		options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
+		const review = reviewResult(prompt);
+		if (review) {
+			return { completion: Promise.resolve(review) };
+		}
 		const taskId = this.taskByWorker.get(workerId);
 		if (!taskId) {
 			throw new Error(`unknown worker ${workerId}`);
@@ -232,7 +237,7 @@ describe("bounded dependency-aware concurrency", () => {
 		workers.settle("second", { status: "succeeded" });
 		workers.settle("third", { status: "succeeded" });
 		const completed = await result.completion;
-		expect(completed.state).toBe("integrating");
+		expect(completed.state).toBe("reviewed");
 	});
 
 	it("launches newly unblocked DAG layers in deterministic plan order", async () => {
@@ -256,7 +261,7 @@ describe("bounded dependency-aware concurrency", () => {
 		await vi.waitFor(() => expect(workers.startOrder.at(-1)).toBe("release"));
 		workers.settle("release", { status: "succeeded" });
 
-		expect((await result.completion).state).toBe("integrating");
+		expect((await result.completion).state).toBe("reviewed");
 	});
 
 	it("refills a slot with a dependent while an unrelated worker is still running", async () => {
@@ -279,7 +284,7 @@ describe("bounded dependency-aware concurrency", () => {
 		workers.settle("dependent", { status: "succeeded" });
 		workers.settle("unrelated", { status: "succeeded" });
 
-		expect((await result.completion).state).toBe("integrating");
+		expect((await result.completion).state).toBe("reviewed");
 	});
 
 	it("supports a four-worker bound with isolated workers and worktrees", async () => {
@@ -303,7 +308,7 @@ describe("bounded dependency-aware concurrency", () => {
 		for (const taskId of ["two", "three", "four", "five"]) {
 			workers.settle(taskId, { status: "succeeded" });
 		}
-		expect((await result.completion).state).toBe("integrating");
+		expect((await result.completion).state).toBe("reviewed");
 		expect(workers.maxInFlight).toBe(4);
 	});
 

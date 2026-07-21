@@ -59,6 +59,12 @@ export interface GitClient {
 		commit: string,
 		baseCommit: string,
 	): Promise<void>;
+	verifyIntegratedCommit(
+		repositoryRoot: string,
+		integratedCommit: string,
+		expectedParent: string,
+		sourceCommit: string,
+	): Promise<void>;
 	integrateCommit(
 		repositoryRoot: string,
 		branch: string,
@@ -317,7 +323,7 @@ export class GitCli implements GitClient {
 				...(file.previousPath ? [file.previousPath] : []),
 			]),
 		);
-		const paths = [...pathSet].sort();
+		const paths = [...pathSet].sort((left, right) => left.localeCompare(right));
 		const stagedEntries = await this.executeRaw(worktreePath, [
 			"--literal-pathspecs",
 			"ls-files",
@@ -410,7 +416,7 @@ export class GitCli implements GitClient {
 					...(file.previousPath ? [file.previousPath] : []),
 				]),
 			),
-		].sort();
+		].sort((left, right) => left.localeCompare(right));
 		const temporaryIndexDirectory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-index-"),
 		);
@@ -517,7 +523,7 @@ export class GitCli implements GitClient {
 		)
 			.split("\0")
 			.filter(Boolean)
-			.sort();
+			.sort((left, right) => left.localeCompare(right));
 		if (JSON.stringify(committedPaths) !== JSON.stringify(paths)) {
 			throw new Error(
 				"Created task commit does not match the validated path set",
@@ -547,6 +553,35 @@ export class GitCli implements GitClient {
 		if (parent !== baseCommit) {
 			throw new Error(
 				`Task commit ${commit} does not have expected parent ${baseCommit}`,
+			);
+		}
+	}
+
+	async verifyIntegratedCommit(
+		repositoryRoot: string,
+		integratedCommit: string,
+		expectedParent: string,
+		sourceCommit: string,
+	): Promise<void> {
+		const [parentLine, integratedTree, sourceTree] = await Promise.all([
+			this.execute(repositoryRoot, [
+				"rev-list",
+				"--parents",
+				"-n",
+				"1",
+				integratedCommit,
+			]),
+			this.execute(repositoryRoot, ["rev-parse", `${integratedCommit}^{tree}`]),
+			this.execute(repositoryRoot, ["rev-parse", `${sourceCommit}^{tree}`]),
+		]);
+		const commitAndParents = parentLine.split(" ");
+		if (
+			commitAndParents.length !== 2 ||
+			commitAndParents[1] !== expectedParent ||
+			integratedTree !== sourceTree
+		) {
+			throw new Error(
+				`Integrated commit ${integratedCommit} does not match source repair ${sourceCommit}`,
 			);
 		}
 	}

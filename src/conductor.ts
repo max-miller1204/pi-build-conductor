@@ -8,12 +8,23 @@ import {
 import {
 	type BuildRun,
 	isActiveAttemptState,
+	REVIEW_CATEGORIES,
+	type RepairAttempt,
+	type ReviewAttempt,
+	type ReviewCategory,
+	type ReviewFinding,
 	type TaskAttempt,
 	type TaskDefinition,
 	type TaskPlan,
 } from "./domain/types.js";
 import type { GitClient, RepositoryInfo } from "./git/git.js";
 import type { WorktreeManager } from "./git/worktrees.js";
+import { buildRepairPrompt, buildReviewerPrompt } from "./review/prompts.js";
+import { prioritizeFindings } from "./review/review-policy.js";
+import {
+	materializeReviewFindings,
+	parseReviewReport,
+} from "./review/review-report.js";
 import type { RunStore } from "./storage/run-store.js";
 import {
 	TaskValidationError,
@@ -37,6 +48,11 @@ export interface BuildConductorDependencies {
 	now?: () => string;
 	workerTimeoutMs?: number;
 	workerPollIntervalMs?: number;
+	verifyReviewWorktree?: (
+		path: string,
+		expectedBranch: string,
+		expectedCommit: string,
+	) => Promise<void>;
 }
 
 export interface CreateConductorRunInput {
@@ -54,6 +70,7 @@ export interface WorkerModelSelection {
 
 export interface WorkerLifecycleProgress {
 	runId: string;
+	kind: "task" | "review" | "repair";
 	taskId: string;
 	attemptId: string;
 	workerId: string;
@@ -85,6 +102,12 @@ interface ScheduledLaunch {
 interface DispatchResult {
 	run: BuildRun;
 	launches: ScheduledLaunch[];
+}
+
+interface AuxiliaryExecution {
+	result: WorkerExecutionResult;
+	cleanupError: string | undefined;
+	timedOut: boolean;
 }
 
 interface MonitoredExecution {
@@ -186,15 +209,74 @@ function updateAttempt(
 }
 
 function expectedIntegrationHead(run: BuildRun): string {
-	let head = run.baseCommit;
-	for (const taskId of topologicalTaskIds(run.plan)) {
-		const integratedCommit = run.tasks[taskId]?.integratedCommit;
-		if (!integratedCommit) {
-			break;
-		}
-		head = integratedCommit;
-	}
-	return head;
+	return run.integrationHead;
+}
+
+function updateReviewAttempt(
+	run: BuildRun,
+	attemptId: string,
+	update: Partial<ReviewAttempt>,
+): BuildRun {
+	return {
+		...run,
+		reviewAttempts: run.reviewAttempts.map((attempt) =>
+			attempt.id === attemptId ? { ...attempt, ...update } : attempt,
+		),
+	};
+}
+
+function mapReviewAttemptFindings(
+	attempt: ReviewAttempt,
+	update: (finding: ReviewFinding) => ReviewFinding,
+): ReviewAttempt {
+	return attempt.findings
+		? { ...attempt, findings: attempt.findings.map(update) }
+		: attempt;
+}
+
+function updateRepairAttempt(
+	run: BuildRun,
+	attemptId: string,
+	update: Partial<RepairAttempt>,
+): BuildRun {
+	return {
+		...run,
+		repairAttempts: run.repairAttempts.map((attempt) =>
+			attempt.id === attemptId ? { ...attempt, ...update } : attempt,
+		),
+	};
+}
+
+function pathIsAllowed(path: string, allowedPaths: string[]): boolean {
+	return allowedPaths.some((allowed) =>
+		allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
+	);
+}
+
+function repairTaskDefinition(run: BuildRun, round: number): TaskDefinition {
+	const allowedPaths = [
+		...new Set(run.plan.tasks.flatMap((task) => task.allowedPaths)),
+	].sort((left, right) => left.localeCompare(right));
+	const commandKeys = new Set<string>();
+	const validationCommands = run.plan.tasks.flatMap((task) =>
+		task.validationCommands.filter((command) => {
+			const key = JSON.stringify([command.command, command.args]);
+			if (commandKeys.has(key)) {
+				return false;
+			}
+			commandKeys.add(key);
+			return true;
+		}),
+	);
+	return {
+		id: `review-repair-${round}`,
+		title: `Repair review round ${round}`,
+		description: "Address findings selected by the independent review policy.",
+		dependencies: [],
+		acceptanceCriteria: ["All prioritized findings are addressed"],
+		allowedPaths,
+		validationCommands,
+	};
 }
 
 function succeededTaskAttempt(
@@ -277,7 +359,11 @@ export class BuildConductor {
 			run.id,
 			(current) => {
 				activeRun = current;
-				if (["completed", "failed", "cancelled"].includes(current.state)) {
+				if (
+					["reviewed", "completed", "failed", "cancelled"].includes(
+						current.state,
+					)
+				) {
 					return current;
 				}
 				shouldCleanup = true;
@@ -302,6 +388,36 @@ export class BuildConductor {
 								}
 							: attempt,
 					),
+					reviewAttempts: current.reviewAttempts.map((attempt) =>
+						isActiveAttemptState(attempt.state)
+							? {
+									...attempt,
+									state: "cancelled" as const,
+									finishedAt: now,
+									error: "Run cancelled",
+								}
+							: attempt,
+					),
+					repairAttempts: current.repairAttempts.map((attempt) =>
+						isActiveAttemptState(attempt.state)
+							? {
+									...attempt,
+									state: "cancelled" as const,
+									finishedAt: now,
+									error: "Run cancelled",
+								}
+							: attempt,
+					),
+					reviewRounds: current.reviewRounds.map((round) =>
+						["running", "repairing"].includes(round.state)
+							? {
+									...round,
+									state: "cancelled" as const,
+									finishedAt: now,
+									error: "Run cancelled",
+								}
+							: round,
+					),
 					updatedAt: now,
 				};
 			},
@@ -317,7 +433,11 @@ export class BuildConductor {
 		}
 		const cleanupErrors: string[] = [];
 		const workerIds = new Set(
-			activeRun.attempts.flatMap((attempt) =>
+			[
+				...activeRun.attempts,
+				...activeRun.reviewAttempts,
+				...activeRun.repairAttempts,
+			].flatMap((attempt) =>
 				attempt.workerId && isActiveAttemptState(attempt.state)
 					? [attempt.workerId]
 					: [],
@@ -337,6 +457,22 @@ export class BuildConductor {
 				(current) => ({
 					...current,
 					attempts: current.attempts.map((attempt) =>
+						attempt.workerId && workerIds.has(attempt.workerId)
+							? {
+									...attempt,
+									error: `${attempt.error ?? "Run cancelled"}; ${cleanupMessage}`,
+								}
+							: attempt,
+					),
+					reviewAttempts: current.reviewAttempts.map((attempt) =>
+						attempt.workerId && workerIds.has(attempt.workerId)
+							? {
+									...attempt,
+									error: `${attempt.error ?? "Run cancelled"}; ${cleanupMessage}`,
+								}
+							: attempt,
+					),
+					repairAttempts: current.repairAttempts.map((attempt) =>
 						attempt.workerId && workerIds.has(attempt.workerId)
 							? {
 									...attempt,
@@ -405,14 +541,20 @@ export class BuildConductor {
 						: [],
 				),
 			);
-			const referencedLiveWorkerIds = run.attempts.flatMap((attempt) =>
+			const referencedLiveWorkerIds = [
+				...run.attempts,
+				...run.reviewAttempts,
+				...run.repairAttempts,
+			].flatMap((attempt) =>
 				attempt.workerId && liveWorkerIds.has(attempt.workerId)
 					? [attempt.workerId]
 					: [],
 			);
-			for (const workerId of new Set(referencedLiveWorkerIds)) {
-				await this.dependencies.workers.stop(workerId);
-			}
+			await Promise.all(
+				[...new Set(referencedLiveWorkerIds)].map((workerId) =>
+					this.dependencies.workers.stop(workerId),
+				),
+			);
 			const recoverableAttempts = run.attempts.filter(
 				(attempt) =>
 					attempt.state === "validating" && attempt.evidence?.passed === true,
@@ -527,6 +669,74 @@ export class BuildConductor {
 					);
 				}
 			}
+			const recoverableRepairs = run.repairAttempts.filter(
+				(attempt) =>
+					attempt.state === "validating" &&
+					attempt.evidence?.passed === true &&
+					attempt.commit !== undefined,
+			);
+			for (const attempt of recoverableRepairs) {
+				try {
+					const sourceCommit = attempt.commit as string;
+					await this.dependencies.git.verifyTaskCommit(
+						run.repositoryRoot,
+						attempt.branch,
+						sourceCommit,
+						attempt.baseCommit,
+					);
+					const branchHead = await this.dependencies.git.branchHead(
+						run.repositoryRoot,
+						run.integrationBranch,
+					);
+					let integratedCommit: string;
+					if (branchHead === attempt.baseCommit) {
+						await this.dependencies.worktrees.removeTaskWorktree(
+							run.repositoryRoot,
+							attempt.worktreePath,
+						);
+						integratedCommit = await this.dependencies.git.integrateCommit(
+							run.repositoryRoot,
+							run.integrationBranch,
+							attempt.baseCommit,
+							sourceCommit,
+						);
+					} else {
+						await this.dependencies.git.verifyIntegratedCommit(
+							run.repositoryRoot,
+							branchHead,
+							attempt.baseCommit,
+							sourceCommit,
+						);
+						integratedCommit = branchHead;
+						await this.dependencies.worktrees.removeTaskWorktree(
+							run.repositoryRoot,
+							attempt.worktreePath,
+						);
+					}
+					run = await this.completeRepairIntegration(
+						runId,
+						attempt.id,
+						integratedCommit,
+					);
+				} catch (error) {
+					const message = `Failed to recover committed repair ${attempt.id}: ${
+						error instanceof Error ? error.message : String(error)
+					}`;
+					return await mutateStoredRun(
+						this.dependencies.store,
+						runId,
+						(stored) => ({
+							...updateRepairAttempt(stored, attempt.id, {
+								state: "failed",
+								finishedAt: this.now(),
+								error: message,
+							}),
+							state: "failed",
+							updatedAt: this.now(),
+						}),
+					);
+				}
+			}
 			let recovered = await this.dependencies.store.recover(runId, this.now());
 			if (
 				recovered.state === "integrating" &&
@@ -538,7 +748,11 @@ export class BuildConductor {
 					(stored) => ({ ...stored, state: "running", updatedAt: this.now() }),
 				);
 			}
-			if (recovered.state === "integrating") {
+			if (
+				["integrating", "reviewing", "repairing", "reviewed"].includes(
+					recovered.state,
+				)
+			) {
 				const recordedHead = expectedIntegrationHead(recovered);
 				const actualHead = await this.dependencies.git.branchHead(
 					recovered.repositoryRoot,
@@ -567,7 +781,9 @@ export class BuildConductor {
 		model?: WorkerModelSelection,
 		options: LaunchOptions = {},
 	): Promise<LaunchResult> {
-		if (run.state !== "running") {
+		if (
+			!["running", "integrating", "reviewing", "repairing"].includes(run.state)
+		) {
 			throw new Error(`Cannot resume run in state ${run.state}`);
 		}
 		return this.startScheduling(run, repository, model, options);
@@ -981,6 +1197,895 @@ export class BuildConductor {
 		}
 	}
 
+	private async executeAuxiliaryWorker(
+		runId: string,
+		attemptId: string,
+		workerId: string,
+		prompt: string,
+		kind: "review" | "repair",
+		taskId: string,
+		options: LaunchOptions,
+	): Promise<AuxiliaryExecution> {
+		const controller = new AbortController();
+		this.activeExecutions.set(attemptId, { runId, controller });
+		let timedOut = false;
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			controller.abort(
+				new Error(`Worker execution timed out after ${this.workerTimeoutMs}ms`),
+			);
+		}, this.workerTimeoutMs);
+		timeout.unref();
+		const poll = this.startWorkerStatusPolling(runId, workerId, controller);
+		try {
+			const execution = await this.dependencies.workers.startPrompt(
+				workerId,
+				prompt,
+				{
+					signal: controller.signal,
+					onEvent: (event) => {
+						try {
+							options.onProgress?.({
+								runId,
+								kind,
+								taskId,
+								attemptId,
+								workerId,
+								event,
+							});
+						} catch {
+							// UI observers must not affect worker execution.
+						}
+					},
+				},
+			);
+			const result = await this.waitForExecution(execution.completion);
+			return {
+				result,
+				timedOut,
+				cleanupError: await this.stopWorker(workerId),
+			};
+		} catch (error) {
+			return {
+				result: {
+					status: controller.signal.aborted ? "aborted" : "failed",
+					error: error instanceof Error ? error.message : String(error),
+				},
+				timedOut,
+				cleanupError: await this.stopWorker(workerId),
+			};
+		} finally {
+			clearTimeout(timeout);
+			clearInterval(poll);
+			this.activeExecutions.delete(attemptId);
+		}
+	}
+
+	private async launchReviewPass(
+		runId: string,
+		category: ReviewCategory,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		let current = await this.dependencies.store.load(runId);
+		const round = current.reviewRounds.at(-1);
+		if (!round || current.state !== "reviewing") {
+			return current;
+		}
+		const number =
+			current.reviewAttempts.filter(
+				(attempt) =>
+					attempt.round === round.number && attempt.category === category,
+			).length + 1;
+		const allocation = await this.dependencies.worktrees.prepareTaskWorktree({
+			repository,
+			runId,
+			taskId: `review-r${round.number}-${category}`,
+			attemptNumber: number,
+			startPoint: round.baseCommit,
+		});
+		const attempt: ReviewAttempt = {
+			id: `review-${round.number}-${category}-${number}-${randomUUID().slice(0, 8)}`,
+			round: round.number,
+			category,
+			number,
+			state: "prepared",
+			branch: allocation.branch,
+			worktreePath: allocation.path,
+			baseCommit: round.baseCommit,
+			startedAt: this.now(),
+		};
+		try {
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					const storedRound = stored.reviewRounds.at(-1);
+					if (
+						stored.state !== "reviewing" ||
+						!storedRound ||
+						storedRound.number !== round.number ||
+						stored.reviewAttempts.some(
+							(item) =>
+								item.round === round.number &&
+								item.category === category &&
+								isActiveAttemptState(item.state),
+						)
+					) {
+						throw new Error(`Review ${category} is no longer launchable`);
+					}
+					return {
+						...stored,
+						reviewRounds: stored.reviewRounds.map((item) =>
+							item.number === round.number
+								? { ...item, attemptIds: [...item.attemptIds, attempt.id] }
+								: item,
+						),
+						reviewAttempts: [...stored.reviewAttempts, attempt],
+						updatedAt: this.now(),
+					};
+				},
+			);
+		} catch (error) {
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				allocation.path,
+			);
+			throw error;
+		}
+		notifyRunUpdated(options, current);
+		let workerId: string | undefined;
+		try {
+			const worker = await this.dependencies.workers.spawn({
+				cwd: allocation.path,
+				label: `${runId}:review:${round.number}:${category}`,
+				...(model ? { provider: model.provider, model: model.model } : {}),
+			});
+			workerId = worker.id;
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state === "cancelled"
+						? stored
+						: {
+								...updateReviewAttempt(stored, attempt.id, {
+									state: "running",
+									workerId: worker.id,
+								}),
+								updatedAt: this.now(),
+							},
+			);
+			if (current.state === "cancelled") {
+				await this.stopWorker(worker.id);
+				return current;
+			}
+			notifyRunUpdated(options, current);
+			const execution = await this.executeAuxiliaryWorker(
+				runId,
+				attempt.id,
+				worker.id,
+				buildReviewerPrompt(current, category, round.baseCommit),
+				"review",
+				`review:${category}`,
+				options,
+			);
+			if (execution.cleanupError) {
+				throw new Error(
+					`Failed to stop reviewer ${worker.id}: ${execution.cleanupError}`,
+				);
+			}
+			if (execution.timedOut) {
+				throw new Error(`Reviewer timed out after ${this.workerTimeoutMs}ms`);
+			}
+			if (execution.result.status !== "succeeded") {
+				throw new Error(execution.result.error);
+			}
+			if (this.dependencies.verifyReviewWorktree) {
+				await this.dependencies.verifyReviewWorktree(
+					allocation.path,
+					allocation.branch,
+					round.baseCommit,
+				);
+			} else {
+				const inspected = await this.dependencies.git.inspect(allocation.path);
+				if (
+					inspected.currentBranch !== allocation.branch ||
+					inspected.head !== round.baseCommit ||
+					!inspected.isClean
+				) {
+					throw new Error(
+						`Reviewer ${category} modified or moved its worktree`,
+					);
+				}
+			}
+			const report = parseReviewReport(
+				execution.result.output,
+				category,
+				round.baseCommit,
+			);
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				allocation.path,
+			);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state === "cancelled"
+						? stored
+						: {
+								...updateReviewAttempt(stored, attempt.id, {
+									state: "succeeded",
+									finishedAt: this.now(),
+									summary: report.summary,
+									findings: materializeReviewFindings(
+										report,
+										category,
+										round.number,
+									),
+								}),
+								updatedAt: this.now(),
+							},
+			);
+			notifyRunUpdated(options, current);
+			return current;
+		} catch (error) {
+			if (workerId) {
+				await this.stopWorker(workerId);
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					if (stored.state === "cancelled") {
+						return stored;
+					}
+					return {
+						...updateReviewAttempt(stored, attempt.id, {
+							state: "failed",
+							finishedAt: this.now(),
+							error: message,
+						}),
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(options, current);
+			return current;
+		}
+	}
+
+	private async runReviewRound(
+		runId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		let current = await this.dependencies.store.load(runId);
+		const round = current.reviewRounds.at(-1);
+		if (!round) {
+			throw new Error(`Run ${runId} has no active review round`);
+		}
+		const succeeded = new Set(
+			current.reviewAttempts.flatMap((attempt) =>
+				attempt.round === round.number && attempt.state === "succeeded"
+					? [attempt.category]
+					: [],
+			),
+		);
+		const missing = REVIEW_CATEGORIES.filter(
+			(category) => !succeeded.has(category),
+		);
+		for (
+			let index = 0;
+			index < missing.length;
+			index += current.maxConcurrentWorkers
+		) {
+			const batch = missing.slice(index, index + current.maxConcurrentWorkers);
+			const settled = await Promise.allSettled(
+				batch.map((category) =>
+					this.launchReviewPass(runId, category, repository, model, options),
+				),
+			);
+			const rejected = settled.find(
+				(result): result is PromiseRejectedResult =>
+					result.status === "rejected",
+			);
+			if (rejected) {
+				const message = `Failed to prepare review worker: ${
+					rejected.reason instanceof Error
+						? rejected.reason.message
+						: String(rejected.reason)
+				}`;
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					message,
+					options,
+				);
+				return current;
+			}
+			current = await this.dependencies.store.load(runId);
+			const failedAttempt = current.reviewAttempts.find(
+				(attempt) =>
+					attempt.round === round.number && attempt.state === "failed",
+			);
+			if (failedAttempt) {
+				return this.failReviewRound(
+					runId,
+					round.number,
+					failedAttempt.error ?? `Review ${failedAttempt.category} failed`,
+					options,
+				);
+			}
+			if (current.state !== "reviewing") {
+				return current;
+			}
+		}
+		return current;
+	}
+
+	private completeRepairIntegration(
+		runId: string,
+		attemptId: string,
+		integratedCommit: string,
+	): Promise<BuildRun> {
+		return mutateStoredRun(this.dependencies.store, runId, (stored) => {
+			const attempt = stored.repairAttempts.find(
+				(candidate) => candidate.id === attemptId,
+			);
+			if (!attempt || attempt.state !== "validating" || !attempt.commit) {
+				throw new Error(
+					`Repair attempt ${attemptId} is not ready for integration`,
+				);
+			}
+			if (stored.integrationHead !== attempt.baseCommit) {
+				throw new Error(
+					`Repair attempt ${attemptId} expected integration head ${attempt.baseCommit}, found ${stored.integrationHead}`,
+				);
+			}
+			const nextRoundNumber = attempt.round + 1;
+			const hasNextRound = stored.reviewRounds.some(
+				(round) => round.number === nextRoundNumber,
+			);
+			return {
+				...updateRepairAttempt(stored, attempt.id, {
+					state: "succeeded",
+					finishedAt: this.now(),
+					integratedCommit,
+				}),
+				state: "reviewing",
+				integrationHead: integratedCommit,
+				reviewAttempts: stored.reviewAttempts.map((review) =>
+					mapReviewAttemptFindings(review, (finding) =>
+						attempt.findingIds.includes(finding.id)
+							? {
+									...finding,
+									status: "repaired" as const,
+									repairAttemptId: attempt.id,
+								}
+							: finding,
+					),
+				),
+				reviewRounds: [
+					...stored.reviewRounds.map((round) =>
+						round.number === attempt.round
+							? {
+									...round,
+									state: "succeeded" as const,
+									finishedAt: this.now(),
+								}
+							: round,
+					),
+					...(hasNextRound
+						? []
+						: [
+								{
+									number: nextRoundNumber,
+									state: "running" as const,
+									baseCommit: integratedCommit,
+									attemptIds: [],
+									startedAt: this.now(),
+								},
+							]),
+				],
+				updatedAt: this.now(),
+			};
+		});
+	}
+
+	private async runRepairAttempt(
+		runId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		let current = await this.dependencies.store.load(runId);
+		const round = current.reviewRounds.at(-1);
+		if (!round || current.state !== "repairing") {
+			return current;
+		}
+		const findings = current.reviewAttempts
+			.filter((attempt) => attempt.round === round.number)
+			.flatMap((attempt) => attempt.findings ?? [])
+			.filter((finding) => finding.status === "repair_required");
+		if (findings.length === 0) {
+			throw new Error(`Review round ${round.number} has no repair findings`);
+		}
+		const number =
+			current.repairAttempts.filter((attempt) => attempt.round === round.number)
+				.length + 1;
+		const allocation = await this.dependencies.worktrees.prepareTaskWorktree({
+			repository,
+			runId,
+			taskId: `repair-r${round.number}`,
+			attemptNumber: number,
+			startPoint: current.integrationHead,
+		});
+		const attempt: RepairAttempt = {
+			id: `repair-${round.number}-${number}-${randomUUID().slice(0, 8)}`,
+			round: round.number,
+			number,
+			state: "prepared",
+			findingIds: findings.map((finding) => finding.id),
+			branch: allocation.branch,
+			worktreePath: allocation.path,
+			baseCommit: current.integrationHead,
+			startedAt: this.now(),
+		};
+		try {
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					if (
+						stored.state !== "repairing" ||
+						stored.integrationHead !== attempt.baseCommit
+					) {
+						throw new Error(
+							`Repair round ${round.number} is no longer launchable`,
+						);
+					}
+					return {
+						...stored,
+						repairAttempts: [...stored.repairAttempts, attempt],
+						reviewRounds: stored.reviewRounds.map((item) =>
+							item.number === round.number
+								? { ...item, repairAttemptId: attempt.id }
+								: item,
+						),
+						updatedAt: this.now(),
+					};
+				},
+			);
+		} catch (error) {
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				allocation.path,
+			);
+			const latest = await this.dependencies.store.load(runId);
+			if (latest.state === "cancelled") {
+				return latest;
+			}
+			throw error;
+		}
+		notifyRunUpdated(options, current);
+		let workerId: string | undefined;
+		let validationController: AbortController | undefined;
+		let releaseRepairBoundary: (() => void) | undefined;
+		try {
+			const worker = await this.dependencies.workers.spawn({
+				cwd: allocation.path,
+				label: `${runId}:repair:${round.number}:${number}`,
+				...(model ? { provider: model.provider, model: model.model } : {}),
+			});
+			workerId = worker.id;
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state === "cancelled"
+						? stored
+						: {
+								...updateRepairAttempt(stored, attempt.id, {
+									state: "running",
+									workerId: worker.id,
+								}),
+								updatedAt: this.now(),
+							},
+			);
+			if (current.state === "cancelled") {
+				await this.stopWorker(worker.id);
+				return current;
+			}
+			notifyRunUpdated(options, current);
+			const execution = await this.executeAuxiliaryWorker(
+				runId,
+				attempt.id,
+				worker.id,
+				buildRepairPrompt(current, attempt, findings),
+				"repair",
+				`repair:${round.number}`,
+				options,
+			);
+			if (execution.cleanupError) {
+				throw new Error(
+					`Failed to stop repair worker ${worker.id}: ${execution.cleanupError}`,
+				);
+			}
+			if (execution.timedOut) {
+				throw new Error(
+					`Repair worker timed out after ${this.workerTimeoutMs}ms`,
+				);
+			}
+			if (execution.result.status !== "succeeded") {
+				throw new Error(execution.result.error);
+			}
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state === "cancelled"
+						? stored
+						: {
+								...updateRepairAttempt(stored, attempt.id, {
+									state: "validating",
+								}),
+								updatedAt: this.now(),
+							},
+			);
+			if (current.state === "cancelled") {
+				return current;
+			}
+			validationController = new AbortController();
+			this.activeExecutions.set(attempt.id, {
+				runId,
+				controller: validationController,
+			});
+			const task = repairTaskDefinition(current, round.number);
+			const validation = await this.dependencies.validator.validate({
+				task,
+				attempt: {
+					id: attempt.id,
+					taskId: task.id,
+					number: attempt.number,
+					state: "validating",
+					branch: attempt.branch,
+					worktreePath: attempt.worktreePath,
+					baseCommit: attempt.baseCommit,
+					startedAt: attempt.startedAt,
+				},
+				signal: validationController.signal,
+			});
+			let releaseBoundary = () => {};
+			const boundaryCompletion = new Promise<void>((resolve) => {
+				releaseBoundary = resolve;
+			});
+			releaseRepairBoundary = releaseBoundary;
+			lifecycleFinalizations.set(
+				`${schedulingKey(this.dependencies.store, runId)}:repair:${attempt.id}`,
+				{
+					runKey: schedulingKey(this.dependencies.store, runId),
+					completion: boundaryCompletion,
+				},
+			);
+			this.activeExecutions.delete(attempt.id);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => ({
+					...updateRepairAttempt(stored, attempt.id, {
+						evidence: validation.evidence,
+					}),
+					updatedAt: this.now(),
+				}),
+			);
+			const commit = await this.dependencies.git.commitTaskWork(
+				attempt.worktreePath,
+				validation.snapshot,
+				`repair(review-${round.number}): address prioritized findings`,
+			);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => ({
+					...updateRepairAttempt(stored, attempt.id, { commit }),
+					updatedAt: this.now(),
+				}),
+			);
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				attempt.worktreePath,
+			);
+			const integratedCommit = await this.dependencies.git.integrateCommit(
+				current.repositoryRoot,
+				current.integrationBranch,
+				attempt.baseCommit,
+				commit,
+			);
+			current = await this.completeRepairIntegration(
+				runId,
+				attempt.id,
+				integratedCommit,
+			);
+			notifyRunUpdated(options, current);
+			return current;
+		} catch (error) {
+			if (workerId) {
+				await this.stopWorker(workerId);
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					if (stored.state === "cancelled") {
+						return stored;
+					}
+					return {
+						...updateRepairAttempt(stored, attempt.id, {
+							state: "failed",
+							finishedAt: this.now(),
+							error: message,
+						}),
+						state: "failed",
+						reviewRounds: stored.reviewRounds.map((item) => {
+							if (item.number !== round.number) {
+								return item;
+							}
+							return {
+								...item,
+								state: "failed",
+								finishedAt: this.now(),
+								error: message,
+							};
+						}),
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(options, current);
+			return current;
+		} finally {
+			this.activeExecutions.delete(attempt.id);
+			releaseRepairBoundary?.();
+			lifecycleFinalizations.delete(
+				`${schedulingKey(this.dependencies.store, runId)}:repair:${attempt.id}`,
+			);
+		}
+	}
+
+	private async failReviewRound(
+		runId: string,
+		roundNumber: number,
+		message: string,
+		options: LaunchOptions,
+		findingUpdates?: Map<string, ReviewFinding>,
+	): Promise<BuildRun> {
+		const failed = await mutateStoredRun(
+			this.dependencies.store,
+			runId,
+			(stored) => {
+				if (stored.state === "cancelled") {
+					return stored;
+				}
+				return {
+					...stored,
+					state: "failed",
+					reviewAttempts: findingUpdates
+						? stored.reviewAttempts.map((attempt) =>
+								mapReviewAttemptFindings(
+									attempt,
+									(finding) => findingUpdates.get(finding.id) ?? finding,
+								),
+							)
+						: stored.reviewAttempts,
+					reviewRounds: stored.reviewRounds.map((round) => {
+						if (round.number !== roundNumber) {
+							return round;
+						}
+						return {
+							...round,
+							state: "failed",
+							finishedAt: this.now(),
+							error: message,
+						};
+					}),
+					updatedAt: this.now(),
+				};
+			},
+		);
+		notifyRunUpdated(options, failed);
+		return failed;
+	}
+
+	private async runReviewLifecycle(
+		runId: string,
+		repository: RepositoryInfo,
+		model: WorkerModelSelection | undefined,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		let current = await this.dependencies.store.load(runId);
+		if (current.state === "integrating") {
+			const actualHead = await this.dependencies.git.branchHead(
+				current.repositoryRoot,
+				current.integrationBranch,
+			);
+			if (actualHead !== current.integrationHead) {
+				throw new Error(
+					`Integration branch ${current.integrationBranch} moved from ${current.integrationHead} to ${actualHead}`,
+				);
+			}
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state !== "integrating"
+						? stored
+						: {
+								...stored,
+								state: "reviewing",
+								reviewRounds:
+									stored.reviewRounds.length > 0
+										? stored.reviewRounds
+										: [
+												{
+													number: 1,
+													state: "running",
+													baseCommit: stored.integrationHead,
+													attemptIds: [],
+													startedAt: this.now(),
+												},
+											],
+								updatedAt: this.now(),
+							},
+			);
+			notifyRunUpdated(options, current);
+		}
+		while (current.state === "reviewing" || current.state === "repairing") {
+			if (current.state === "repairing") {
+				current = await this.runRepairAttempt(
+					runId,
+					repository,
+					model,
+					options,
+				);
+				continue;
+			}
+			current = await this.runReviewRound(runId, repository, model, options);
+			if (current.state !== "reviewing") {
+				continue;
+			}
+			const round = current.reviewRounds.at(-1);
+			if (!round) {
+				throw new Error(`Run ${runId} lost its review round`);
+			}
+			const attempts = current.reviewAttempts.filter(
+				(attempt) =>
+					attempt.round === round.number && attempt.state === "succeeded",
+			);
+			if (attempts.length !== REVIEW_CATEGORIES.length) {
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					`Review round ${round.number} did not complete every category`,
+					options,
+				);
+				continue;
+			}
+			const actualHead = await this.dependencies.git.branchHead(
+				current.repositoryRoot,
+				current.integrationBranch,
+			);
+			if (actualHead !== current.integrationHead) {
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					`Integration branch moved during review from ${current.integrationHead} to ${actualHead}`,
+					options,
+				);
+				continue;
+			}
+			let prioritized: ReviewFinding[];
+			try {
+				prioritized = prioritizeFindings(
+					attempts.flatMap((attempt) => attempt.findings ?? []),
+				);
+			} catch (error) {
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					error instanceof Error ? error.message : String(error),
+					options,
+				);
+				continue;
+			}
+			const prioritizedById = new Map(
+				prioritized.map((finding) => [finding.id, finding]),
+			);
+			const important = prioritized.filter(
+				(finding) => finding.status === "repair_required",
+			);
+			const allowedPaths = current.plan.tasks.flatMap(
+				(task) => task.allowedPaths,
+			);
+			const outOfScope = important.filter((finding) =>
+				finding.paths.some((path) => !pathIsAllowed(path, allowedPaths)),
+			);
+			if (outOfScope.length > 0) {
+				for (const finding of outOfScope) {
+					prioritizedById.set(finding.id, {
+						...finding,
+						status: "unresolved",
+					});
+				}
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					`Important findings require changes outside approved paths: ${outOfScope.map((finding) => finding.id).join(", ")}`,
+					options,
+					prioritizedById,
+				);
+				continue;
+			}
+			if (important.length > 0 && round.number > 2) {
+				for (const finding of important) {
+					prioritizedById.set(finding.id, {
+						...finding,
+						status: "unresolved",
+					});
+				}
+				current = await this.failReviewRound(
+					runId,
+					round.number,
+					"Important findings remain after two isolated repair attempts",
+					options,
+					prioritizedById,
+				);
+				continue;
+			}
+			const needsRepair = important.length > 0;
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					if (stored.state !== "reviewing") {
+						return stored;
+					}
+					return {
+						...stored,
+						state: needsRepair ? "repairing" : "reviewed",
+						reviewAttempts: stored.reviewAttempts.map((attempt) =>
+							mapReviewAttemptFindings(
+								attempt,
+								(finding) => prioritizedById.get(finding.id) ?? finding,
+							),
+						),
+						reviewRounds: stored.reviewRounds.map((item) => {
+							if (item.number !== round.number) {
+								return item;
+							}
+							if (needsRepair) {
+								return { ...item, state: "repairing" };
+							}
+							return {
+								...item,
+								state: "succeeded",
+								finishedAt: this.now(),
+							};
+						}),
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(options, current);
+		}
+		return current;
+	}
+
 	private async integrateAvailableTasks(
 		runId: string,
 		options: LaunchOptions,
@@ -1054,6 +2159,7 @@ export class BuildConductor {
 							storedTask;
 						return {
 							...stored,
+							integrationHead: integratedCommit,
 							tasks: {
 								...stored.tasks,
 								[taskId]: { ...taskWithoutError, integratedCommit },
@@ -1114,12 +2220,11 @@ export class BuildConductor {
 		}
 		activeSchedulingRuns.add(key);
 		try {
-			const initial = await this.dispatchAvailableTasks(
-				run.id,
-				repository,
-				model,
-				options,
-			);
+			const initial = ["integrating", "reviewing", "repairing"].includes(
+				run.state,
+			)
+				? { run, launches: [] }
+				: await this.dispatchAvailableTasks(run.id, repository, model, options);
 			const active = new Map<string, Promise<string>>();
 			for (const scheduled of initial.launches) {
 				active.set(
@@ -1127,12 +2232,10 @@ export class BuildConductor {
 					scheduled.completion.then(() => scheduled.launch.attempt.id),
 				);
 			}
-			const completion = this.runSchedulingLoop(
-				run.id,
-				repository,
-				model,
-				options,
-				active,
+			const completion = (
+				["integrating", "reviewing", "repairing"].includes(initial.run.state)
+					? this.runReviewLifecycle(run.id, repository, model, options)
+					: this.runSchedulingLoop(run.id, repository, model, options, active)
 			).finally(() => {
 				activeSchedulingRuns.delete(key);
 			});
@@ -1173,7 +2276,14 @@ export class BuildConductor {
 					}
 				}
 				if (active.size === 0) {
-					return integrated;
+					return integrated.state === "integrating"
+						? await this.runReviewLifecycle(
+								integrated.id,
+								repository,
+								model,
+								options,
+							)
+						: integrated;
 				}
 				continue;
 			}
@@ -1346,6 +2456,7 @@ export class BuildConductor {
 						try {
 							options.onProgress?.({
 								runId: current.id,
+								kind: "task",
 								taskId,
 								attemptId: attempt.id,
 								workerId: worker.id,

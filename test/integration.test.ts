@@ -18,6 +18,7 @@ import type {
 	WorkerExecutionResult,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { reviewResult } from "./helpers/review.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -96,9 +97,13 @@ class WritingWorkers implements WorkerBackend {
 
 	async startPrompt(
 		workerId: string,
-		_prompt: string,
+		prompt: string,
 		_options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
+		const review = reviewResult(prompt);
+		if (review) {
+			return { completion: Promise.resolve(review) };
+		}
 		const worker = await this.status(workerId);
 		const taskId = worker.label?.split(":").at(-1);
 		if (!taskId) {
@@ -198,7 +203,7 @@ describe("sequential task integration", () => {
 			(attempt) => attempt.taskId === "dependent",
 		);
 
-		expect(completed.state).toBe("integrating");
+		expect(completed.state).toBe("reviewed");
 		expect(completed.tasks.foundation?.integratedCommit).toBeTruthy();
 		expect(completed.tasks.dependent?.integratedCommit).toBeTruthy();
 		expect(foundationAttempt?.baseCommit).toBe(repository.head);

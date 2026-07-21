@@ -13,6 +13,9 @@ import type {
 	WorkerStatus,
 } from "./backend.js";
 
+const MAX_FINAL_OUTPUT_BYTES = 256 * 1024;
+const MAX_STREAM_FRAME_BYTES = 1024 * 1024;
+
 interface InstanceSummary {
 	id: string;
 	status: WorkerStatus;
@@ -54,6 +57,10 @@ interface StreamMessage {
 		role?: string;
 		stopReason?: string;
 		errorMessage?: string;
+		content?: Array<{
+			type?: string;
+			text?: string;
+		}>;
 	}>;
 }
 
@@ -125,6 +132,29 @@ function progressEvent(
 		default:
 			return undefined;
 	}
+}
+
+function assistantOutput(message: StreamMessage): string | undefined {
+	if (message.type !== "agent_end") {
+		return undefined;
+	}
+	const assistant = message.messages
+		?.toReversed()
+		.find((item) => item.role === "assistant");
+	const textParts = assistant?.content?.flatMap((item) =>
+		item.type === "text" && typeof item.text === "string" ? [item.text] : [],
+	);
+	let outputBytes = 0;
+	for (const text of textParts ?? []) {
+		outputBytes += Buffer.byteLength(text, "utf8");
+		if (outputBytes > MAX_FINAL_OUTPUT_BYTES) {
+			throw new Error(
+				`Final assistant output exceeds ${MAX_FINAL_OUTPUT_BYTES} bytes`,
+			);
+		}
+	}
+	const output = textParts?.join("");
+	return output?.trim() ? output : undefined;
 }
 
 function agentFailure(message: StreamMessage): string | undefined {
@@ -211,6 +241,15 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 			socket.on("data", (chunk: Buffer | string) => {
 				buffer += chunk.toString();
 				const newline = buffer.indexOf("\n");
+				const frame = newline === -1 ? buffer : buffer.slice(0, newline);
+				if (Buffer.byteLength(frame, "utf8") > MAX_STREAM_FRAME_BYTES) {
+					finish(
+						new Error(
+							`Official orchestrator response exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+						),
+					);
+					return;
+				}
 				if (newline === -1) {
 					return;
 				}
@@ -325,6 +364,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 		let disconnectHandled = false;
 		let agentRunFailure: string | undefined;
 		let retryFailure: string | undefined;
+		let finalOutput: string | undefined;
 		let resolveCompletion: (result: WorkerExecutionResult) => void;
 		const completion = new Promise<WorkerExecutionResult>((resolve) => {
 			resolveCompletion = resolve;
@@ -468,17 +508,23 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				}
 				if (message.type === "agent_end") {
 					agentRunFailure = agentFailure(message);
+					finalOutput = assistantOutput(message);
 				} else if (message.type === "auto_retry_end") {
 					retryFailure =
 						message.success === true ? undefined : agentFailure(message);
 				}
 				if (message.type === "agent_settled") {
 					const terminalFailure = retryFailure ?? agentRunFailure;
-					finishCompletion(
-						terminalFailure
-							? { status: "failed", error: terminalFailure }
-							: { status: "succeeded" },
-					);
+					let result: WorkerExecutionResult;
+					if (terminalFailure) {
+						result = { status: "failed", error: terminalFailure };
+					} else {
+						result = {
+							status: "succeeded",
+							...(finalOutput ? { output: finalOutput } : {}),
+						};
+					}
+					finishCompletion(result);
 				}
 			};
 			const processChunk = (chunk: string) => {
@@ -486,12 +532,27 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				for (;;) {
 					const newline = buffer.indexOf("\n");
 					if (newline === -1) {
+						if (Buffer.byteLength(buffer, "utf8") > MAX_STREAM_FRAME_BYTES) {
+							failStart(
+								new Error(
+									`Official orchestrator frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+								),
+							);
+						}
 						return;
 					}
 					const line = buffer.slice(0, newline).replace(/\r$/, "");
 					buffer = buffer.slice(newline + 1);
 					if (!line) {
 						continue;
+					}
+					if (Buffer.byteLength(line, "utf8") > MAX_STREAM_FRAME_BYTES) {
+						failStart(
+							new Error(
+								`Official orchestrator frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+							),
+						);
+						return;
 					}
 					try {
 						handleMessage(JSON.parse(line) as StreamMessage);

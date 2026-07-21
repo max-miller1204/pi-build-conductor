@@ -61,6 +61,64 @@ describe("RunStore", () => {
 		expect(await store.list()).toEqual([run]);
 	});
 
+	it("migrates schema version 2 runs without losing their integration head", () => {
+		const run = createRun();
+		const task = run.tasks.implementation;
+		if (!task) {
+			throw new Error("Missing test task");
+		}
+		const integratedCommit = "integrated-implementation";
+		const integratedRun: BuildRun = {
+			...run,
+			integrationHead: integratedCommit,
+			tasks: {
+				implementation: {
+					...task,
+					state: "succeeded",
+					attemptIds: ["attempt-1"],
+					integratedCommit,
+				},
+			},
+			attempts: [
+				{
+					id: "attempt-1",
+					taskId: "implementation",
+					number: 1,
+					state: "succeeded",
+					branch: "conductor/run-1/task/implementation/attempt-1",
+					worktreePath: "/worktrees/implementation",
+					baseCommit: run.baseCommit,
+					startedAt: run.createdAt,
+					finishedAt: run.updatedAt,
+					commit: "source-implementation",
+					evidence: {
+						startedAt: run.createdAt,
+						finishedAt: run.updatedAt,
+						passed: true,
+						changedFiles: [],
+						diffHash: "diff",
+						checks: [],
+					},
+				},
+			],
+		};
+		const {
+			integrationHead: _integrationHead,
+			reviewRounds: _reviewRounds,
+			reviewAttempts: _reviewAttempts,
+			repairAttempts: _repairAttempts,
+			...legacy
+		} = integratedRun;
+
+		expect(validateStoredRun({ ...legacy, schemaVersion: 2 })).toMatchObject({
+			schemaVersion: 3,
+			integrationHead: integratedCommit,
+			reviewRounds: [],
+			reviewAttempts: [],
+			repairAttempts: [],
+		});
+	});
+
 	it("ignores incomplete temporary writes during listing", async () => {
 		const store = await temporaryStore();
 		const run = createRun();

@@ -21,6 +21,7 @@ import type {
 	WorkerInstance,
 } from "../src/workers/backend.js";
 import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
+import { reviewResult } from "./helpers/review.js";
 
 const directories: string[] = [];
 
@@ -65,6 +66,10 @@ class FakeWorkers implements WorkerBackend {
 		options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
 		this.calls.push({ operation: "prompt", value: { workerId, prompt } });
+		const review = reviewResult(prompt);
+		if (review) {
+			return Promise.resolve({ completion: Promise.resolve(review) });
+		}
 		if (this.result) {
 			return Promise.resolve({ completion: Promise.resolve(this.result) });
 		}
@@ -233,7 +238,7 @@ describe("BuildConductor vertical slice", () => {
 		const completed = await store.load(run.id);
 		expect(completed.attempts[0]?.state).toBe("succeeded");
 		expect(completed.tasks.implementation?.state).toBe("succeeded");
-		expect(workers.calls.at(-1)).toEqual({
+		expect(workers.calls).toContainEqual({
 			operation: "stop",
 			value: "worker-1",
 		});

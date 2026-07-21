@@ -34,7 +34,7 @@ export interface WorkerExecutionOptions {
 }
 
 export type WorkerExecutionResult =
-	| { status: "succeeded" }
+	| { status: "succeeded"; output?: string }
 	| { status: "failed"; error: string }
 	| { status: "aborted"; error: string };
 

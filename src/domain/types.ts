@@ -1,4 +1,4 @@
-export const RUN_SCHEMA_VERSION = 2 as const;
+export const RUN_SCHEMA_VERSION = 3 as const;
 export const PLAN_SCHEMA_VERSION = 2 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
 export const MAX_CONCURRENT_WORKERS = 4 as const;
@@ -8,6 +8,9 @@ export type RunState =
 	| "awaiting_approval"
 	| "running"
 	| "integrating"
+	| "reviewing"
+	| "repairing"
+	| "reviewed"
 	| "validating"
 	| "completed"
 	| "failed"
@@ -115,6 +118,89 @@ export interface RunTask {
 	integrationError?: string;
 }
 
+export const REVIEW_CATEGORIES = [
+	"correctness",
+	"security",
+	"maintainability",
+	"tests",
+	"documentation",
+] as const;
+
+export type ReviewCategory = (typeof REVIEW_CATEGORIES)[number];
+export type ReviewSeverity = "critical" | "high" | "medium" | "low";
+export type ReviewConfidence = "high" | "medium" | "low";
+export type ReviewFindingStatus =
+	| "repair_required"
+	| "deferred"
+	| "repaired"
+	| "unresolved";
+
+export interface ReviewFinding {
+	id: string;
+	category: ReviewCategory;
+	severity: ReviewSeverity;
+	confidence: ReviewConfidence;
+	title: string;
+	description: string;
+	paths: string[];
+	recommendation: string;
+	status: ReviewFindingStatus;
+	repairAttemptId?: string;
+}
+
+export interface ReviewAttempt {
+	id: string;
+	round: number;
+	category: ReviewCategory;
+	number: number;
+	state: AttemptState;
+	branch: string;
+	worktreePath: string;
+	baseCommit: string;
+	workerId?: string;
+	startedAt: string;
+	finishedAt?: string;
+	error?: string;
+	summary?: string;
+	findings?: ReviewFinding[];
+}
+
+export type ReviewRoundState =
+	| "running"
+	| "repairing"
+	| "succeeded"
+	| "failed"
+	| "cancelled";
+
+export interface ReviewRound {
+	number: number;
+	state: ReviewRoundState;
+	baseCommit: string;
+	attemptIds: string[];
+	startedAt: string;
+	finishedAt?: string;
+	repairAttemptId?: string;
+	error?: string;
+}
+
+export interface RepairAttempt {
+	id: string;
+	round: number;
+	number: number;
+	state: AttemptState;
+	findingIds: string[];
+	branch: string;
+	worktreePath: string;
+	baseCommit: string;
+	workerId?: string;
+	startedAt: string;
+	finishedAt?: string;
+	error?: string;
+	commit?: string;
+	integratedCommit?: string;
+	evidence?: TaskValidationEvidence;
+}
+
 export interface HandoffRecord {
 	sourcePath: string;
 	text: string;
@@ -132,6 +218,10 @@ export interface BuildRun {
 	plan: TaskPlan;
 	tasks: Record<string, RunTask>;
 	attempts: TaskAttempt[];
+	integrationHead: string;
+	reviewRounds: ReviewRound[];
+	reviewAttempts: ReviewAttempt[];
+	repairAttempts: RepairAttempt[];
 	maxConcurrentWorkers: number;
 	createdAt: string;
 	updatedAt: string;

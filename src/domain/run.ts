@@ -48,6 +48,10 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		plan: input.plan,
 		tasks,
 		attempts: [],
+		integrationHead: input.baseCommit,
+		reviewRounds: [],
+		reviewAttempts: [],
+		repairAttempts: [],
 		maxConcurrentWorkers: input.maxConcurrentWorkers,
 		createdAt: input.now,
 		updatedAt: input.now,
@@ -80,6 +84,40 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			error: "Conductor restarted",
 		};
 	});
+	const reviewAttempts = run.reviewAttempts.map((attempt) => {
+		if (
+			attempt.state !== "prepared" &&
+			attempt.state !== "launched" &&
+			attempt.state !== "running" &&
+			attempt.state !== "validating"
+		) {
+			return attempt;
+		}
+		changed = true;
+		return {
+			...attempt,
+			state: "interrupted" as const,
+			finishedAt: now,
+			error: "Conductor restarted",
+		};
+	});
+	const repairAttempts = run.repairAttempts.map((attempt) => {
+		if (
+			attempt.state !== "prepared" &&
+			attempt.state !== "launched" &&
+			attempt.state !== "running" &&
+			attempt.state !== "validating"
+		) {
+			return attempt;
+		}
+		changed = true;
+		return {
+			...attempt,
+			state: "interrupted" as const,
+			finishedAt: now,
+			error: "Conductor restarted",
+		};
+	});
 	const tasks = Object.fromEntries(
 		Object.entries(run.tasks).map(([id, task]) => {
 			if (task.state !== "running" && task.state !== "validating") {
@@ -92,5 +130,12 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 	if (!changed) {
 		return run;
 	}
-	return reconcileTaskStates({ ...run, attempts, tasks, updatedAt: now });
+	return reconcileTaskStates({
+		...run,
+		attempts,
+		reviewAttempts,
+		repairAttempts,
+		tasks,
+		updatedAt: now,
+	});
 }

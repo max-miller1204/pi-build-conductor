@@ -45,9 +45,9 @@
       "id": "goal-mrtf4nqy-8bdb9199",
       "title": "Add independent review and repair passes",
       "description": "Launch fresh reviewer agents for correctness, security, maintainability, tests, and documentation, prioritize findings, and apply important fixes through isolated repair attempts.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:43.930Z",
-      "updatedAt": "2026-07-20T16:07:43.930Z"
+      "updatedAt": "2026-07-21T00:42:31.821Z"
     },
     {
       "id": "goal-mrtf4pcp-951916e0",

@@ -34,7 +34,7 @@ function runWith(
 	];
 	const plan: TaskPlan = { version: 2, title: "Build", tasks: definitions };
 	return {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		id: "run-1",
 		state: "running",
 		repositoryRoot: "/repo",
@@ -57,6 +57,10 @@ function runWith(
 			]),
 		),
 		attempts: [],
+		integrationHead: "abc",
+		reviewRounds: [],
+		reviewAttempts: [],
+		repairAttempts: [],
 		maxConcurrentWorkers,
 		createdAt: "2026-01-01T00:00:00.000Z",
 		updatedAt: "2026-01-01T00:00:00.000Z",

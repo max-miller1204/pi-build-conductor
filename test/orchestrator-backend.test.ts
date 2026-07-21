@@ -96,7 +96,11 @@ async function fakeOrchestrator(
 											stopReason: "error",
 											errorMessage: "provider failed",
 										}
-									: { role: "assistant", stopReason: "stop" },
+									: {
+											role: "assistant",
+											stopReason: "stop",
+											content: [{ type: "text", text: "Done" }],
+										},
 							],
 						},
 						{ type: "agent_settled" },
@@ -181,7 +185,10 @@ describe("OfficialOrchestratorBackend", () => {
 			{ onEvent: (event) => events.push(event.type) },
 		);
 
-		expect(await execution.completion).toEqual({ status: "succeeded" });
+		expect(await execution.completion).toEqual({
+			status: "succeeded",
+			output: "Done",
+		});
 		expect(events).toEqual(["agent_started", "tool_started", "tool_finished"]);
 		expect(fake.requests.slice(0, 2)).toEqual([
 			{ type: "rpc_stream", instanceId: "worker-1" },
