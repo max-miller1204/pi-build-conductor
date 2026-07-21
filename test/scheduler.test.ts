@@ -39,7 +39,7 @@ function runWith(
 		tasks: definitions,
 	};
 	return {
-		schemaVersion: 5,
+		schemaVersion: 6,
 		revision: 0,
 		id: "run-1",
 		state: "running",
@@ -49,6 +49,17 @@ function runWith(
 		integrationBranch: "conductor/run-1/integration",
 		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
 		plan,
+		planRevision: 1,
+		planRevisions: [
+			{
+				number: 1,
+				createdAt: "2026-01-01T00:00:00.000Z",
+				source: "generated",
+				plan,
+				maxConcurrentWorkers,
+			},
+		],
+		approvedPlanRevision: 1,
 		tasks: Object.fromEntries(
 			definitions.map((item) => [
 				item.id,
@@ -71,6 +82,7 @@ function runWith(
 		maxConcurrentWorkers,
 		createdAt: "2026-01-01T00:00:00.000Z",
 		updatedAt: "2026-01-01T00:00:00.000Z",
+		approvedAt: "2026-01-01T00:00:00.000Z",
 	};
 }
 

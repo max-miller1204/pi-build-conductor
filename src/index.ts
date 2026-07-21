@@ -6,6 +6,8 @@ export * from "./domain/types.js";
 export * from "./git/git.js";
 export * from "./git/worktrees.js";
 export * from "./planning/pi-plan-generator.js";
+export * from "./planning/plan-editor.js";
+export * from "./planning/plan-presentation.js";
 export * from "./review/prompts.js";
 export * from "./review/review-policy.js";
 export * from "./review/review-report.js";

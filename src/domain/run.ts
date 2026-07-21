@@ -1,8 +1,10 @@
+import { validateTaskPlan } from "./dag.js";
 import { reconcileTaskStates } from "./scheduler.js";
 import {
 	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
+	type PlanRevisionSource,
 	RUN_SCHEMA_VERSION,
 	type RunTask,
 	type TaskPlan,
@@ -17,25 +19,70 @@ export interface CreateRunInput {
 	handoff: BuildRun["handoff"];
 	plan: TaskPlan;
 	maxConcurrentWorkers: number;
+	planSource?: Exclude<PlanRevisionSource, "edited" | "restored" | "migrated">;
 	now: string;
 }
 
-export function createBuildRun(input: CreateRunInput): BuildRun {
+export interface ReviseRunPlanInput {
+	plan: TaskPlan;
+	maxConcurrentWorkers: number;
+	expectedPlanRevision: number;
+	now: string;
+	source?: "edited";
+}
+
+function assertWorkerLimit(maxConcurrentWorkers: number): void {
 	if (
-		!Number.isInteger(input.maxConcurrentWorkers) ||
-		input.maxConcurrentWorkers < MIN_CONCURRENT_WORKERS ||
-		input.maxConcurrentWorkers > MAX_CONCURRENT_WORKERS
+		!Number.isInteger(maxConcurrentWorkers) ||
+		maxConcurrentWorkers < MIN_CONCURRENT_WORKERS ||
+		maxConcurrentWorkers > MAX_CONCURRENT_WORKERS
 	) {
 		throw new Error(
 			`maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
 		);
 	}
-	const tasks: Record<string, RunTask> = Object.fromEntries(
-		input.plan.tasks.map((definition) => [
+}
+
+function cloneTaskPlan(plan: TaskPlan): TaskPlan {
+	return structuredClone(plan);
+}
+
+function tasksForPlan(plan: TaskPlan): Record<string, RunTask> {
+	return Object.fromEntries(
+		plan.tasks.map((definition) => [
 			definition.id,
-			{ definition, state: "planned", attemptIds: [] },
+			{
+				definition: structuredClone(definition),
+				state: "planned",
+				attemptIds: [],
+			},
 		]),
 	);
+}
+
+function assertPlanEditable(run: BuildRun): void {
+	if (!["planning", "awaiting_approval"].includes(run.state)) {
+		throw new Error(`Cannot revise plan in state ${run.state}`);
+	}
+	if (
+		run.approvedAt !== undefined ||
+		run.approvedPlanRevision !== undefined ||
+		run.attempts.length > 0 ||
+		run.reviewRounds.length > 0 ||
+		run.reviewAttempts.length > 0 ||
+		run.repairAttempts.length > 0 ||
+		run.finalValidationAttempts.length > 0 ||
+		run.integrationHead !== run.baseCommit ||
+		run.mergeReadyEvidence !== undefined
+	) {
+		throw new Error("Cannot revise a plan after execution resources exist");
+	}
+}
+
+export function createBuildRun(input: CreateRunInput): BuildRun {
+	assertWorkerLimit(input.maxConcurrentWorkers);
+	const plan = cloneTaskPlan(validateTaskPlan(input.plan));
+	const planRevision = 1;
 	return reconcileTaskStates({
 		schemaVersion: RUN_SCHEMA_VERSION,
 		revision: 0,
@@ -46,8 +93,18 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		baseCommit: input.baseCommit,
 		integrationBranch: input.integrationBranch,
 		handoff: input.handoff,
-		plan: input.plan,
-		tasks,
+		plan,
+		planRevision,
+		planRevisions: [
+			{
+				number: planRevision,
+				createdAt: input.now,
+				source: input.planSource ?? "generated",
+				plan: cloneTaskPlan(plan),
+				maxConcurrentWorkers: input.maxConcurrentWorkers,
+			},
+		],
+		tasks: tasksForPlan(plan),
 		attempts: [],
 		integrationHead: input.baseCommit,
 		reviewRounds: [],
@@ -60,11 +117,106 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 	});
 }
 
-export function approveRun(run: BuildRun, now: string): BuildRun {
+export function reviseRunPlan(
+	run: BuildRun,
+	input: ReviseRunPlanInput,
+): BuildRun {
+	assertPlanEditable(run);
+	if (run.planRevision !== input.expectedPlanRevision) {
+		throw new Error(
+			`Stale plan revision ${input.expectedPlanRevision}; current revision is ${run.planRevision}`,
+		);
+	}
+	assertWorkerLimit(input.maxConcurrentWorkers);
+	const plan = cloneTaskPlan(validateTaskPlan(input.plan));
+	if (
+		JSON.stringify(plan) === JSON.stringify(run.plan) &&
+		input.maxConcurrentWorkers === run.maxConcurrentWorkers
+	) {
+		return run;
+	}
+	const planRevision = run.planRevision + 1;
+	return reconcileTaskStates({
+		...run,
+		plan,
+		planRevision,
+		planRevisions: [
+			...run.planRevisions,
+			{
+				number: planRevision,
+				createdAt: input.now,
+				source: input.source ?? "edited",
+				plan: cloneTaskPlan(plan),
+				maxConcurrentWorkers: input.maxConcurrentWorkers,
+			},
+		],
+		tasks: tasksForPlan(plan),
+		maxConcurrentWorkers: input.maxConcurrentWorkers,
+		updatedAt: input.now,
+	});
+}
+
+export function restoreRunPlanRevision(
+	run: BuildRun,
+	revisionNumber: number,
+	expectedPlanRevision: number,
+	now: string,
+): BuildRun {
+	assertPlanEditable(run);
+	if (run.planRevision !== expectedPlanRevision) {
+		throw new Error(
+			`Stale plan revision ${expectedPlanRevision}; current revision is ${run.planRevision}`,
+		);
+	}
+	const restored = run.planRevisions.find(
+		(revision) => revision.number === revisionNumber,
+	);
+	if (!restored) {
+		throw new Error(`Unknown plan revision ${revisionNumber}`);
+	}
+	const plan = cloneTaskPlan(restored.plan);
+	const planRevision = run.planRevision + 1;
+	return reconcileTaskStates({
+		...run,
+		plan,
+		planRevision,
+		planRevisions: [
+			...run.planRevisions,
+			{
+				number: planRevision,
+				createdAt: now,
+				source: "restored",
+				restoredFrom: revisionNumber,
+				plan: cloneTaskPlan(plan),
+				maxConcurrentWorkers: restored.maxConcurrentWorkers,
+			},
+		],
+		tasks: tasksForPlan(plan),
+		maxConcurrentWorkers: restored.maxConcurrentWorkers,
+		updatedAt: now,
+	});
+}
+
+export function approveRun(
+	run: BuildRun,
+	now: string,
+	expectedPlanRevision = run.planRevision,
+): BuildRun {
 	if (run.state !== "awaiting_approval") {
 		throw new Error(`Cannot approve run in state ${run.state}`);
 	}
-	return { ...run, state: "running", approvedAt: now, updatedAt: now };
+	if (run.planRevision !== expectedPlanRevision) {
+		throw new Error(
+			`Stale plan revision ${expectedPlanRevision}; current revision is ${run.planRevision}`,
+		);
+	}
+	return {
+		...run,
+		state: "running",
+		approvedPlanRevision: run.planRevision,
+		approvedAt: now,
+		updatedAt: now,
+	};
 }
 
 export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {

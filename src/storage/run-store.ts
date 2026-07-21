@@ -86,6 +86,13 @@ const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
 	"cancelled",
 	"interrupted",
 ]);
+const PLAN_REVISION_SOURCES = new Set([
+	"generated",
+	"sidecar",
+	"edited",
+	"restored",
+	"migrated",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,6 +102,31 @@ function assertString(value: unknown, path: string): asserts value is string {
 	if (typeof value !== "string" || value.length === 0) {
 		throw new Error(`${path} must be a non-empty string`);
 	}
+}
+
+function migrateLegacyRun(
+	value: Record<string, unknown>,
+): Record<string, unknown> {
+	if (value.schemaVersion !== 4 && value.schemaVersion !== 5) {
+		return value;
+	}
+	const approved = value.approvedAt !== undefined;
+	return {
+		...value,
+		schemaVersion: RUN_SCHEMA_VERSION,
+		revision: value.schemaVersion === 4 ? 0 : value.revision,
+		planRevision: 1,
+		planRevisions: [
+			{
+				number: 1,
+				createdAt: value.approvedAt ?? value.createdAt,
+				source: "migrated",
+				plan: value.plan,
+				maxConcurrentWorkers: value.maxConcurrentWorkers,
+			},
+		],
+		...(approved ? { approvedPlanRevision: 1 } : {}),
+	};
 }
 
 function validateEvidence(value: unknown, path: string): void {
@@ -168,9 +200,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 			"Legacy run snapshots cannot become merge-ready because they lack an explicitly approved final validation suite; start a new approved run",
 		);
 	}
-	if (value.schemaVersion === 4) {
-		value = { ...value, schemaVersion: RUN_SCHEMA_VERSION, revision: 0 };
-	}
+	value = migrateLegacyRun(value);
 	if (!isRecord(value)) {
 		throw new Error("run must be an object");
 	}
@@ -212,6 +242,118 @@ export function validateStoredRun(value: unknown): BuildRun {
 		throw new Error("run.integrationBranch must differ from run.baseBranch");
 	}
 	const plan = validateTaskPlan(value.plan);
+	if (
+		!Number.isInteger(value.maxConcurrentWorkers) ||
+		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
+		(value.maxConcurrentWorkers as number) > MAX_CONCURRENT_WORKERS
+	) {
+		throw new Error(
+			`run.maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+		);
+	}
+	if (
+		!Number.isSafeInteger(value.planRevision) ||
+		(value.planRevision as number) < 1
+	) {
+		throw new Error("run.planRevision must be a positive safe integer");
+	}
+	if (!Array.isArray(value.planRevisions) || value.planRevisions.length === 0) {
+		throw new Error("run.planRevisions must be a non-empty array");
+	}
+	for (const [index, revision] of value.planRevisions.entries()) {
+		const path = `run.planRevisions[${index}]`;
+		if (!isRecord(revision)) {
+			throw new Error(`${path} must be an object`);
+		}
+		if (revision.number !== index + 1) {
+			throw new Error(`${path}.number must be sequential`);
+		}
+		assertString(revision.createdAt, `${path}.createdAt`);
+		if (
+			typeof revision.source !== "string" ||
+			!PLAN_REVISION_SOURCES.has(revision.source)
+		) {
+			throw new Error(`${path}.source is invalid`);
+		}
+		validateTaskPlan(revision.plan);
+		if (
+			!Number.isInteger(revision.maxConcurrentWorkers) ||
+			(revision.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
+			(revision.maxConcurrentWorkers as number) > MAX_CONCURRENT_WORKERS
+		) {
+			throw new Error(
+				`${path}.maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+			);
+		}
+		if (revision.source === "restored") {
+			if (
+				!Number.isSafeInteger(revision.restoredFrom) ||
+				(revision.restoredFrom as number) < 1 ||
+				(revision.restoredFrom as number) >= (revision.number as number)
+			) {
+				throw new Error(
+					`${path}.restoredFrom must reference an earlier plan revision`,
+				);
+			}
+		} else if (revision.restoredFrom !== undefined) {
+			throw new Error(
+				`${path}.restoredFrom is only valid for restored revisions`,
+			);
+		}
+	}
+	if (value.planRevision !== value.planRevisions.length) {
+		throw new Error("run.planRevision must identify the latest plan revision");
+	}
+	const latestPlanRevision = value.planRevisions.at(-1);
+	if (
+		!isRecord(latestPlanRevision) ||
+		JSON.stringify(latestPlanRevision.plan) !== JSON.stringify(plan) ||
+		latestPlanRevision.maxConcurrentWorkers !== value.maxConcurrentWorkers
+	) {
+		throw new Error(
+			"run.plan and maxConcurrentWorkers must match the latest plan revision",
+		);
+	}
+	if (value.approvedAt !== undefined) {
+		assertString(value.approvedAt, "run.approvedAt");
+	}
+	if (
+		(value.approvedAt === undefined) !==
+		(value.approvedPlanRevision === undefined)
+	) {
+		throw new Error(
+			"run.approvedAt and run.approvedPlanRevision must appear together",
+		);
+	}
+	if (
+		value.approvedPlanRevision !== undefined &&
+		(value.approvedPlanRevision !== value.planRevision ||
+			!Number.isSafeInteger(value.approvedPlanRevision))
+	) {
+		throw new Error(
+			"run.approvedPlanRevision must match the immutable current plan revision",
+		);
+	}
+	const stateRequiresApproval = [
+		"running",
+		"integrating",
+		"reviewing",
+		"repairing",
+		"reviewed",
+		"validating",
+		"completed",
+	].includes(String(value.state));
+	if (stateRequiresApproval && value.approvedPlanRevision === undefined) {
+		throw new Error(`Run state ${String(value.state)} requires plan approval`);
+	}
+	if (
+		["planning", "awaiting_approval"].includes(String(value.state)) &&
+		value.approvedPlanRevision !== undefined
+	) {
+		throw new Error(
+			`Run state ${String(value.state)} cannot already have plan approval`,
+		);
+	}
 	if (!isRecord(value.tasks)) {
 		throw new Error("run.tasks must be an object");
 	}
@@ -1004,15 +1146,6 @@ export function validateStoredRun(value: unknown): BuildRun {
 			`${String(value.state)} run cannot have merge-ready evidence`,
 		);
 	}
-	if (
-		!Number.isInteger(value.maxConcurrentWorkers) ||
-		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
-		(value.maxConcurrentWorkers as number) > MAX_CONCURRENT_WORKERS
-	) {
-		throw new Error(
-			`run.maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
-		);
-	}
 	const activeTaskAttempts = [...attemptsById.values()].filter((attempt) =>
 		isActiveAttemptState(attempt.state as AttemptState),
 	);
@@ -1059,6 +1192,19 @@ export function validateStoredRun(value: unknown): BuildRun {
 			}
 		}
 	}
+	if (value.approvedPlanRevision === undefined) {
+		if (
+			value.attempts.length > 0 ||
+			value.reviewRounds.length > 0 ||
+			value.reviewAttempts.length > 0 ||
+			value.repairAttempts.length > 0 ||
+			value.finalValidationAttempts.length > 0 ||
+			value.mergeReadyEvidence !== undefined ||
+			value.integrationHead !== value.baseCommit
+		) {
+			throw new Error("Unapproved run cannot contain execution side effects");
+		}
+	}
 	if (!isRecord(value.handoff)) {
 		throw new Error("run.handoff must be an object");
 	}
@@ -1077,6 +1223,34 @@ function parseJson(text: string, context: string): unknown {
 		return JSON.parse(text) as unknown;
 	} catch (error) {
 		throw new Error(`Invalid JSON in ${context}`, { cause: error });
+	}
+}
+
+function assertPlanHistoryTransition(
+	current: BuildRun,
+	proposed: BuildRun,
+): void {
+	if (proposed.planRevisions.length < current.planRevisions.length) {
+		throw new Error("Plan revision history cannot be truncated");
+	}
+	for (const [index, revision] of current.planRevisions.entries()) {
+		if (
+			JSON.stringify(proposed.planRevisions[index]) !== JSON.stringify(revision)
+		) {
+			throw new Error(`Plan revision ${revision.number} is immutable`);
+		}
+	}
+	if (current.approvedPlanRevision !== undefined) {
+		if (
+			proposed.approvedPlanRevision !== current.approvedPlanRevision ||
+			proposed.approvedAt !== current.approvedAt ||
+			proposed.planRevisions.length !== current.planRevisions.length ||
+			proposed.planRevision !== current.planRevision ||
+			JSON.stringify(proposed.plan) !== JSON.stringify(current.plan) ||
+			proposed.maxConcurrentWorkers !== current.maxConcurrentWorkers
+		) {
+			throw new Error("Approved plan revision is immutable");
+		}
 	}
 }
 
@@ -1211,6 +1385,7 @@ export class RunStore {
 					`Stale run revision ${validated.revision}; current revision is ${current.revision}`,
 				);
 			}
+			assertPlanHistoryTransition(current, validated);
 			if (JSON.stringify(current) === JSON.stringify(validated)) {
 				return;
 			}
@@ -1224,17 +1399,22 @@ export class RunStore {
 	): Promise<BuildRun> {
 		return this.withLock(runId, async () => {
 			const current = await this.readValidated(runId);
+			const immutableBaseline = structuredClone(current);
 			const proposed = await mutate(current);
-			if (proposed === current) {
+			if (
+				proposed === current &&
+				JSON.stringify(proposed) === JSON.stringify(immutableBaseline)
+			) {
 				return current;
 			}
-			if (proposed.id !== current.id) {
+			if (proposed.id !== immutableBaseline.id) {
 				throw new Error("A run transaction cannot change the run id");
 			}
+			assertPlanHistoryTransition(immutableBaseline, proposed);
 			const updated = validateStoredRun({
 				...proposed,
 				schemaVersion: RUN_SCHEMA_VERSION,
-				revision: current.revision + 1,
+				revision: immutableBaseline.revision + 1,
 			});
 			await this.writeAtomic(updated);
 			return updated;
@@ -1246,11 +1426,17 @@ export class RunStore {
 		try {
 			const raw = parseJson(await readFile(path, "utf8"), path);
 			const validated = validateStoredRun(raw);
-			if (isRecord(raw) && raw.schemaVersion === 4) {
+			if (
+				isRecord(raw) &&
+				(raw.schemaVersion === 4 || raw.schemaVersion === 5)
+			) {
 				return this.withLock(runId, async () => {
 					const latestRaw = parseJson(await readFile(path, "utf8"), path);
 					const migrated = validateStoredRun(latestRaw);
-					if (isRecord(latestRaw) && latestRaw.schemaVersion === 4) {
+					if (
+						isRecord(latestRaw) &&
+						(latestRaw.schemaVersion === 4 || latestRaw.schemaVersion === 5)
+					) {
 						await this.writeAtomic(migrated);
 					}
 					return migrated;

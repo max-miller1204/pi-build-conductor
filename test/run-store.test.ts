@@ -9,7 +9,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { approveRun, createBuildRun } from "../src/domain/run.js";
+import {
+	approveRun,
+	createBuildRun,
+	restoreRunPlanRevision,
+	reviseRunPlan,
+} from "../src/domain/run.js";
 import type { BuildRun, TaskPlan } from "../src/domain/types.js";
 import { RunStore, validateStoredRun } from "../src/storage/run-store.js";
 
@@ -72,7 +77,13 @@ describe("RunStore", () => {
 	it("migrates schema 4 snapshots durably and idempotently", async () => {
 		const store = await temporaryStore();
 		const run = createRun();
-		const { revision: _revision, ...current } = run;
+		const {
+			revision: _revision,
+			planRevision: _planRevision,
+			planRevisions: _planRevisions,
+			approvedPlanRevision: _approvedPlanRevision,
+			...current
+		} = run;
 		await writeFile(
 			join(store.directory, `${run.id}.json`),
 			`${JSON.stringify({ ...current, schemaVersion: 4 }, null, 2)}\n`,
@@ -81,14 +92,209 @@ describe("RunStore", () => {
 
 		const first = await store.load(run.id);
 		const second = await store.load(run.id);
-		expect(first).toMatchObject({ schemaVersion: 5, revision: 0 });
+		expect(first).toMatchObject({
+			schemaVersion: 6,
+			revision: 0,
+			planRevision: 1,
+		});
 		expect(second).toEqual(first);
 		const persisted = await readFile(
 			join(store.directory, `${run.id}.json`),
 			"utf8",
 		);
-		expect(persisted).toContain('"schemaVersion": 5');
+		expect(persisted).toContain('"schemaVersion": 6');
 		expect(persisted).toContain('"revision": 0');
+	});
+
+	it("migrates schema 5 plan snapshots into immutable revision history", async () => {
+		const store = await temporaryStore();
+		const run = approveRun(createRun(), "2026-01-01T00:01:00.000Z");
+		const {
+			planRevision: _planRevision,
+			planRevisions: _planRevisions,
+			approvedPlanRevision: _approvedPlanRevision,
+			...legacy
+		} = run;
+		await writeFile(
+			join(store.directory, `${run.id}.json`),
+			`${JSON.stringify({ ...legacy, schemaVersion: 5 }, null, 2)}\n`,
+			"utf8",
+		);
+
+		const migrated = await store.load(run.id);
+		expect(migrated).toMatchObject({
+			schemaVersion: 6,
+			planRevision: 1,
+			approvedPlanRevision: 1,
+			planRevisions: [
+				{
+					number: 1,
+					source: "migrated",
+					maxConcurrentWorkers: 2,
+				},
+			],
+		});
+	});
+
+	it("keeps current plans, task projections, and historical revisions isolated", () => {
+		const run = createRun();
+		run.plan.title = "Mutated current plan";
+		const implementation = run.tasks.implementation;
+		if (!implementation) {
+			throw new Error("Missing implementation task");
+		}
+		implementation.definition.title = "Mutated task projection";
+
+		expect(run.planRevisions[0]?.plan.title).toBe("Build");
+		expect(run.plan.tasks[0]?.title).toBe("Implementation");
+		expect(run.planRevisions[0]?.plan.tasks[0]?.title).toBe("Implementation");
+	});
+
+	it("appends valid plan revisions, restores history, and freezes approval", () => {
+		const initial = createRun();
+		const revised = reviseRunPlan(initial, {
+			plan: { ...initial.plan, title: "Revised build" },
+			maxConcurrentWorkers: 4,
+			expectedPlanRevision: 1,
+			now: "2026-01-01T00:01:00.000Z",
+		});
+		expect(revised).toMatchObject({
+			planRevision: 2,
+			maxConcurrentWorkers: 4,
+			plan: { title: "Revised build" },
+		});
+		expect(revised.planRevisions).toHaveLength(2);
+		expect(
+			reviseRunPlan(revised, {
+				plan: revised.plan,
+				maxConcurrentWorkers: 4,
+				expectedPlanRevision: 2,
+				now: "2026-01-01T00:02:00.000Z",
+			}),
+		).toBe(revised);
+
+		const restored = restoreRunPlanRevision(
+			revised,
+			1,
+			2,
+			"2026-01-01T00:03:00.000Z",
+		);
+		expect(restored).toMatchObject({
+			planRevision: 3,
+			maxConcurrentWorkers: 2,
+			plan: { title: "Build" },
+			planRevisions: [{}, {}, { source: "restored", restoredFrom: 1 }],
+		});
+		const repeatedRestore = restoreRunPlanRevision(
+			restored,
+			1,
+			3,
+			"2026-01-01T00:04:00.000Z",
+		);
+		expect(repeatedRestore).toMatchObject({
+			planRevision: 4,
+			planRevisions: [{}, {}, {}, { source: "restored", restoredFrom: 1 }],
+		});
+		const approved = approveRun(repeatedRestore, "2026-01-01T00:05:00.000Z", 4);
+		expect(approved.approvedPlanRevision).toBe(4);
+		expect(() =>
+			reviseRunPlan(approved, {
+				plan: approved.plan,
+				maxConcurrentWorkers: 2,
+				expectedPlanRevision: 4,
+				now: "2026-01-01T00:06:00.000Z",
+			}),
+		).toThrow(/Cannot revise plan/);
+	});
+
+	it("rejects execution-capable states without recorded approval", () => {
+		const run = createRun();
+		expect(() => validateStoredRun({ ...run, state: "running" })).toThrow(
+			/Run state running requires plan approval/,
+		);
+		expect(() =>
+			validateStoredRun({
+				...approveRun(run, "2026-01-01T00:01:00.000Z"),
+				state: "awaiting_approval",
+			}),
+		).toThrow(/cannot already have plan approval/);
+	});
+
+	it("rejects malformed or mismatched plan revision history", () => {
+		const run = createRun();
+		expect(() =>
+			validateStoredRun({
+				...run,
+				planRevision: 2,
+			}),
+		).toThrow(/identify the latest plan revision/);
+		expect(() =>
+			validateStoredRun({
+				...run,
+				planRevisions: [{ ...run.planRevisions[0], maxConcurrentWorkers: 3 }],
+			}),
+		).toThrow(/must match the latest plan revision/);
+	});
+
+	it("prevents rewriting history and changing an approved plan through raw store transactions", async () => {
+		const store = await temporaryStore();
+		const initial = await store.create(createRun());
+		const firstRevision = initial.planRevisions[0];
+		if (!firstRevision) {
+			throw new Error("Missing initial plan revision");
+		}
+		await expect(
+			store.transaction(initial.id, (current) => ({
+				...current,
+				planRevisions: [{ ...firstRevision, source: "edited" as const }],
+			})),
+		).rejects.toThrow(/Plan revision 1 is immutable/);
+		await expect(
+			store.transaction(initial.id, (current) => {
+				const revision = current.planRevisions[0];
+				if (!revision) {
+					throw new Error("Missing current revision");
+				}
+				revision.source = "edited";
+				return { ...current };
+			}),
+		).rejects.toThrow(/Plan revision 1 is immutable/);
+		await expect(
+			store.transaction(initial.id, (current) => {
+				current.id = "redirected-run";
+				return current;
+			}),
+		).rejects.toThrow(/cannot change the run id/);
+		const normalizedRevision = await store.transaction(
+			initial.id,
+			(current) => {
+				current.revision = 99;
+				return current;
+			},
+		);
+		expect(normalizedRevision.revision).toBe(1);
+
+		const approved = await store.transaction(initial.id, (current) =>
+			approveRun(current, "2026-01-01T00:02:00.000Z"),
+		);
+		await expect(
+			store.transaction(approved.id, (current) => ({
+				...current,
+				plan: { ...current.plan, title: "Tampered" },
+				planRevisions: [
+					...current.planRevisions,
+					{
+						number: 2,
+						createdAt: current.updatedAt,
+						source: "edited" as const,
+						plan: { ...current.plan, title: "Tampered" },
+						maxConcurrentWorkers: current.maxConcurrentWorkers,
+					},
+				],
+				planRevision: 2,
+				approvedPlanRevision: 2,
+			})),
+		).rejects.toThrow(/Approved plan revision is immutable/);
 	});
 
 	it("serializes concurrent transactions without losing updates", async () => {

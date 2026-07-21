@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -809,6 +809,76 @@ describe("BuildConductor vertical slice", () => {
 		]);
 		await conductor.cancelRun(result.run);
 		await result.completion;
+	});
+
+	it("rejects stale plan approval before Git or worker side effects", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-stale-approval-"),
+		);
+		directories.push(directory);
+		const workers = new FakeWorkers();
+		const worktrees = new FakeWorktrees();
+		const conductor = new BuildConductor({
+			store: new RunStore(directory),
+			workers,
+			worktrees,
+		});
+		const original = await createSingleTaskRun(conductor);
+		await conductor.revisePlan(
+			original.id,
+			{ ...original.plan, title: "Revised" },
+			3,
+			original.planRevision,
+		);
+
+		await expect(
+			conductor.approveAndLaunch(original, repository),
+		).rejects.toThrow(/Stale plan revision/);
+		expect(worktrees.integrationBranch).toBeUndefined();
+		expect(workers.calls).toEqual([]);
+	});
+
+	it("recovers an awaiting-approval run without Git or worker side effects", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-preapproval-recovery-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new FakeWorkers();
+		const list = vi.spyOn(workers, "list");
+		const worktrees = new FakeWorktrees();
+		const conductor = new BuildConductor({ store, workers, worktrees });
+		const run = await createSingleTaskRun(conductor);
+
+		const recovered = await conductor.recoverRun(run.id);
+
+		expect(recovered).toEqual(run);
+		expect(list).not.toHaveBeenCalled();
+		expect(worktrees.integrationBranch).toBeUndefined();
+	});
+
+	it("rejects persisted execution state without approval before recovery side effects", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-unapproved-recovery-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new FakeWorkers();
+		const list = vi.spyOn(workers, "list");
+		const worktrees = new FakeWorktrees();
+		const conductor = new BuildConductor({ store, workers, worktrees });
+		const run = await createSingleTaskRun(conductor);
+		await writeFile(
+			join(directory, `${run.id}.json`),
+			`${JSON.stringify({ ...run, state: "running" }, null, 2)}\n`,
+			"utf8",
+		);
+
+		await expect(conductor.recoverRun(run.id)).rejects.toThrow(
+			/Failed to load run/,
+		);
+		expect(list).not.toHaveBeenCalled();
+		expect(worktrees.integrationBranch).toBeUndefined();
 	});
 
 	it("launches one worker with the selected model", async () => {

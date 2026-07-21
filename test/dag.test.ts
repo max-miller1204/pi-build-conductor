@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+	analyzeTaskPlan,
 	PlanValidationError,
 	topologicalTaskIds,
 	validateTaskPlan,
+	validateTaskPlanResult,
 } from "../src/domain/dag.js";
 import type { TaskPlan } from "../src/domain/types.js";
 
@@ -126,5 +128,73 @@ describe("validateTaskPlan", () => {
 				tasks: [task("legacy")],
 			}),
 		).toThrow(/version must be 3/);
+	});
+
+	it("returns structured field and cycle issues", () => {
+		const unknown = validateTaskPlanResult({
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
+			title: "Unknown",
+			tasks: [task("api", ["missing"])],
+		});
+		expect(unknown).toMatchObject({
+			ok: false,
+			issues: [
+				{
+					code: "unknown_dependency",
+					path: "tasks[0].dependencies[0]",
+					taskId: "api",
+				},
+			],
+		});
+
+		const cycle = validateTaskPlanResult({
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
+			title: "Cycle",
+			tasks: [task("one", ["two"]), task("two", ["one"])],
+		});
+		expect(cycle).toMatchObject({
+			ok: false,
+			issues: [
+				{
+					code: "dependency_cycle",
+					relatedTaskIds: ["one", "two", "one"],
+				},
+			],
+		});
+	});
+
+	it("analyzes stable DAG layers, edges, roots, and leaves", () => {
+		const plan: TaskPlan = {
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
+			title: "Diamond",
+			tasks: [
+				task("base"),
+				task("api", ["base"]),
+				task("ui", ["base"]),
+				task("release", ["api", "ui"]),
+			],
+		};
+		expect(analyzeTaskPlan(plan)).toEqual({
+			topologicalOrder: ["base", "api", "ui", "release"],
+			layers: [["base"], ["api", "ui"], ["release"]],
+			edges: [
+				{ from: "base", to: "api" },
+				{ from: "base", to: "ui" },
+				{ from: "api", to: "release" },
+				{ from: "ui", to: "release" },
+			],
+			roots: ["base"],
+			leaves: ["release"],
+			widestLayer: 2,
+		});
 	});
 });

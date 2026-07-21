@@ -23,6 +23,11 @@ import {
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
+import {
+	type PlanEditorSnapshot,
+	reviewPlanInteractively,
+} from "./planning/plan-editor.js";
+import { renderApprovalSummary } from "./planning/plan-presentation.js";
 import { RunStore } from "./storage/run-store.js";
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
@@ -53,53 +58,6 @@ async function loadSidecarPlan(
 			cause: error,
 		});
 	}
-}
-
-async function editPlan(
-	ctx: ExtensionCommandContext,
-	initialPlan: TaskPlan,
-): Promise<TaskPlan | undefined> {
-	let draft = `${JSON.stringify(initialPlan, null, 2)}\n`;
-	for (;;) {
-		const edited = await ctx.ui.editor("Review and edit build plan", draft);
-		if (edited === undefined) {
-			return undefined;
-		}
-		try {
-			return validateTaskPlan(JSON.parse(edited));
-		} catch (error) {
-			ctx.ui.notify(
-				error instanceof Error ? error.message : String(error),
-				"error",
-			);
-			draft = edited;
-			const retry = await ctx.ui.confirm(
-				"Invalid task plan",
-				"Return to the editor and fix the plan?",
-			);
-			if (!retry) {
-				return undefined;
-			}
-		}
-	}
-}
-
-function approvalSummary(plan: TaskPlan): string {
-	const tasks = plan.tasks
-		.map((task, index) => {
-			const dependencies =
-				task.dependencies.length > 0 ? task.dependencies.join(", ") : "none";
-			const paths = task.allowedPaths.join(", ");
-			const commands = task.validationCommands
-				.map(({ command, args }) => [command, ...args].join(" "))
-				.join("; ");
-			return `${index + 1}. ${task.title} (${task.id})\n   dependencies: ${dependencies}\n   allowed paths: ${paths}\n   validation: ${commands}`;
-		})
-		.join("\n");
-	const finalSuite = plan.finalValidationCommands
-		.map(({ command, args }) => [command, ...args].join(" "))
-		.join("; ");
-	return `${tasks}\n\nFinal merge-ready validation suite:\n${finalSuite}`;
 }
 
 function configurationDirectory(): string {
@@ -217,6 +175,109 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	return { conductor, store, workers };
+}
+
+function editorSnapshot(run: BuildRun): PlanEditorSnapshot {
+	return {
+		plan: run.plan,
+		maxConcurrentWorkers: run.maxConcurrentWorkers,
+		planRevision: run.planRevision,
+		planRevisions: run.planRevisions,
+	};
+}
+
+async function reviewAndLaunchRun(
+	ctx: ExtensionCommandContext,
+	git: GitCli,
+	repository: RepositoryInfo,
+	runtime: ReturnType<typeof createRuntime>,
+	initialRun: BuildRun,
+): Promise<void> {
+	let run = initialRun;
+	for (;;) {
+		const review = await reviewPlanInteractively(
+			{
+				select: (title, options) => ctx.ui.select(title, options),
+				input: (title, placeholder) => ctx.ui.input(title, placeholder),
+				editor: (title, prefilled) => ctx.ui.editor(title, prefilled),
+				notify: (message, level) => ctx.ui.notify(message, level),
+			},
+			editorSnapshot(run),
+			{
+				save: async (plan, maxConcurrentWorkers, expectedPlanRevision) =>
+					editorSnapshot(
+						await runtime.conductor.revisePlan(
+							run.id,
+							plan,
+							maxConcurrentWorkers,
+							expectedPlanRevision,
+						),
+					),
+				restore: async (revisionNumber, expectedPlanRevision) =>
+					editorSnapshot(
+						await runtime.conductor.restorePlanRevision(
+							run.id,
+							revisionNumber,
+							expectedPlanRevision,
+						),
+					),
+				reload: async () => editorSnapshot(await runtime.store.load(run.id)),
+			},
+		);
+		run = await runtime.store.load(run.id);
+		if (review.action === "exit") {
+			ctx.ui.notify(
+				`Exited plan review. Resume revision ${run.planRevision} with /build-resume ${run.id}.`,
+				"info",
+			);
+			return;
+		}
+		if (review.action === "cancel") {
+			const cancel = await ctx.ui.confirm(
+				`Cancel build ${run.id}?`,
+				"The persisted revision history will remain inspectable, but this run cannot be approved or resumed.",
+			);
+			if (!cancel) {
+				continue;
+			}
+			run = await runtime.conductor.cancelRun(run);
+			ctx.ui.notify(`Build ${run.id} cancelled before approval`, "info");
+			return;
+		}
+		const approved = await ctx.ui.confirm(
+			`Approve revision ${run.planRevision}: ${run.plan.title}`,
+			renderApprovalSummary(run),
+		);
+		if (!approved) {
+			ctx.ui.notify(
+				"Returned to plan editing without starting side effects",
+				"info",
+			);
+			continue;
+		}
+		ctx.ui.setStatus("pi-build-conductor", "checking orchestrator");
+		await runtime.workers.list();
+		const freshRepository = await git.inspect(ctx.cwd);
+		if (
+			!freshRepository.isClean ||
+			freshRepository.root !== repository.root ||
+			freshRepository.head !== repository.head ||
+			freshRepository.currentBranch !== repository.currentBranch
+		) {
+			throw new Error(
+				"Repository changed during plan review. The persisted run remains awaiting approval; restore the recorded clean base and resume it.",
+			);
+		}
+		ctx.ui.setStatus("pi-build-conductor", "launching workers");
+		const result = await runtime.conductor.approveAndLaunch(
+			run,
+			freshRepository,
+			selectedWorkerModel(ctx),
+			lifecycleUi(ctx),
+		);
+		showLaunch(ctx, result, runtime.store);
+		return;
+	}
 }
 
 function runUiKey(runId: string): string {
@@ -368,6 +429,8 @@ function showCompletion(
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
 		`Run: ${run.state}`,
+		`Plan revision: ${run.approvedPlanRevision ?? run.planRevision}`,
+		`Worker limit: ${run.maxConcurrentWorkers}`,
 		`Tasks: ${taskStateSummary(run)}`,
 		reviewStateSummary(run),
 		...workerLines,
@@ -443,6 +506,8 @@ function showLaunch(
 	ctx.ui.setWidget(key, [
 		`Build ${result.run.id}`,
 		`Run: ${result.run.state}`,
+		`Plan revision: ${result.run.approvedPlanRevision ?? result.run.planRevision}`,
+		`Worker limit: ${result.run.maxConcurrentWorkers}`,
 		`Tasks: ${taskStateSummary(result.run)}`,
 		reviewStateSummary(result.run),
 		...launchLines,
@@ -492,6 +557,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					throw new Error("Commit or stash all changes before starting /build");
 				}
 				let plan = await loadSidecarPlan(handoffPath);
+				const planSource = plan ? "sidecar" : "generated";
 				if (!plan) {
 					ctx.ui.notify(
 						"No plan sidecar found. Asking the selected Pi model to create a DAG.",
@@ -499,50 +565,20 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					);
 					plan = await generatePlanWithPi(ctx, handoffText);
 				}
-				const editedPlan = await editPlan(ctx, plan);
-				if (!editedPlan) {
-					ctx.ui.notify("Build cancelled before approval", "info");
-					return;
-				}
-				const { conductor, store, workers } = createRuntime(git, repository);
-				let run = await conductor.createRun({
+				const runtime = createRuntime(git, repository);
+				const run = await runtime.conductor.createRun({
 					repository,
 					handoffPath,
 					handoffText,
-					plan: editedPlan,
+					plan,
+					planSource,
 					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
-				const approved = await ctx.ui.confirm(
-					`Approve build plan: ${editedPlan.title}`,
-					`${approvalSummary(editedPlan)}\n\nThe conductor will create separate branches, run the exact validation commands above, launch ready tasks up to the configured worker limit, then run five fresh independent reviews and isolated repairs for important findings. Validation executes repository code without a sandbox.`,
+				ctx.ui.notify(
+					`Persisted build ${run.id} at plan revision 1. Resume interrupted review with /build-resume ${run.id}.`,
+					"info",
 				);
-				if (!approved) {
-					run = await conductor.cancelRun(run);
-					ctx.ui.notify(`Build ${run.id} cancelled`, "info");
-					return;
-				}
-				ctx.ui.setStatus("pi-build-conductor", "checking orchestrator");
-				await workers.list();
-				const freshRepository = await git.inspect(ctx.cwd);
-				if (
-					!freshRepository.isClean ||
-					freshRepository.root !== repository.root ||
-					freshRepository.head !== repository.head ||
-					freshRepository.currentBranch !== repository.currentBranch
-				) {
-					await conductor.cancelRun(run);
-					throw new Error(
-						"Repository changed during planning. Start /build again from a clean, unchanged branch.",
-					);
-				}
-				ctx.ui.setStatus("pi-build-conductor", "launching workers");
-				const result = await conductor.approveAndLaunch(
-					run,
-					freshRepository,
-					selectedWorkerModel(ctx),
-					lifecycleUi(ctx),
-				);
-				showLaunch(ctx, result, store);
+				await reviewAndLaunchRun(ctx, git, repository, runtime, run);
 			} catch (error) {
 				ctx.ui.setStatus("pi-build-conductor", "failed");
 				ctx.ui.notify(errorMessage(error), "error");
@@ -601,10 +637,20 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						"Commit or stash all changes before resuming a build",
 					);
 				}
-				const { conductor, store } = createRuntime(git, repository);
+				const runtime = createRuntime(git, repository);
+				const { conductor, store } = runtime;
 				const stored = await store.load(runId);
 				if (stored.repositoryRoot !== repository.root) {
 					throw new Error(`Run ${runId} belongs to a different repository`);
+				}
+				if (["planning", "awaiting_approval"].includes(stored.state)) {
+					if (!ctx.hasUI) {
+						throw new Error(
+							`Run ${runId} still requires interactive plan approval`,
+						);
+					}
+					await reviewAndLaunchRun(ctx, git, repository, runtime, stored);
+					return;
 				}
 				const recovered = await conductor.recoverRun(runId);
 				const freshRepository = await git.inspect(ctx.cwd);

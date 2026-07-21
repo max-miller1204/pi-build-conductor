@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { topologicalTaskIds } from "./domain/dag.js";
-import { approveRun, createBuildRun } from "./domain/run.js";
+import {
+	approveRun,
+	createBuildRun,
+	restoreRunPlanRevision,
+	reviseRunPlan,
+} from "./domain/run.js";
 import {
 	getLaunchableTaskIds,
 	reconcileTaskStates,
@@ -10,7 +15,10 @@ import {
 	type FinalValidationAttempt,
 	type FinalValidationEvidence,
 	isActiveAttemptState,
+	MAX_CONCURRENT_WORKERS,
 	MERGE_READY_EVIDENCE_VERSION,
+	MIN_CONCURRENT_WORKERS,
+	type PlanRevisionSource,
 	REVIEW_CATEGORIES,
 	type RepairAttempt,
 	type ReviewAttempt,
@@ -69,6 +77,7 @@ export interface CreateConductorRunInput {
 	handoffText: string;
 	plan: TaskPlan;
 	maxConcurrentWorkers?: number;
+	planSource?: Exclude<PlanRevisionSource, "edited" | "restored" | "migrated">;
 }
 
 export interface WorkerModelSelection {
@@ -322,10 +331,52 @@ export class BuildConductor {
 			integrationBranch: `conductor/${id}/integration`,
 			handoff: { sourcePath: input.handoffPath, text: input.handoffText },
 			plan: input.plan,
-			maxConcurrentWorkers: input.maxConcurrentWorkers ?? 2,
+			maxConcurrentWorkers:
+				input.maxConcurrentWorkers ?? MIN_CONCURRENT_WORKERS,
+			...(input.planSource ? { planSource: input.planSource } : {}),
 			now: this.now(),
 		});
 		return this.dependencies.store.create(run);
+	}
+
+	async revisePlan(
+		runId: string,
+		plan: TaskPlan,
+		maxConcurrentWorkers: number,
+		expectedPlanRevision: number,
+	): Promise<BuildRun> {
+		if (
+			!Number.isInteger(maxConcurrentWorkers) ||
+			maxConcurrentWorkers < MIN_CONCURRENT_WORKERS ||
+			maxConcurrentWorkers > MAX_CONCURRENT_WORKERS
+		) {
+			throw new Error(
+				`maxConcurrentWorkers must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+			);
+		}
+		return this.dependencies.store.transaction(runId, (run) =>
+			reviseRunPlan(run, {
+				plan,
+				maxConcurrentWorkers,
+				expectedPlanRevision,
+				now: this.now(),
+			}),
+		);
+	}
+
+	async restorePlanRevision(
+		runId: string,
+		revisionNumber: number,
+		expectedPlanRevision: number,
+	): Promise<BuildRun> {
+		return this.dependencies.store.transaction(runId, (run) =>
+			restoreRunPlanRevision(
+				run,
+				revisionNumber,
+				expectedPlanRevision,
+				this.now(),
+			),
+		);
 	}
 
 	async cancelRun(run: BuildRun): Promise<BuildRun> {
@@ -487,10 +538,20 @@ export class BuildConductor {
 		model?: WorkerModelSelection,
 		options: LaunchOptions = {},
 	): Promise<LaunchResult> {
+		if (
+			!repository.isClean ||
+			repository.root !== run.repositoryRoot ||
+			repository.currentBranch !== run.baseBranch ||
+			repository.head !== run.baseCommit
+		) {
+			throw new Error(
+				"Repository must be clean and match the recorded plan base before approval",
+			);
+		}
 		let current = await mutateStoredRun(
 			this.dependencies.store,
 			run.id,
-			(stored) => approveRun(stored, this.now()),
+			(stored) => approveRun(stored, this.now(), run.planRevision),
 		);
 		try {
 			const integrationBranch =
@@ -529,6 +590,9 @@ export class BuildConductor {
 		recoveringRuns.add(key);
 		try {
 			let run = await this.dependencies.store.load(runId);
+			if (["planning", "awaiting_approval"].includes(run.state)) {
+				return run;
+			}
 			if (
 				this.dependencies.git.branchExists &&
 				!(await this.dependencies.git.branchExists(

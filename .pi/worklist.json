@@ -69,9 +69,9 @@
       "id": "goal-mrtf4swz-f12261f9",
       "title": "Improve plan editing and approval experience",
       "description": "Provide structured DAG visualization and editing, clear validation feedback, configurable worker limits, persisted plan revisions, and a concise final approval summary before side effects.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:50.627Z",
-      "updatedAt": "2026-07-20T16:07:50.627Z"
+      "updatedAt": "2026-07-21T13:50:08.646Z"
     },
     {
       "id": "goal-mrtf4und-fa85808e",

@@ -1,4 +1,4 @@
-export const RUN_SCHEMA_VERSION = 5 as const;
+export const RUN_SCHEMA_VERSION = 6 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
 export const MERGE_READY_EVIDENCE_VERSION = 1 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
@@ -83,6 +83,22 @@ export interface TaskPlan {
 	title: string;
 	tasks: TaskDefinition[];
 	finalValidationCommands: ValidationCommand[];
+}
+
+export type PlanRevisionSource =
+	| "generated"
+	| "sidecar"
+	| "edited"
+	| "restored"
+	| "migrated";
+
+export interface PlanRevision {
+	number: number;
+	createdAt: string;
+	source: PlanRevisionSource;
+	plan: TaskPlan;
+	maxConcurrentWorkers: number;
+	restoredFrom?: number;
 }
 
 export interface TaskAttempt {
@@ -289,6 +305,9 @@ export interface BuildRun {
 	integrationBranch: string;
 	handoff: HandoffRecord;
 	plan: TaskPlan;
+	planRevision: number;
+	planRevisions: PlanRevision[];
+	approvedPlanRevision?: number;
 	tasks: Record<string, RunTask>;
 	attempts: TaskAttempt[];
 	integrationHead: string;

@@ -534,12 +534,13 @@ describe("bounded dependency-aware concurrency", () => {
 			cwd: "/worktrees/failed",
 			label: `${run.id}:failed`,
 		});
-		const failedTask = run.tasks.failed;
+		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
+		const failedTask = approved.tasks.failed;
 		if (!failedTask) {
 			throw new Error("missing failed task");
 		}
 		await store.save({
-			...run,
+			...approved,
 			state: "failed",
 			tasks: {
 				failed: {
@@ -556,10 +557,10 @@ describe("bounded dependency-aware concurrency", () => {
 					state: "failed",
 					branch: "failed",
 					worktreePath: "/worktrees/failed",
-					baseCommit: run.baseCommit,
+					baseCommit: approved.baseCommit,
 					workerId: "worker-1",
-					startedAt: run.updatedAt,
-					finishedAt: run.updatedAt,
+					startedAt: approved.updatedAt,
+					finishedAt: approved.updatedAt,
 					error: "cleanup failed",
 				},
 			],
