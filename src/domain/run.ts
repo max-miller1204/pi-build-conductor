@@ -52,6 +52,7 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		reviewRounds: [],
 		reviewAttempts: [],
 		repairAttempts: [],
+		finalValidationAttempts: [],
 		maxConcurrentWorkers: input.maxConcurrentWorkers,
 		createdAt: input.now,
 		updatedAt: input.now,
@@ -118,6 +119,18 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			error: "Conductor restarted",
 		};
 	});
+	const finalValidationAttempts = run.finalValidationAttempts.map((attempt) => {
+		if (attempt.state !== "running") {
+			return attempt;
+		}
+		changed = true;
+		return {
+			...attempt,
+			state: "interrupted" as const,
+			finishedAt: now,
+			error: "Conductor restarted",
+		};
+	});
 	const tasks = Object.fromEntries(
 		Object.entries(run.tasks).map(([id, task]) => {
 			if (task.state !== "running" && task.state !== "validating") {
@@ -132,9 +145,11 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 	}
 	return reconcileTaskStates({
 		...run,
+		state: run.state === "validating" ? "reviewed" : run.state,
 		attempts,
 		reviewAttempts,
 		repairAttempts,
+		finalValidationAttempts,
 		tasks,
 		updatedAt: now,
 	});

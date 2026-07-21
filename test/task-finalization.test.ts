@@ -17,6 +17,7 @@ import type { TaskAttempt, TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 import { RunStore } from "../src/storage/run-store.js";
+import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
 import type {
 	SpawnWorkerRequest,
@@ -402,13 +403,21 @@ describe("task validation and conductor-owned commits", () => {
 			worktrees,
 			workers: new WritingWorkers(),
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 			now: () => "2026-01-01T00:00:00.000Z",
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Implement the feature",
-			plan: { version: 2, title: "Feature", tasks: [task()] },
+			plan: {
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
+				title: "Feature",
+				tasks: [task()],
+			},
 		});
 
 		const launch = await conductor.approveAndLaunch(run, repository);
@@ -418,7 +427,7 @@ describe("task validation and conductor-owned commits", () => {
 			throw new Error("missing finalized attempt commit");
 		}
 
-		expect(completed.state).toBe("reviewed");
+		expect(completed.state).toBe("completed");
 		expect(attempt).toMatchObject({
 			state: "succeeded",
 			baseCommit: repository.head,
@@ -453,6 +462,7 @@ describe("task validation and conductor-owned commits", () => {
 			worktrees,
 			workers: new WritingWorkers(),
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const slowTask = task({
 			validationCommands: [
@@ -466,7 +476,14 @@ describe("task validation and conductor-owned commits", () => {
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Implement the feature",
-			plan: { version: 2, title: "Feature", tasks: [slowTask] },
+			plan: {
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
+				title: "Feature",
+				tasks: [slowTask],
+			},
 		});
 		const launch = await conductor.approveAndLaunch(run, repository);
 		await vi.waitFor(async () => {

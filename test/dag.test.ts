@@ -21,7 +21,10 @@ function task(id: string, dependencies: string[] = []) {
 describe("validateTaskPlan", () => {
 	it("accepts a valid DAG and returns a deterministic topological order", () => {
 		const plan: TaskPlan = {
-			version: 2,
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
 			title: "Build",
 			tasks: [
 				task("foundation"),
@@ -43,7 +46,10 @@ describe("validateTaskPlan", () => {
 	it("rejects unknown dependencies", () => {
 		expect(() =>
 			validateTaskPlan({
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Bad",
 				tasks: [task("api", ["missing"])],
 			}),
@@ -53,7 +59,10 @@ describe("validateTaskPlan", () => {
 	it("rejects dependency cycles with the cycle path", () => {
 		try {
 			validateTaskPlan({
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Cycle",
 				tasks: [task("one", ["two"]), task("two", ["one"])],
 			});
@@ -67,7 +76,10 @@ describe("validateTaskPlan", () => {
 	it("rejects duplicate task identifiers", () => {
 		expect(() =>
 			validateTaskPlan({
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Duplicate",
 				tasks: [task("same"), task("same")],
 			}),
@@ -83,7 +95,10 @@ describe("validateTaskPlan", () => {
 	])("rejects unsafe task scope %s", (allowedPath) => {
 		expect(() =>
 			validateTaskPlan({
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Unsafe scope",
 				tasks: [{ ...task("unsafe"), allowedPaths: [allowedPath] }],
 			}),
@@ -93,7 +108,10 @@ describe("validateTaskPlan", () => {
 	it("rejects missing focused validation commands", () => {
 		expect(() =>
 			validateTaskPlan({
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Unchecked",
 				tasks: [{ ...task("unchecked"), validationCommands: [] }],
 			}),
@@ -107,6 +125,6 @@ describe("validateTaskPlan", () => {
 				title: "Legacy",
 				tasks: [task("legacy")],
 			}),
-		).toThrow(/version must be 2/);
+		).toThrow(/version must be 3/);
 	});
 });

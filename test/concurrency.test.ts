@@ -29,7 +29,10 @@ const directories: string[] = [];
 
 class BuildConductor extends ProductionBuildConductor {
 	constructor(
-		dependencies: Omit<BuildConductorDependencies, "git" | "validator">,
+		dependencies: Omit<
+			BuildConductorDependencies,
+			"git" | "validator" | "finalValidator"
+		>,
 	) {
 		super({ ...dependencies, ...createFakeFinalizationDependencies() });
 	}
@@ -152,6 +155,18 @@ class IsolatedWorktrees implements WorktreeManager {
 		};
 	}
 
+	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
+		return `/final/${runId}/${attemptNumber}`;
+	}
+
+	async prepareFinalValidationWorktree(
+		_repository: RepositoryInfo,
+		runId: string,
+		attemptNumber: number,
+	): Promise<string> {
+		return this.finalValidationWorktreePath(runId, attemptNumber);
+	}
+
 	async removeTaskWorktree(
 		_repositoryRoot: string,
 		path: string,
@@ -191,7 +206,14 @@ async function setup(tasks: TaskDefinition[], maxConcurrentWorkers = 2) {
 		repository,
 		handoffPath: "/repo/handoff.md",
 		handoffText: "Build concurrently",
-		plan: { version: 2, title: "Concurrent build", tasks },
+		plan: {
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
+			title: "Concurrent build",
+			tasks,
+		},
 		maxConcurrentWorkers,
 	});
 	return { conductor, run, store, workers, worktrees };
@@ -237,7 +259,7 @@ describe("bounded dependency-aware concurrency", () => {
 		workers.settle("second", { status: "succeeded" });
 		workers.settle("third", { status: "succeeded" });
 		const completed = await result.completion;
-		expect(completed.state).toBe("reviewed");
+		expect(completed.state).toBe("completed");
 	});
 
 	it("launches newly unblocked DAG layers in deterministic plan order", async () => {
@@ -261,7 +283,7 @@ describe("bounded dependency-aware concurrency", () => {
 		await vi.waitFor(() => expect(workers.startOrder.at(-1)).toBe("release"));
 		workers.settle("release", { status: "succeeded" });
 
-		expect((await result.completion).state).toBe("reviewed");
+		expect((await result.completion).state).toBe("completed");
 	});
 
 	it("refills a slot with a dependent while an unrelated worker is still running", async () => {
@@ -284,7 +306,7 @@ describe("bounded dependency-aware concurrency", () => {
 		workers.settle("dependent", { status: "succeeded" });
 		workers.settle("unrelated", { status: "succeeded" });
 
-		expect((await result.completion).state).toBe("reviewed");
+		expect((await result.completion).state).toBe("completed");
 	});
 
 	it("supports a four-worker bound with isolated workers and worktrees", async () => {
@@ -308,7 +330,7 @@ describe("bounded dependency-aware concurrency", () => {
 		for (const taskId of ["two", "three", "four", "five"]) {
 			workers.settle(taskId, { status: "succeeded" });
 		}
-		expect((await result.completion).state).toBe("reviewed");
+		expect((await result.completion).state).toBe("completed");
 		expect(workers.maxInFlight).toBe(4);
 	});
 

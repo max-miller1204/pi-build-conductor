@@ -12,6 +12,7 @@ import {
 	REVIEW_REPORT_START,
 } from "../src/review/review-report.js";
 import { RunStore } from "../src/storage/run-store.js";
+import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
 import type {
 	SpawnWorkerRequest,
@@ -156,13 +157,17 @@ describe("independent review and repair lifecycle", () => {
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 			workers,
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Implement and independently review the feature",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Reviewed feature",
 				tasks: [
 					{
@@ -186,7 +191,7 @@ describe("independent review and repair lifecycle", () => {
 		const result = await conductor.approveAndLaunch(run, repository);
 		const completed = await result.completion;
 
-		expect(completed.state).toBe("reviewed");
+		expect(completed.state).toBe("completed");
 		expect(completed.reviewRounds).toHaveLength(2);
 		expect(completed.reviewAttempts).toHaveLength(10);
 		expect(completed.repairAttempts).toEqual([
@@ -220,10 +225,15 @@ describe("independent review and repair lifecycle", () => {
 		} = completedRepair;
 		const { finishedAt: _roundFinishedAt, ...roundBeforePersistence } =
 			completedRound;
+		const {
+			mergeReadyEvidence: _mergeReadyEvidence,
+			...beforeFinalValidation
+		} = completed;
 		await store.save({
-			...completed,
+			...beforeFinalValidation,
 			state: "repairing",
 			integrationHead: completedRepair.baseCommit,
+			finalValidationAttempts: [],
 			repairAttempts: [{ ...repairBeforePersistence, state: "validating" }],
 			reviewRounds: [{ ...roundBeforePersistence, state: "repairing" }],
 			reviewAttempts: completed.reviewAttempts
@@ -263,13 +273,17 @@ describe("independent review and repair lifecycle", () => {
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 			workers,
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Keep repairs within approved source paths",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Scoped feature",
 				tasks: [
 					{

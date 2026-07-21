@@ -27,7 +27,10 @@ const directories: string[] = [];
 
 class BuildConductor extends ProductionBuildConductor {
 	constructor(
-		dependencies: Omit<BuildConductorDependencies, "git" | "validator">,
+		dependencies: Omit<
+			BuildConductorDependencies,
+			"git" | "validator" | "finalValidator"
+		>,
 	) {
 		super({ ...dependencies, ...createFakeFinalizationDependencies() });
 	}
@@ -136,6 +139,18 @@ class FakeWorktrees implements WorktreeManager {
 		};
 	}
 
+	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
+		return `/final/${runId}/${attemptNumber}`;
+	}
+
+	async prepareFinalValidationWorktree(
+		_repository: RepositoryInfo,
+		runId: string,
+		attemptNumber: number,
+	): Promise<string> {
+		return this.finalValidationWorktreePath(runId, attemptNumber);
+	}
+
 	async removeTaskWorktree(): Promise<void> {}
 }
 
@@ -172,7 +187,10 @@ function createSingleTaskRun(conductor: BuildConductor) {
 		handoffPath: "/repo/handoff.md",
 		handoffText: "Implement the feature",
 		plan: {
-			version: 2,
+			version: 3,
+			finalValidationCommands: [
+				{ command: process.execPath, args: ["-e", ""] },
+			],
 			title: "Feature",
 			tasks: [
 				{
@@ -215,7 +233,10 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement the feature",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Feature",
 				tasks: [
 					{
@@ -422,6 +443,7 @@ describe("BuildConductor vertical slice", () => {
 			worktrees,
 			git,
 			validator: finalization.validator,
+			finalValidator: finalization.finalValidator,
 		};
 		const conductor = new ProductionBuildConductor(dependencies);
 		const cancellingConductor = new ProductionBuildConductor(dependencies);
@@ -493,7 +515,10 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement independent tasks",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Concurrent work",
 				tasks: [
 					{
@@ -567,7 +592,10 @@ describe("BuildConductor vertical slice", () => {
 			handoffPath: "/repo/handoff.md",
 			handoffText: "Implement the feature",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Feature",
 				tasks: [
 					{

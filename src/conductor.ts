@@ -7,7 +7,10 @@ import {
 } from "./domain/scheduler.js";
 import {
 	type BuildRun,
+	type FinalValidationAttempt,
+	type FinalValidationEvidence,
 	isActiveAttemptState,
+	MERGE_READY_EVIDENCE_VERSION,
 	REVIEW_CATEGORIES,
 	type RepairAttempt,
 	type ReviewAttempt,
@@ -27,6 +30,10 @@ import {
 } from "./review/review-report.js";
 import type { RunStore } from "./storage/run-store.js";
 import {
+	FinalValidationError,
+	type FinalValidator,
+} from "./validation/final-validator.js";
+import {
 	TaskValidationError,
 	type TaskValidator,
 } from "./validation/task-validator.js";
@@ -45,6 +52,7 @@ export interface BuildConductorDependencies {
 	workers: WorkerBackend;
 	git: GitClient;
 	validator: TaskValidator;
+	finalValidator: FinalValidator;
 	now?: () => string;
 	workerTimeoutMs?: number;
 	workerPollIntervalMs?: number;
@@ -304,6 +312,7 @@ export class BuildConductor {
 		string,
 		{ runId: string; controller: AbortController }
 	>();
+	private readonly activeFinalValidations = new Map<string, AbortController>();
 	private readonly workerCleanup = new Map<
 		string,
 		Promise<string | undefined>
@@ -359,11 +368,7 @@ export class BuildConductor {
 			run.id,
 			(current) => {
 				activeRun = current;
-				if (
-					["reviewed", "completed", "failed", "cancelled"].includes(
-						current.state,
-					)
-				) {
+				if (["completed", "failed", "cancelled"].includes(current.state)) {
 					return current;
 				}
 				shouldCleanup = true;
@@ -408,6 +413,17 @@ export class BuildConductor {
 								}
 							: attempt,
 					),
+					finalValidationAttempts: current.finalValidationAttempts.map(
+						(attempt) =>
+							attempt.state === "running"
+								? {
+										...attempt,
+										state: "cancelled" as const,
+										finishedAt: now,
+										error: "Run cancelled",
+									}
+								: attempt,
+					),
 					reviewRounds: current.reviewRounds.map((round) =>
 						["running", "repairing"].includes(round.state)
 							? {
@@ -431,6 +447,9 @@ export class BuildConductor {
 				active.controller.abort(new Error("Run cancelled"));
 			}
 		}
+		this.activeFinalValidations
+			.get(activeRun.id)
+			?.abort(new Error("Run cancelled"));
 		const cleanupErrors: string[] = [];
 		const workerIds = new Set(
 			[
@@ -749,9 +768,13 @@ export class BuildConductor {
 				);
 			}
 			if (
-				["integrating", "reviewing", "repairing", "reviewed"].includes(
-					recovered.state,
-				)
+				[
+					"integrating",
+					"reviewing",
+					"repairing",
+					"reviewed",
+					"validating",
+				].includes(recovered.state)
 			) {
 				const recordedHead = expectedIntegrationHead(recovered);
 				const actualHead = await this.dependencies.git.branchHead(
@@ -782,7 +805,14 @@ export class BuildConductor {
 		options: LaunchOptions = {},
 	): Promise<LaunchResult> {
 		if (
-			!["running", "integrating", "reviewing", "repairing"].includes(run.state)
+			![
+				"running",
+				"integrating",
+				"reviewing",
+				"repairing",
+				"reviewed",
+				"validating",
+			].includes(run.state)
 		) {
 			throw new Error(`Cannot resume run in state ${run.state}`);
 		}
@@ -2083,7 +2113,284 @@ export class BuildConductor {
 			);
 			notifyRunUpdated(options, current);
 		}
-		return current;
+		return current.state === "reviewed"
+			? this.runFinalValidation(runId, repository, options)
+			: current;
+	}
+
+	private integratedCommitEvidence(run: BuildRun) {
+		const taskCommits = topologicalTaskIds(run.plan).map((taskId) => {
+			const task = run.tasks[taskId];
+			const attempt = succeededTaskAttempt(run, taskId);
+			if (!task?.integratedCommit || !attempt?.commit) {
+				throw new Error(`Task ${taskId} lacks persisted integration evidence`);
+			}
+			return {
+				kind: "task" as const,
+				id: taskId,
+				sourceCommit: attempt.commit,
+				integratedCommit: task.integratedCommit,
+			};
+		});
+		const repairCommits = run.repairAttempts.flatMap((attempt) =>
+			attempt.state === "succeeded" &&
+			attempt.commit &&
+			attempt.integratedCommit
+				? [
+						{
+							kind: "repair" as const,
+							id: attempt.id,
+							sourceCommit: attempt.commit,
+							integratedCommit: attempt.integratedCommit,
+						},
+					]
+				: [],
+		);
+		return [...taskCommits, ...repairCommits];
+	}
+
+	private async runFinalValidation(
+		runId: string,
+		repository: RepositoryInfo,
+		options: LaunchOptions,
+	): Promise<BuildRun> {
+		let current = await this.dependencies.store.load(runId);
+		if (!["reviewed", "validating"].includes(current.state)) {
+			return current;
+		}
+		const stale = current.finalValidationAttempts.findLast((attempt) =>
+			["running", "interrupted"].includes(attempt.state),
+		);
+		if (stale) {
+			try {
+				await this.dependencies.worktrees.removeTaskWorktree(
+					current.repositoryRoot,
+					stale.worktreePath,
+				);
+			} catch (error) {
+				const message = `Failed to remove stale final validation worktree ${stale.worktreePath}: ${error instanceof Error ? error.message : String(error)}`;
+				return mutateStoredRun(this.dependencies.store, runId, (stored) => ({
+					...stored,
+					state: "failed",
+					finalValidationAttempts: stored.finalValidationAttempts.map(
+						(attempt) =>
+							attempt.id === stale.id
+								? {
+										...attempt,
+										state: "failed" as const,
+										finishedAt: this.now(),
+										error: message,
+									}
+								: attempt,
+					),
+					updatedAt: this.now(),
+				}));
+			}
+			if (stale.state === "running") {
+				current = await mutateStoredRun(
+					this.dependencies.store,
+					runId,
+					(stored) => ({
+						...stored,
+						state: "reviewed",
+						finalValidationAttempts: stored.finalValidationAttempts.map(
+							(item) =>
+								item.id === stale.id && item.state === "running"
+									? {
+											...item,
+											state: "interrupted" as const,
+											finishedAt: this.now(),
+											error: "Final validation lifecycle restarted",
+										}
+									: item,
+						),
+						updatedAt: this.now(),
+					}),
+				);
+			}
+		}
+		const number = current.finalValidationAttempts.length + 1;
+		const attempt: FinalValidationAttempt = {
+			id: `${runId}-final-${number}`,
+			number,
+			state: "running",
+			integrationCommit: current.integrationHead,
+			worktreePath: this.dependencies.worktrees.finalValidationWorktreePath(
+				runId,
+				number,
+			),
+			startedAt: this.now(),
+		};
+		const controller = new AbortController();
+		this.activeFinalValidations.set(runId, controller);
+		try {
+			current = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) =>
+					stored.state !== "reviewed"
+						? stored
+						: {
+								...stored,
+								state: "validating",
+								finalValidationAttempts: [
+									...stored.finalValidationAttempts,
+									attempt,
+								],
+								updatedAt: this.now(),
+							},
+			);
+		} catch (error) {
+			this.activeFinalValidations.delete(runId);
+			throw error;
+		}
+		if (
+			current.state !== "validating" ||
+			!current.finalValidationAttempts.some(
+				(item) => item.id === attempt.id && item.state === "running",
+			)
+		) {
+			this.activeFinalValidations.delete(runId);
+			return current;
+		}
+		notifyRunUpdated(options, current);
+		let evidence: FinalValidationEvidence | undefined;
+		try {
+			if (controller.signal.aborted) {
+				throw controller.signal.reason instanceof Error
+					? controller.signal.reason
+					: new Error("Final validation aborted");
+			}
+			const path =
+				await this.dependencies.worktrees.prepareFinalValidationWorktree(
+					repository,
+					runId,
+					number,
+					attempt.integrationCommit,
+				);
+			if (path !== attempt.worktreePath) {
+				throw new Error(`Unexpected final validation worktree path: ${path}`);
+			}
+			evidence = await this.dependencies.finalValidator.validate({
+				worktreePath: path,
+				integrationCommit: attempt.integrationCommit,
+				commands: current.plan.finalValidationCommands,
+				signal: controller.signal,
+			});
+			const successfulEvidence = evidence;
+			await this.dependencies.worktrees.removeTaskWorktree(
+				current.repositoryRoot,
+				path,
+			);
+			const commits = this.integratedCommitEvidence(current);
+			const git = await this.dependencies.git.verifyMergeReadyHistory({
+				repositoryRoot: current.repositoryRoot,
+				integrationBranch: current.integrationBranch,
+				integrationHead: current.integrationHead,
+				baseBranch: current.baseBranch,
+				baseCommit: current.baseCommit,
+				commits,
+				verifiedAt: this.now(),
+			});
+			const finalRound = current.reviewRounds.at(-1)?.number;
+			const finalReviews = REVIEW_CATEGORIES.map((category) => {
+				const review = current.reviewAttempts.find(
+					(item) =>
+						item.round === finalRound &&
+						item.category === category &&
+						item.state === "succeeded",
+				);
+				if (!review?.summary) {
+					throw new Error(`Missing final ${category} review summary`);
+				}
+				return { category, summary: review.summary };
+			});
+			const remainingRisks = current.reviewAttempts
+				.filter(
+					(review) =>
+						review.round === finalRound && review.state === "succeeded",
+				)
+				.flatMap((review) => review.findings ?? [])
+				.filter((finding) => finding.status === "deferred")
+				.sort((left, right) => left.id.localeCompare(right.id));
+			const completed = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => {
+					const storedAttempt = stored.finalValidationAttempts.find(
+						(item) => item.id === attempt.id,
+					);
+					if (
+						stored.state !== "validating" ||
+						storedAttempt?.state !== "running"
+					) {
+						return stored;
+					}
+					const generatedAt = this.now();
+					return {
+						...stored,
+						state: "completed",
+						finalValidationAttempts: stored.finalValidationAttempts.map(
+							(item) =>
+								item.id === attempt.id
+									? {
+											...item,
+											state: "succeeded" as const,
+											finishedAt: generatedAt,
+											evidence: successfulEvidence,
+										}
+									: item,
+						),
+						mergeReadyEvidence: {
+							version: MERGE_READY_EVIDENCE_VERSION,
+							generatedAt,
+							integrationBranch: stored.integrationBranch,
+							integrationHead: stored.integrationHead,
+							baseBranch: stored.baseBranch,
+							baseCommit: stored.baseCommit,
+							commits,
+							finalReviews,
+							remainingRisks,
+							finalChecks: successfulEvidence.checks,
+							git,
+						},
+						updatedAt: generatedAt,
+					};
+				},
+			);
+			notifyRunUpdated(options, completed);
+			return completed;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const failed = await mutateStoredRun(
+				this.dependencies.store,
+				runId,
+				(stored) => ({
+					...stored,
+					state: stored.state === "cancelled" ? "cancelled" : "failed",
+					finalValidationAttempts: stored.finalValidationAttempts.map((item) =>
+						item.id === attempt.id && item.state === "running"
+							? {
+									...item,
+									state: "failed" as const,
+									finishedAt: this.now(),
+									error: message,
+									...(evidence
+										? { evidence }
+										: error instanceof FinalValidationError
+											? { evidence: error.evidence }
+											: {}),
+								}
+							: item,
+					),
+					updatedAt: this.now(),
+				}),
+			);
+			notifyRunUpdated(options, failed);
+			return failed;
+		} finally {
+			this.activeFinalValidations.delete(runId);
+		}
 	}
 
 	private async integrateAvailableTasks(
@@ -2220,9 +2527,13 @@ export class BuildConductor {
 		}
 		activeSchedulingRuns.add(key);
 		try {
-			const initial = ["integrating", "reviewing", "repairing"].includes(
-				run.state,
-			)
+			const initial = [
+				"integrating",
+				"reviewing",
+				"repairing",
+				"reviewed",
+				"validating",
+			].includes(run.state)
 				? { run, launches: [] }
 				: await this.dispatchAvailableTasks(run.id, repository, model, options);
 			const active = new Map<string, Promise<string>>();
@@ -2235,7 +2546,9 @@ export class BuildConductor {
 			const completion = (
 				["integrating", "reviewing", "repairing"].includes(initial.run.state)
 					? this.runReviewLifecycle(run.id, repository, model, options)
-					: this.runSchedulingLoop(run.id, repository, model, options, active)
+					: ["reviewed", "validating"].includes(initial.run.state)
+						? this.runFinalValidation(run.id, repository, options)
+						: this.runSchedulingLoop(run.id, repository, model, options, active)
 			).finally(() => {
 				activeSchedulingRuns.delete(key);
 			});

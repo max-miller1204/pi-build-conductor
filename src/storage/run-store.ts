@@ -6,8 +6,10 @@ import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
 	type BuildRun,
+	type FinalValidationAttemptState,
 	isActiveAttemptState,
 	MAX_CONCURRENT_WORKERS,
+	MERGE_READY_EVIDENCE_VERSION,
 	MIN_CONCURRENT_WORKERS,
 	REVIEW_CATEGORIES,
 	type ReviewCategory,
@@ -71,6 +73,8 @@ const REVIEW_ROUND_STATES: ReadonlySet<ReviewRoundState> = new Set([
 	"failed",
 	"cancelled",
 ]);
+const FINAL_VALIDATION_ATTEMPT_STATES: ReadonlySet<FinalValidationAttemptState> =
+	new Set(["running", "succeeded", "failed", "cancelled", "interrupted"]);
 const ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
 	"prepared",
 	"launched",
@@ -154,41 +158,14 @@ function validateEvidence(value: unknown, path: string): void {
 	}
 }
 
-function migrateStoredRun(
-	value: Record<string, unknown>,
-): Record<string, unknown> {
-	if (value.schemaVersion !== 2) {
-		return value;
-	}
-	assertString(value.baseCommit, "run.baseCommit");
-	const plan = validateTaskPlan(value.plan);
-	if (!isRecord(value.tasks)) {
-		throw new Error("run.tasks must be an object");
-	}
-	let integrationHead = value.baseCommit;
-	for (const taskId of topologicalTaskIds(plan)) {
-		const task = value.tasks[taskId];
-		if (!isRecord(task) || typeof task.integratedCommit !== "string") {
-			break;
-		}
-		integrationHead = task.integratedCommit;
-	}
-	return {
-		...value,
-		schemaVersion: RUN_SCHEMA_VERSION,
-		integrationHead,
-		reviewRounds: [],
-		reviewAttempts: [],
-		repairAttempts: [],
-	};
-}
-
 export function validateStoredRun(value: unknown): BuildRun {
 	if (!isRecord(value)) {
 		throw new Error("run must be an object");
 	}
-	if (value.schemaVersion === 2) {
-		return validateStoredRun(migrateStoredRun(value));
+	if (value.schemaVersion === 2 || value.schemaVersion === 3) {
+		throw new Error(
+			"Legacy run snapshots cannot become merge-ready because they lack an explicitly approved final validation suite; start a new approved run",
+		);
 	}
 	if (value.schemaVersion !== RUN_SCHEMA_VERSION) {
 		throw new Error(
@@ -675,7 +652,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 			}
 		}
 	}
-	if (value.state === "reviewed") {
+	if (["reviewed", "validating", "completed"].includes(String(value.state))) {
 		const latestRound = value.reviewRounds.at(-1);
 		if (!isRecord(latestRound) || latestRound.state !== "succeeded") {
 			throw new Error("Reviewed run must have a succeeded final review round");
@@ -694,6 +671,328 @@ export function validateStoredRun(value: unknown): BuildRun {
 				"Reviewed run cannot contain unresolved important findings",
 			);
 		}
+	}
+	if (!Array.isArray(value.finalValidationAttempts)) {
+		throw new Error("run.finalValidationAttempts must be an array");
+	}
+	const finalAttemptIds = new Set<string>();
+	for (const [index, attempt] of value.finalValidationAttempts.entries()) {
+		const path = `run.finalValidationAttempts[${index}]`;
+		if (!isRecord(attempt)) {
+			throw new Error(`${path} must be an object`);
+		}
+		assertString(attempt.id, `${path}.id`);
+		assertString(attempt.integrationCommit, `${path}.integrationCommit`);
+		assertString(attempt.worktreePath, `${path}.worktreePath`);
+		assertString(attempt.startedAt, `${path}.startedAt`);
+		if (attempt.number !== index + 1) {
+			throw new Error(`${path}.number must be sequential`);
+		}
+		if (
+			typeof attempt.state !== "string" ||
+			!FINAL_VALIDATION_ATTEMPT_STATES.has(
+				attempt.state as FinalValidationAttemptState,
+			)
+		) {
+			throw new Error(`${path}.state is invalid`);
+		}
+		for (const field of ["finishedAt", "error"] as const) {
+			if (attempt[field] !== undefined) {
+				assertString(attempt[field], `${path}.${field}`);
+			}
+		}
+		if (attempt.evidence !== undefined) {
+			if (!isRecord(attempt.evidence)) {
+				throw new Error(`${path}.evidence must be an object`);
+			}
+			assertString(attempt.evidence.startedAt, `${path}.evidence.startedAt`);
+			assertString(attempt.evidence.finishedAt, `${path}.evidence.finishedAt`);
+			if (typeof attempt.evidence.passed !== "boolean") {
+				throw new Error(`${path}.evidence.passed must be a boolean`);
+			}
+			if (!Array.isArray(attempt.evidence.checks)) {
+				throw new Error(`${path}.evidence.checks must be an array`);
+			}
+			validateEvidence(
+				{
+					...attempt.evidence,
+					changedFiles: [],
+					diffHash: "",
+				},
+				`${path}.evidence`,
+			);
+		}
+		if (attempt.state === "succeeded") {
+			assertString(attempt.finishedAt, `${path}.finishedAt`);
+			if (!isRecord(attempt.evidence) || attempt.evidence.passed !== true) {
+				throw new Error(`${path} succeeded without passing evidence`);
+			}
+			const checks = attempt.evidence.checks;
+			if (
+				!Array.isArray(checks) ||
+				checks.length !== plan.finalValidationCommands.length ||
+				checks.some((check, checkIndex) => {
+					const command = plan.finalValidationCommands[checkIndex];
+					return (
+						!isRecord(check) ||
+						check.passed !== true ||
+						check.command !== command?.command ||
+						JSON.stringify(check.args) !== JSON.stringify(command?.args)
+					);
+				})
+			) {
+				throw new Error(
+					`${path} evidence must match every approved final validation command in order`,
+				);
+			}
+		}
+		if (finalAttemptIds.has(attempt.id as string)) {
+			throw new Error(
+				`Duplicate final validation attempt id: ${String(attempt.id)}`,
+			);
+		}
+		finalAttemptIds.add(attempt.id as string);
+	}
+	const runningFinalAttempts = value.finalValidationAttempts.filter(
+		(attempt) => isRecord(attempt) && attempt.state === "running",
+	);
+	if (runningFinalAttempts.length > 1) {
+		throw new Error(
+			"Run cannot have more than one active final validation attempt",
+		);
+	}
+	if ((value.state === "validating") !== (runningFinalAttempts.length === 1)) {
+		throw new Error(
+			"Validating run state must have exactly one running final validation attempt",
+		);
+	}
+	const mergeReady = value.mergeReadyEvidence;
+	if (mergeReady !== undefined) {
+		if (
+			!isRecord(mergeReady) ||
+			mergeReady.version !== MERGE_READY_EVIDENCE_VERSION
+		) {
+			throw new Error("run.mergeReadyEvidence has an unsupported version");
+		}
+		for (const field of [
+			"generatedAt",
+			"integrationBranch",
+			"integrationHead",
+			"baseBranch",
+			"baseCommit",
+		] as const) {
+			assertString(mergeReady[field], `run.mergeReadyEvidence.${field}`);
+		}
+		if (
+			mergeReady.integrationBranch !== value.integrationBranch ||
+			mergeReady.integrationHead !== value.integrationHead ||
+			mergeReady.baseBranch !== value.baseBranch ||
+			mergeReady.baseCommit !== value.baseCommit
+		) {
+			throw new Error("run.mergeReadyEvidence does not match the run refs");
+		}
+		for (const field of [
+			"commits",
+			"finalReviews",
+			"remainingRisks",
+			"finalChecks",
+		] as const) {
+			if (!Array.isArray(mergeReady[field])) {
+				throw new Error(`run.mergeReadyEvidence.${field} must be an array`);
+			}
+		}
+		if (!isRecord(mergeReady.git)) {
+			throw new Error("run.mergeReadyEvidence.git must be an object");
+		}
+		for (const field of [
+			"verifiedAt",
+			"integrationBranch",
+			"integrationHead",
+			"baseBranch",
+			"baseCommit",
+			"userBranch",
+			"userHead",
+		] as const) {
+			assertString(
+				mergeReady.git[field],
+				`run.mergeReadyEvidence.git.${field}`,
+			);
+		}
+		if (
+			mergeReady.git.userWorktreeClean !== true ||
+			mergeReady.git.integrationBranch !== value.integrationBranch ||
+			mergeReady.git.integrationHead !== value.integrationHead ||
+			mergeReady.git.baseBranch !== value.baseBranch ||
+			mergeReady.git.baseCommit !== value.baseCommit ||
+			mergeReady.git.userBranch !== value.baseBranch ||
+			mergeReady.git.userHead !== value.baseCommit
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.git does not prove untouched refs",
+			);
+		}
+		if (!Array.isArray(mergeReady.git.commits)) {
+			throw new Error("run.mergeReadyEvidence.git.commits must be an array");
+		}
+		const storedAttempts = value.attempts as unknown[];
+		const expectedCommits = topologicalTaskIds(plan).map((taskId) => {
+			const task = storedTasks[taskId];
+			if (!isRecord(task)) {
+				throw new Error(`Missing persisted task ${taskId}`);
+			}
+			const attemptIds = Array.isArray(task.attemptIds)
+				? new Set(task.attemptIds.map(String))
+				: new Set<string>();
+			const source = storedAttempts.findLast(
+				(attempt: unknown) =>
+					isRecord(attempt) &&
+					attemptIds.has(String(attempt.id)) &&
+					attempt.state === "succeeded" &&
+					typeof attempt.commit === "string",
+			);
+			if (!isRecord(source) || typeof source.commit !== "string") {
+				throw new Error(`Task ${taskId} lacks source commit evidence`);
+			}
+			return {
+				kind: "task",
+				id: taskId,
+				sourceCommit: source.commit,
+				integratedCommit: String(task.integratedCommit),
+			};
+		});
+		for (const repair of value.repairAttempts) {
+			if (
+				isRecord(repair) &&
+				repair.state === "succeeded" &&
+				typeof repair.commit === "string" &&
+				typeof repair.integratedCommit === "string"
+			) {
+				expectedCommits.push({
+					kind: "repair",
+					id: String(repair.id),
+					sourceCommit: repair.commit,
+					integratedCommit: repair.integratedCommit,
+				});
+			}
+		}
+		if (
+			JSON.stringify(mergeReady.commits) !== JSON.stringify(expectedCommits)
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.commits must exactly match integrated task and repair order",
+			);
+		}
+		const expectedGitCommits = expectedCommits.map((commit, index) => ({
+			hash: commit.integratedCommit,
+			parent:
+				index === 0
+					? value.baseCommit
+					: expectedCommits[index - 1]?.integratedCommit,
+		}));
+		if (
+			mergeReady.git.commits.length !== expectedGitCommits.length ||
+			mergeReady.git.commits.some((commit, index) => {
+				if (!isRecord(commit)) {
+					return true;
+				}
+				assertString(
+					commit.subject,
+					`run.mergeReadyEvidence.git.commits[${index}].subject`,
+				);
+				const expected = expectedGitCommits[index];
+				return (
+					!expected ||
+					commit.hash !== expected.hash ||
+					commit.parent !== expected.parent
+				);
+			})
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.git.commits must match the exact linear integration chain",
+			);
+		}
+		const latestRound = value.reviewRounds.at(-1);
+		if (!isRecord(latestRound) || typeof latestRound.number !== "number") {
+			throw new Error(
+				"run.mergeReadyEvidence requires a completed final review round",
+			);
+		}
+		const finalReviewAttempts = value.reviewAttempts.filter(
+			(attempt) =>
+				isRecord(attempt) &&
+				attempt.round === latestRound.number &&
+				attempt.state === "succeeded",
+		);
+		const expectedFinalReviews = REVIEW_CATEGORIES.map((category) => {
+			const attempt = finalReviewAttempts.find(
+				(item) => item.category === category,
+			);
+			if (!attempt || typeof attempt.summary !== "string") {
+				throw new Error(
+					`run.mergeReadyEvidence is missing the final ${category} review`,
+				);
+			}
+			return { category, summary: attempt.summary };
+		});
+		if (
+			JSON.stringify(mergeReady.finalReviews) !==
+			JSON.stringify(expectedFinalReviews)
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.finalReviews must match the final review round",
+			);
+		}
+		const expectedRemainingRisks = finalReviewAttempts
+			.flatMap((attempt) =>
+				Array.isArray(attempt.findings) ? attempt.findings : [],
+			)
+			.filter((finding) => isRecord(finding) && finding.status === "deferred")
+			.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+		if (
+			JSON.stringify(mergeReady.remainingRisks) !==
+			JSON.stringify(expectedRemainingRisks)
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.remainingRisks must match deferred findings from the final review round",
+			);
+		}
+		const successfulValidation = value.finalValidationAttempts.findLast(
+			(attempt) =>
+				isRecord(attempt) &&
+				attempt.state === "succeeded" &&
+				attempt.integrationCommit === value.integrationHead,
+		);
+		if (
+			!successfulValidation ||
+			!isRecord(successfulValidation.evidence) ||
+			JSON.stringify(mergeReady.finalChecks) !==
+				JSON.stringify(successfulValidation.evidence.checks)
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.finalChecks must match passing final validation evidence",
+			);
+		}
+	}
+	if (value.state === "completed") {
+		const succeeded = value.finalValidationAttempts.findLast(
+			(attempt) =>
+				isRecord(attempt) &&
+				attempt.state === "succeeded" &&
+				attempt.integrationCommit === value.integrationHead,
+		);
+		if (!succeeded || mergeReady === undefined) {
+			throw new Error(
+				"Completed run requires passing final validation at integrationHead and merge-ready evidence",
+			);
+		}
+	}
+	if (
+		["failed", "cancelled"].includes(String(value.state)) &&
+		mergeReady !== undefined
+	) {
+		throw new Error(
+			`${String(value.state)} run cannot have merge-ready evidence`,
+		);
 	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||

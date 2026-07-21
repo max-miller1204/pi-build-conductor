@@ -1,5 +1,9 @@
-import type { TaskValidationEvidence } from "../../src/domain/types.js";
+import type {
+	FinalValidationEvidence,
+	TaskValidationEvidence,
+} from "../../src/domain/types.js";
 import type { GitClient, TaskWorktreeSnapshot } from "../../src/git/git.js";
+import type { FinalValidator } from "../../src/validation/final-validator.js";
 import type {
 	TaskValidationInput,
 	TaskValidator,
@@ -18,6 +22,7 @@ function changedPath(input: TaskValidationInput): string {
 export function createFakeFinalizationDependencies(): {
 	git: GitClient;
 	validator: TaskValidator;
+	finalValidator: FinalValidator;
 	verifyReviewWorktree: () => Promise<void>;
 } {
 	const integrationHeads = new Map<string, string>();
@@ -52,6 +57,26 @@ export function createFakeFinalizationDependencies(): {
 			return { snapshot, evidence };
 		},
 	};
+	const finalValidator: FinalValidator = {
+		async validate(input) {
+			const evidence: FinalValidationEvidence = {
+				startedAt: now,
+				finishedAt: now,
+				passed: true,
+				checks: input.commands.map((command) => ({
+					command: command.command,
+					args: [...command.args],
+					startedAt: now,
+					finishedAt: now,
+					exitCode: 0,
+					stdoutTail: "",
+					stderrTail: "",
+					passed: true,
+				})),
+			};
+			return evidence;
+		},
+	};
 	const git = {
 		async commitTaskWork(
 			_worktreePath: string,
@@ -65,6 +90,34 @@ export function createFakeFinalizationDependencies(): {
 				: "recovered-commit";
 		},
 		async verifyTaskCommit(): Promise<void> {},
+		async verifyMergeReadyHistory(input: {
+			integrationBranch: string;
+			integrationHead: string;
+			baseBranch: string;
+			baseCommit: string;
+			commits: Array<{ integratedCommit: string }>;
+			verifiedAt: string;
+		}) {
+			return {
+				verifiedAt: input.verifiedAt,
+				integrationBranch: input.integrationBranch,
+				integrationHead: input.integrationHead,
+				baseBranch: input.baseBranch,
+				baseCommit: input.baseCommit,
+				commits: input.commits.map((commit, index) => ({
+					hash: commit.integratedCommit,
+					parent:
+						index === 0
+							? input.baseCommit
+							: (input.commits[index - 1]?.integratedCommit ??
+								input.baseCommit),
+					subject: "test integration",
+				})),
+				userWorktreeClean: true as const,
+				userBranch: input.baseBranch,
+				userHead: input.baseCommit,
+			};
+		},
 		async integrateCommit(
 			_repositoryRoot: string,
 			branch: string,
@@ -80,5 +133,10 @@ export function createFakeFinalizationDependencies(): {
 			return integratedCommit;
 		},
 	} as unknown as GitClient;
-	return { git, validator, verifyReviewWorktree: async () => {} };
+	return {
+		git,
+		validator,
+		finalValidator,
+		verifyReviewWorktree: async () => {},
+	};
 }

@@ -24,6 +24,7 @@ import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import { RunStore } from "./storage/run-store.js";
+import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
 import { OfficialOrchestratorBackend } from "./workers/orchestrator-backend.js";
 
@@ -84,7 +85,7 @@ async function editPlan(
 }
 
 function approvalSummary(plan: TaskPlan): string {
-	return plan.tasks
+	const tasks = plan.tasks
 		.map((task, index) => {
 			const dependencies =
 				task.dependencies.length > 0 ? task.dependencies.join(", ") : "none";
@@ -95,6 +96,10 @@ function approvalSummary(plan: TaskPlan): string {
 			return `${index + 1}. ${task.title} (${task.id})\n   dependencies: ${dependencies}\n   allowed paths: ${paths}\n   validation: ${commands}`;
 		})
 		.join("\n");
+	const finalSuite = plan.finalValidationCommands
+		.map(({ command, args }) => [command, ...args].join(" "))
+		.join("; ");
+	return `${tasks}\n\nFinal merge-ready validation suite:\n${finalSuite}`;
 }
 
 function configurationDirectory(): string {
@@ -154,6 +159,20 @@ function configuredValidationTimeoutMs(): number | undefined {
 	return timeout;
 }
 
+function configuredFinalValidationTimeoutMs(): number | undefined {
+	const value = process.env.PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS;
+	if (value === undefined) {
+		return undefined;
+	}
+	const timeout = Number(value);
+	if (!Number.isFinite(timeout) || timeout <= 0) {
+		throw new Error(
+			"PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS must be a positive number",
+		);
+	}
+	return timeout;
+}
+
 function configuredMaxConcurrentWorkers(): number {
 	const value = process.env.PI_BUILD_MAX_CONCURRENT_WORKERS;
 	if (value === undefined) {
@@ -179,6 +198,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const workers = new OfficialOrchestratorBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
+	const finalValidationTimeoutMs = configuredFinalValidationTimeoutMs();
 	const conductor = new BuildConductor({
 		store,
 		workers,
@@ -187,6 +207,11 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 			...(validationTimeoutMs === undefined
 				? {}
 				: { commandTimeoutMs: validationTimeoutMs }),
+		}),
+		finalValidator: new LocalFinalValidator(git, {
+			...(finalValidationTimeoutMs === undefined
+				? {}
+				: { commandTimeoutMs: finalValidationTimeoutMs }),
 		}),
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
@@ -313,6 +338,27 @@ function showCompletion(
 		(attempt) =>
 			`repair ${attempt.round}/${attempt.number}: ${attempt.state}${attempt.integratedCommit ? `, integrated ${attempt.integratedCommit.slice(0, 12)}` : ""}`,
 	);
+	const evidence = run.mergeReadyEvidence;
+	const commitLines =
+		evidence?.commits.map(
+			(commit, index) =>
+				`${index + 1}. ${commit.kind} ${commit.id}: ${commit.sourceCommit.slice(0, 12)} -> ${commit.integratedCommit.slice(0, 12)}`,
+		) ?? [];
+	const reviewSummaryLines =
+		evidence?.finalReviews.map(
+			(review) => `Final ${review.category} review: ${review.summary}`,
+		) ?? [];
+	const finalAttempt = run.finalValidationAttempts.at(-1);
+	const finalChecks = finalAttempt?.evidence?.checks ?? [];
+	const passedChecks = finalChecks.filter((check) => check.passed).length;
+	const finalCheckLines = finalChecks.map(
+		(check) =>
+			`Final check: ${[check.command, ...check.args].join(" ")} (${check.passed ? "passed" : "failed"})`,
+	);
+	const riskLines =
+		evidence?.remainingRisks.map(
+			(risk) => `Remaining risk ${risk.id}: ${risk.title}`,
+		) ?? [];
 	ctx.ui.setWidget(runUiKey(run.id), [
 		`Build ${run.id}`,
 		`Run: ${run.state}`,
@@ -321,16 +367,27 @@ function showCompletion(
 		...workerLines,
 		...reviewLines,
 		...repairLines,
-		`Integration head: ${run.integrationHead.slice(0, 12)}`,
+		`Integration branch: ${run.integrationBranch}`,
+		`Integration head: ${run.integrationHead}`,
+		...commitLines,
+		...reviewSummaryLines,
+		`Final checks: ${passedChecks}/${finalChecks.length} passed`,
+		...(finalAttempt
+			? [
+					`Final validation worktree${run.state === "completed" ? " (cleaned)" : " (retained if created)"}: ${finalAttempt.worktreePath}`,
+				]
+			: []),
+		...finalCheckLines,
+		...(riskLines.length > 0 ? riskLines : ["Remaining deferred risks: none"]),
+		...(evidence
+			? ["User branch stayed clean and untouched at the recorded base commit."]
+			: ["User branch cleanliness was not certified as merge-ready."]),
 		`State file: ${store.directory}`,
 	]);
-	if (run.state === "reviewed") {
-		ctx.ui.setStatus(
-			runUiKey(run.id),
-			"independent review and repair complete; awaiting full validation",
-		);
+	if (run.state === "completed") {
+		ctx.ui.setStatus(runUiKey(run.id), "merge-ready validation passed");
 		ctx.ui.notify(
-			`Independent review completed on ${run.integrationBranch}`,
+			`Build ${run.id} is merge-ready on ${run.integrationBranch} at ${run.integrationHead}`,
 			"info",
 		);
 		return;
@@ -353,9 +410,13 @@ function showCompletion(
 	const reviewRoundFailure = run.reviewRounds.find(
 		(round) => round.state === "failed",
 	)?.error;
+	const finalValidationFailure = run.finalValidationAttempts.findLast(
+		(attempt) => attempt.state === "failed",
+	);
 	ctx.ui.setStatus(runUiKey(run.id), "build failed");
 	ctx.ui.notify(
-		integrationFailure?.integrationError ??
+		finalValidationFailure?.error ??
+			integrationFailure?.integrationError ??
 			repairFailure ??
 			reviewFailure ??
 			reviewRoundFailure ??
@@ -562,14 +623,11 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						"Repository changed during recovery. Resume again from a clean, unchanged branch.",
 					);
 				}
-				if (recovered.state === "reviewed") {
-					ctx.ui.setStatus(
-						runUiKey(runId),
-						"independent review and repair complete; awaiting full validation",
-					);
+				if (recovered.state === "completed") {
+					ctx.ui.setStatus(runUiKey(runId), "merge-ready validation passed");
 					ctx.ui.setStatus("pi-build-conductor", undefined);
 					ctx.ui.notify(
-						`Build ${runId} has already completed independent review`,
+						`Build ${runId} is already merge-ready at ${recovered.integrationHead}`,
 						"info",
 					);
 					return;

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseGeneratedPlan } from "../src/planning/pi-plan-generator.js";
 
 const validPlan = {
-	version: 2,
+	version: 3,
+	finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
 	title: "Feature",
 	tasks: [
 		{

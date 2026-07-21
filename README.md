@@ -2,7 +2,7 @@
 
 `pi-build-conductor` is a Pi package for turning a build handoff into isolated, dependency-aware implementation work.
 
-The current vertical slice reads a handoff, generates or loads a validated task DAG, lets the user edit and explicitly approve it, launches a bounded pool of isolated workers, integrates validated task commits, and runs independent review and repair passes through the official experimental Pi orchestrator.
+The current vertical slice reads a handoff, generates or loads a validated task DAG, lets the user edit and explicitly approve it, launches a bounded pool of isolated workers, integrates validated task commits, runs independent review and repair passes, and produces merge-ready evidence after the approved complete validation suite passes.
 
 ## Status
 
@@ -35,17 +35,18 @@ Implemented:
 - Deterministic finding prioritization and isolated repair attempts for important findings
 - Conductor-owned repair validation, commits, integration, and fresh post-repair review rounds
 - Successful worktree cleanup with failed worktrees retained for inspection
-- Live Pi status and widget updates for task, review, repair, and terminal state
-- Tests for DAG validation, scheduling, recovery, Git isolation, validation, conductor-owned commits, integration, review, repair, worker launch, completion, failure, timeout, and cancellation
-
-Final full-suite validation and merge-ready evidence are the next implementation stage.
+- Detached final validation at the exact integration head with a separately configurable timeout
+- Strict linear integration history and untouched user worktree verification
+- Durable versioned merge-ready evidence for commits, reviews, risks, checks, and Git state
+- Live Pi status and widget updates for task, review, repair, validation, and terminal state
+- Tests for DAG validation, scheduling, recovery, Git isolation, focused and final validation, conductor-owned commits, integration history, review, repair, worker launch, completion, failure, timeout, and cancellation
 
 ## Architecture
 
 - `src/domain` contains run, task, attempt, and DAG state without process or UI dependencies.
 - `src/storage` persists versioned run snapshots under the repository's Git common directory.
 - `src/git` owns branch, diff inspection, commit, cherry-pick, and worktree operations.
-- `src/validation` enforces approved task scope and runs focused checks without a shell.
+- `src/validation` enforces approved task scope and runs focused and final checks without a shell.
 - `src/workers` isolates the experimental orchestrator protocol behind `WorkerBackend`.
 - `src/planning` calls the selected Pi model and validates its JSON plan.
 - `src/review` defines reviewer prompts, the structured report protocol, and deterministic repair policy.
@@ -136,12 +137,20 @@ The command performs these steps:
 26. Defers lower-priority findings as explicit remaining risks rather than silently discarding them.
 27. Launches a fresh isolated repair worker for all prioritized findings, validates its changes against the union of approved paths and focused commands, and creates a conductor-owned repair commit.
 28. Integrates the repair commit without changing the user branch, then repeats all five reviews with fresh workers at the repaired head.
-29. Stops after two repair attempts and fails the run if a third review round still reports important findings.
+29. Preserves `reviewed` as a durable checkpoint and immediately allocates a detached final-validation worktree at the exact integration head.
+30. Runs the explicitly approved complete validation commands in order with bounded output, a reduced environment, process-group termination, and a 30-minute default timeout per command.
+31. Rechecks detached HEAD, the expected commit, and worktree cleanliness before validation and after every command.
+32. Removes the successful validation worktree while retaining a failed command worktree for inspection when safe.
+33. Re-reads the integration ref and proves that `baseCommit..integrationHead` is exactly the persisted single-parent task and repair commit chain.
+34. Proves that the user worktree remains clean on the original base branch and base commit without updating, merging, or pushing it.
+35. Atomically persists the succeeded final attempt, versioned merge-ready evidence, and `completed` state.
 
 Worker executions time out after one hour by default.
 Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
-Each validation command times out after ten minutes by default.
+Each focused task or repair validation command times out after ten minutes by default.
 Set `PI_BUILD_VALIDATION_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
+Each final validation command times out after 30 minutes by default.
+Set `PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
 The worker pool defaults to two concurrent workers.
 Set `PI_BUILD_MAX_CONCURRENT_WORKERS` to an integer from two through four to change the bound.
 
@@ -163,7 +172,10 @@ Succeeded reviewer reports remain durable, while interrupted categories are rela
 A validating task attempt with a recorded task commit is verified and cleanup is retried without creating a duplicate commit.
 A repair attempt with passing evidence and a recorded source commit is verified, cleanup is retried, and an already-created integration commit is reconciled without recommitting.
 Recovery fails safely when the integration branch cannot be proven to contain the exact single-parent repair commit.
-Broader restart idempotency and orphan-resource reconciliation remain part of the dedicated restart-hardening stage.
+An active final validation attempt becomes interrupted after restart.
+Resume safely removes its stale recorded worktree and launches a fresh numbered attempt at the same integration head.
+Legacy run schema 3 and plan schema 2 snapshots require a new explicitly approved run and are never silently labeled merge-ready.
+Broader orphan-resource reconciliation remains part of the dedicated restart-hardening stage.
 
 ## Review and repair policy
 
@@ -187,7 +199,7 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "title": "Example build",
   "tasks": [
     {
@@ -203,6 +215,12 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
           "args": ["test", "--", "test/feature.test.ts"]
         }
       ]
+    }
+  ],
+  "finalValidationCommands": [
+    {
+      "command": "npm",
+      "args": ["run", "check"]
     }
   ]
 }
@@ -238,7 +256,12 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Critical and high findings and high-confidence medium findings require isolated automatic repair.
 - Lower-priority findings remain persisted as deferred risks for final evidence.
 - Every successful repair is followed by all five fresh independent reviews.
-- A `reviewed` run has no unresolved important findings, but is not yet merge-ready because full-suite validation is not implemented.
+- A `reviewed` run has no unresolved important findings and proceeds directly to final validation during normal lifecycle execution.
+- Final validation runs only the complete suite explicitly approved in plan schema 3.
+- Final validation uses a detached worktree at the exact integration head and rejects tracked or untracked mutations after every command.
+- Ignored command artifacts may remain because Git porcelain intentionally excludes ignored files.
+- Completion requires a succeeded final attempt at the current integration head, exact linear history evidence, and proof that the user worktree stayed clean and untouched.
+- Failed and cancelled runs cannot contain merge-ready evidence.
 
 ## Development
 

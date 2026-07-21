@@ -9,6 +9,7 @@ import type { TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 import { RunStore } from "../src/storage/run-store.js";
+import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
 import type {
 	SpawnWorkerRequest,
@@ -169,13 +170,17 @@ describe("sequential task integration", () => {
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 			workers,
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Build in dependency order",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Sequential integration",
 				tasks: [
 					task(
@@ -203,7 +208,10 @@ describe("sequential task integration", () => {
 			(attempt) => attempt.taskId === "dependent",
 		);
 
-		expect(completed.state).toBe("reviewed");
+		expect(
+			completed.state,
+			completed.finalValidationAttempts.at(-1)?.error,
+		).toBe("completed");
 		expect(completed.tasks.foundation?.integratedCommit).toBeTruthy();
 		expect(completed.tasks.dependent?.integratedCommit).toBeTruthy();
 		expect(foundationAttempt?.baseCommit).toBe(repository.head);
@@ -248,13 +256,17 @@ describe("sequential task integration", () => {
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 			workers,
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Integrate deterministically",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Deterministic integration",
 				tasks: [
 					task("first", [], ["src/first.txt"], ""),
@@ -309,13 +321,17 @@ describe("sequential task integration", () => {
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 			workers,
 			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
 		});
 		const run = await conductor.createRun({
 			repository,
 			handoffPath: join(repositoryRoot, "handoff.md"),
 			handoffText: "Create conflicting independent changes",
 			plan: {
-				version: 2,
+				version: 3,
+				finalValidationCommands: [
+					{ command: process.execPath, args: ["-e", ""] },
+				],
 				title: "Conflict safety",
 				tasks: [
 					task("first", [], ["shared.txt"], ""),

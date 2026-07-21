@@ -10,5 +10,8 @@ export * from "./review/prompts.js";
 export * from "./review/review-policy.js";
 export * from "./review/review-report.js";
 export * from "./storage/run-store.js";
+export * from "./validation/command-runner.js";
+export * from "./validation/final-validator.js";
+export * from "./validation/task-validator.js";
 export * from "./workers/backend.js";
 export * from "./workers/orchestrator-backend.js";

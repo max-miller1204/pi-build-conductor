@@ -16,7 +16,8 @@ async function temporaryStore(): Promise<RunStore> {
 
 function createRun(): BuildRun {
 	const plan: TaskPlan = {
-		version: 2,
+		version: 3,
+		finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
 		title: "Build",
 		tasks: [
 			{
@@ -61,7 +62,7 @@ describe("RunStore", () => {
 		expect(await store.list()).toEqual([run]);
 	});
 
-	it("migrates schema version 2 runs without losing their integration head", () => {
+	it("rejects legacy runs that lack an approved final validation suite", () => {
 		const run = createRun();
 		const task = run.tasks.implementation;
 		if (!task) {
@@ -110,13 +111,12 @@ describe("RunStore", () => {
 			...legacy
 		} = integratedRun;
 
-		expect(validateStoredRun({ ...legacy, schemaVersion: 2 })).toMatchObject({
-			schemaVersion: 3,
-			integrationHead: integratedCommit,
-			reviewRounds: [],
-			reviewAttempts: [],
-			repairAttempts: [],
-		});
+		expect(() => validateStoredRun({ ...legacy, schemaVersion: 2 })).toThrow(
+			/start a new approved run/,
+		);
+		expect(() => validateStoredRun({ ...legacy, schemaVersion: 3 })).toThrow(
+			/start a new approved run/,
+		);
 	});
 
 	it("ignores incomplete temporary writes during listing", async () => {

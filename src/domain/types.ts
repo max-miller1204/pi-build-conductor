@@ -1,5 +1,6 @@
-export const RUN_SCHEMA_VERSION = 3 as const;
-export const PLAN_SCHEMA_VERSION = 2 as const;
+export const RUN_SCHEMA_VERSION = 4 as const;
+export const PLAN_SCHEMA_VERSION = 3 as const;
+export const MERGE_READY_EVIDENCE_VERSION = 1 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
 export const MAX_CONCURRENT_WORKERS = 4 as const;
 
@@ -81,6 +82,7 @@ export interface TaskPlan {
 	version: typeof PLAN_SCHEMA_VERSION;
 	title: string;
 	tasks: TaskDefinition[];
+	finalValidationCommands: ValidationCommand[];
 }
 
 export interface TaskAttempt {
@@ -206,6 +208,76 @@ export interface HandoffRecord {
 	text: string;
 }
 
+export type FinalValidationAttemptState =
+	| "running"
+	| "succeeded"
+	| "failed"
+	| "cancelled"
+	| "interrupted";
+
+export interface FinalValidationEvidence {
+	startedAt: string;
+	finishedAt: string;
+	passed: boolean;
+	checks: ValidationCheckEvidence[];
+}
+
+export interface FinalValidationAttempt {
+	id: string;
+	number: number;
+	state: FinalValidationAttemptState;
+	integrationCommit: string;
+	worktreePath: string;
+	startedAt: string;
+	finishedAt?: string;
+	error?: string;
+	evidence?: FinalValidationEvidence;
+}
+
+export interface IntegratedCommitEvidence {
+	kind: "task" | "repair";
+	id: string;
+	sourceCommit: string;
+	integratedCommit: string;
+}
+
+export interface GitCommitEvidence {
+	hash: string;
+	parent: string;
+	subject: string;
+}
+
+export interface GitVerificationEvidence {
+	verifiedAt: string;
+	integrationBranch: string;
+	integrationHead: string;
+	baseBranch: string;
+	baseCommit: string;
+	commits: GitCommitEvidence[];
+	userWorktreeClean: true;
+	userBranch: string;
+	userHead: string;
+}
+
+export interface FinalReviewSummary {
+	category: ReviewCategory;
+	summary: string;
+}
+
+export interface MergeReadyEvidence {
+	version: typeof MERGE_READY_EVIDENCE_VERSION;
+	generatedAt: string;
+	integrationBranch: string;
+	integrationHead: string;
+	baseBranch: string;
+	baseCommit: string;
+	commits: IntegratedCommitEvidence[];
+	finalReviews: FinalReviewSummary[];
+	remainingRisks: ReviewFinding[];
+	finalChecks: ValidationCheckEvidence[];
+	git: GitVerificationEvidence;
+}
+
 export interface BuildRun {
 	schemaVersion: typeof RUN_SCHEMA_VERSION;
 	id: string;
@@ -222,6 +294,8 @@ export interface BuildRun {
 	reviewRounds: ReviewRound[];
 	reviewAttempts: ReviewAttempt[];
 	repairAttempts: RepairAttempt[];
+	finalValidationAttempts: FinalValidationAttempt[];
+	mergeReadyEvidence?: MergeReadyEvidence;
 	maxConcurrentWorkers: number;
 	createdAt: string;
 	updatedAt: string;

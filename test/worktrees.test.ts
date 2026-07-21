@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -65,6 +65,28 @@ describe("GitWorktreeManager", () => {
 		);
 		expect(originalWorktree.currentBranch).toBe("main");
 		expect(taskWorktree.currentBranch).toBe(allocation.branch);
+	});
+
+	it("creates and safely removes a detached final validation worktree", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+		);
+		const path = await manager.prepareFinalValidationWorktree(
+			repository,
+			"run-1",
+			1,
+			repository.head,
+		);
+
+		await git.verifyDetachedWorktree(path, repository.head);
+		expect((await git.inspect(path)).currentBranch).toBe("HEAD");
+		await manager.removeTaskWorktree(repositoryRoot, path);
+		await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect((await git.inspect(repositoryRoot)).currentBranch).toBe("main");
 	});
 
 	it("refuses to start from a dirty worktree", async () => {

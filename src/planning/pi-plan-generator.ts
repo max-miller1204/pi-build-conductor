@@ -8,7 +8,7 @@ const PLANNING_SYSTEM_PROMPT = `You are the planning stage of a software build c
 Turn the supplied handoff into a small, implementation-ready dependency DAG.
 Return JSON only, with exactly this shape:
 {
-  "version": 2,
+  "version": 3,
   "title": "short plan title",
   "tasks": [
     {
@@ -22,6 +22,9 @@ Return JSON only, with exactly this shape:
         { "command": "npm", "args": ["test", "--", "test/feature.test.ts"] }
       ]
     }
+  ],
+  "finalValidationCommands": [
+    { "command": "npm", "args": ["run", "check"] }
   ]
 }
 Every dependency must refer to another task in the plan.
@@ -31,7 +34,8 @@ Independent ready tasks may execute concurrently, so every prerequisite must be 
 Every task must be executable from its description.
 Every allowed path must be a normalized repository-relative file path or directory ending in /.
 Use the narrowest practical path scope and focused validation commands.
-Validation commands execute directly without a shell and must not modify files.`;
+Choose a complete repository-wide final validation suite that is sufficient to establish merge readiness.
+All validation commands execute directly without a shell and must not modify files.`;
 
 function unwrapJson(text: string): string {
 	const trimmed = text.trim();

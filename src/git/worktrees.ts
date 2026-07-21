@@ -23,6 +23,13 @@ export interface WorktreeManager {
 	prepareTaskWorktree(
 		input: PrepareTaskWorktreeInput,
 	): Promise<WorktreeAllocation>;
+	finalValidationWorktreePath(runId: string, attemptNumber: number): string;
+	prepareFinalValidationWorktree(
+		repository: RepositoryInfo,
+		runId: string,
+		attemptNumber: number,
+		commit: string,
+	): Promise<string>;
 	removeTaskWorktree(repositoryRoot: string, path: string): Promise<void>;
 }
 
@@ -80,6 +87,27 @@ export class GitWorktreeManager implements WorktreeManager {
 			input.startPoint,
 		);
 		return { branch, path };
+	}
+
+	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
+		return join(
+			this.worktreeRoot,
+			runId,
+			"final-validation",
+			`attempt-${attemptNumber}`,
+		);
+	}
+
+	async prepareFinalValidationWorktree(
+		repository: RepositoryInfo,
+		runId: string,
+		attemptNumber: number,
+		commit: string,
+	): Promise<string> {
+		const path = this.finalValidationWorktreePath(runId, attemptNumber);
+		await mkdir(dirname(path), { recursive: true });
+		await this.git.addDetachedWorktree(repository.root, path, commit);
+		return path;
 	}
 
 	async removeTaskWorktree(

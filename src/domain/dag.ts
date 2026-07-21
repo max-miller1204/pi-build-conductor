@@ -244,6 +244,11 @@ export function validateTaskPlan(value: unknown): TaskPlan {
 	const tasks = Array.isArray(value.tasks)
 		? value.tasks.map((task, index) => readTask(task, index, issues))
 		: [];
+	const finalValidationCommands = readValidationCommands(
+		value.finalValidationCommands,
+		"finalValidationCommands",
+		issues,
+	);
 	const ids = new Set<string>();
 	for (const task of tasks) {
 		if (!TASK_ID_PATTERN.test(task.id)) {
@@ -279,7 +284,12 @@ export function validateTaskPlan(value: unknown): TaskPlan {
 	if (issues.length > 0) {
 		throw new PlanValidationError(issues);
 	}
-	return { version: PLAN_SCHEMA_VERSION, title, tasks };
+	return {
+		version: PLAN_SCHEMA_VERSION,
+		title,
+		tasks,
+		finalValidationCommands,
+	};
 }
 
 export function topologicalTaskIds(plan: TaskPlan): string[] {

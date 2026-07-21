@@ -32,9 +32,14 @@ function runWith(
 		definition("ui", ["base"]),
 		definition("release", ["api", "ui"]),
 	];
-	const plan: TaskPlan = { version: 2, title: "Build", tasks: definitions };
+	const plan: TaskPlan = {
+		version: 3,
+		finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
+		title: "Build",
+		tasks: definitions,
+	};
 	return {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		id: "run-1",
 		state: "running",
 		repositoryRoot: "/repo",
@@ -61,6 +66,7 @@ function runWith(
 		reviewRounds: [],
 		reviewAttempts: [],
 		repairAttempts: [],
+		finalValidationAttempts: [],
 		maxConcurrentWorkers,
 		createdAt: "2026-01-01T00:00:00.000Z",
 		updatedAt: "2026-01-01T00:00:00.000Z",

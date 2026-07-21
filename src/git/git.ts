@@ -1,14 +1,102 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, type Stats } from "node:fs";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { ChangedFileEvidence } from "../domain/types.js";
+import type {
+	ChangedFileEvidence,
+	GitVerificationEvidence,
+	IntegratedCommitEvidence,
+} from "../domain/types.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+async function gitPatchId(cwd: string, commit: string): Promise<string> {
+	return new Promise<string>((resolvePromise, reject) => {
+		const show = spawn(
+			"git",
+			[
+				"show",
+				"--pretty=format:",
+				"--binary",
+				"--no-ext-diff",
+				"--end-of-options",
+				commit,
+			],
+			{ cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] },
+		);
+		const patchId = spawn("git", ["patch-id", "--stable"], {
+			cwd,
+			shell: false,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let output = "";
+		let errors = "";
+		let settled = false;
+		const fail = (error: unknown) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			show.kill("SIGKILL");
+			patchId.kill("SIGKILL");
+			reject(error instanceof Error ? error : new Error(String(error)));
+		};
+		const append = (current: string, chunk: Buffer): string => {
+			const next = current + chunk.toString("utf8");
+			if (Buffer.byteLength(next) > MAX_GIT_OUTPUT_BYTES) {
+				fail(new Error(`Git patch output exceeded the limit for ${commit}`));
+			}
+			return next;
+		};
+		show.stdout.pipe(patchId.stdin);
+		show.stderr.on("data", (chunk: Buffer) => {
+			errors = append(errors, chunk);
+		});
+		patchId.stdout.on("data", (chunk: Buffer) => {
+			output = append(output, chunk);
+		});
+		patchId.stderr.on("data", (chunk: Buffer) => {
+			errors = append(errors, chunk);
+		});
+		show.on("error", fail);
+		patchId.on("error", fail);
+		patchId.stdin.on("error", fail);
+		let showExitCode: number | null | undefined;
+		let patchExitCode: number | null | undefined;
+		const finish = () => {
+			if (
+				settled ||
+				showExitCode === undefined ||
+				patchExitCode === undefined
+			) {
+				return;
+			}
+			settled = true;
+			if (showExitCode !== 0 || patchExitCode !== 0) {
+				reject(
+					new Error(
+						`Could not compute patch id for ${commit}: ${errors.trim()}`,
+					),
+				);
+				return;
+			}
+			const id = output.trim().split(/\s+/, 1)[0];
+			resolvePromise(id || "empty");
+		};
+		show.on("close", (code) => {
+			showExitCode = code;
+			finish();
+		});
+		patchId.on("close", (code) => {
+			patchExitCode = code;
+			finish();
+		});
+	});
+}
 
 export interface RepositoryInfo {
 	root: string;
@@ -23,6 +111,16 @@ export interface TaskWorktreeSnapshot {
 	baseCommit: string;
 	changedFiles: ChangedFileEvidence[];
 	diffHash: string;
+}
+
+export interface VerifyMergeReadyHistoryInput {
+	repositoryRoot: string;
+	integrationBranch: string;
+	integrationHead: string;
+	baseBranch: string;
+	baseCommit: string;
+	commits: IntegratedCommitEvidence[];
+	verifiedAt: string;
 }
 
 export interface GitClient {
@@ -40,8 +138,20 @@ export interface GitClient {
 		branch: string,
 		startPoint: string,
 	): Promise<void>;
+	addDetachedWorktree(
+		repositoryRoot: string,
+		path: string,
+		commit: string,
+	): Promise<void>;
 	removeWorktree(repositoryRoot: string, path: string): Promise<void>;
 	status(repositoryRoot: string): Promise<string>;
+	verifyDetachedWorktree(
+		worktreePath: string,
+		expectedCommit: string,
+	): Promise<void>;
+	verifyMergeReadyHistory(
+		input: VerifyMergeReadyHistoryInput,
+	): Promise<GitVerificationEvidence>;
 	inspectTaskWorktree(
 		worktreePath: string,
 		expectedBranch: string,
@@ -211,7 +321,7 @@ export class GitCli implements GitClient {
 			"--git-common-dir",
 		]);
 		const [currentBranch, head, status] = await Promise.all([
-			this.execute(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+			this.execute(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
 			this.execute(root, ["rev-parse", "HEAD"]),
 			this.status(root),
 		]);
@@ -269,6 +379,20 @@ export class GitCli implements GitClient {
 		]);
 	}
 
+	async addDetachedWorktree(
+		repositoryRoot: string,
+		path: string,
+		commit: string,
+	): Promise<void> {
+		await this.execute(repositoryRoot, [
+			"worktree",
+			"add",
+			"--detach",
+			path,
+			commit,
+		]);
+	}
+
 	async removeWorktree(repositoryRoot: string, path: string): Promise<void> {
 		await this.execute(repositoryRoot, ["worktree", "remove", "--force", path]);
 	}
@@ -281,6 +405,132 @@ export class GitCli implements GitClient {
 				"--untracked-files=all",
 			])
 		).trim();
+	}
+
+	async verifyDetachedWorktree(
+		worktreePath: string,
+		expectedCommit: string,
+	): Promise<void> {
+		const [head, branch, status] = await Promise.all([
+			this.execute(worktreePath, ["rev-parse", "HEAD"]),
+			this.execute(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"]),
+			this.status(worktreePath),
+		]);
+		if (head !== expectedCommit) {
+			throw new Error(
+				`Final validation worktree is at ${head}, expected ${expectedCommit}`,
+			);
+		}
+		if (branch !== "HEAD") {
+			throw new Error("Final validation worktree must have detached HEAD");
+		}
+		if (status.length > 0) {
+			throw new Error(`Final validation worktree is dirty: ${status}`);
+		}
+	}
+
+	async verifyMergeReadyHistory(
+		input: VerifyMergeReadyHistoryInput,
+	): Promise<GitVerificationEvidence> {
+		const [head, repository, revisionList] = await Promise.all([
+			this.branchHead(input.repositoryRoot, input.integrationBranch),
+			this.inspect(input.repositoryRoot),
+			this.execute(input.repositoryRoot, [
+				"rev-list",
+				"--reverse",
+				`${input.baseCommit}..refs/heads/${input.integrationBranch}`,
+			]),
+		]);
+		if (head !== input.integrationHead) {
+			throw new Error(
+				`Integration branch ${input.integrationBranch} is at ${head}, expected ${input.integrationHead}`,
+			);
+		}
+		if (
+			!repository.isClean ||
+			repository.currentBranch !== input.baseBranch ||
+			repository.head !== input.baseCommit
+		) {
+			throw new Error(
+				`User worktree must remain clean on ${input.baseBranch} at ${input.baseCommit}`,
+			);
+		}
+		const hashes = revisionList.length > 0 ? revisionList.split("\n") : [];
+		const commits = await Promise.all(
+			hashes.map(async (hash) => {
+				const [parents, subject] = await Promise.all([
+					this.execute(input.repositoryRoot, [
+						"show",
+						"-s",
+						"--format=%P",
+						hash,
+					]),
+					this.execute(input.repositoryRoot, [
+						"show",
+						"-s",
+						"--format=%s",
+						hash,
+					]),
+				]);
+				const parentList = parents.split(" ").filter(Boolean);
+				if (parentList.length !== 1) {
+					throw new Error(`Integration commit ${hash} is not single-parent`);
+				}
+				return { hash, parent: parentList[0] as string, subject };
+			}),
+		);
+		const expectedHashes = input.commits.map(
+			(commit) => commit.integratedCommit,
+		);
+		if (
+			commits.length !== expectedHashes.length ||
+			commits.some(
+				(commit, index) =>
+					commit.hash !== expectedHashes[index] ||
+					commit.parent !==
+						(index === 0 ? input.baseCommit : expectedHashes[index - 1]),
+			)
+		) {
+			throw new Error(
+				"Integration history does not match persisted commit order",
+			);
+		}
+		await Promise.all(
+			input.commits.map(async (mapping) => {
+				const [sourceParents, sourcePatchId, integratedPatchId] =
+					await Promise.all([
+						this.execute(input.repositoryRoot, [
+							"show",
+							"-s",
+							"--format=%P",
+							"--end-of-options",
+							mapping.sourceCommit,
+						]),
+						gitPatchId(input.repositoryRoot, mapping.sourceCommit),
+						gitPatchId(input.repositoryRoot, mapping.integratedCommit),
+					]);
+				if (
+					sourceParents.split(" ").filter(Boolean).length !== 1 ||
+					sourcePatchId !== integratedPatchId
+				) {
+					throw new Error(
+						`Integrated commit ${mapping.integratedCommit} does not match source commit ${mapping.sourceCommit}`,
+					);
+				}
+				return undefined;
+			}),
+		);
+		return {
+			verifiedAt: input.verifiedAt,
+			integrationBranch: input.integrationBranch,
+			integrationHead: input.integrationHead,
+			baseBranch: input.baseBranch,
+			baseCommit: input.baseCommit,
+			commits,
+			userWorktreeClean: true,
+			userBranch: repository.currentBranch,
+			userHead: repository.head,
+		};
 	}
 
 	async inspectTaskWorktree(
