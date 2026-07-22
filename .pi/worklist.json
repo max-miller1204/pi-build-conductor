@@ -85,9 +85,9 @@
       "id": "goal-mrtf4w5v-fa87f418",
       "title": "Expand end-to-end and fault-injection coverage",
       "description": "Test real Pi and orchestrator workflows, concurrent scheduling, crashes at each state boundary, Git conflicts, worker failures, malformed state, cancellation, recovery, and platform-specific worktree behavior.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:54.835Z",
-      "updatedAt": "2026-07-20T16:07:54.835Z"
+      "updatedAt": "2026-07-22T20:37:35.859Z"
     },
     {
       "id": "goal-mrtf4xj5-ace1989f",
@@ -104,6 +104,14 @@
       "status": "open",
       "createdAt": "2026-07-20T16:07:58.424Z",
       "updatedAt": "2026-07-20T16:07:58.424Z"
+    },
+    {
+      "id": "goal-mrwiz9k3-04bbbc8f",
+      "title": "Handle blocked worker prompts through typed RPC",
+      "description": "Detect Pi extension_ui_request events for select, confirm, input, and editor dialogs; expose blocked-worker state; send extension_ui_response through the worker RPC channel; apply a conservative configurable auto-cancel or decline policy; journal decisions; and add end-to-end tests for response, timeout, cancellation, and recovery behavior.",
+      "status": "active",
+      "createdAt": "2026-07-22T20:18:49.251Z",
+      "updatedAt": "2026-07-22T20:46:37.757Z"
     }
   ]
 }

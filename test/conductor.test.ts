@@ -133,6 +133,16 @@ class SlowStartWorkers extends FakeWorkers {
 	}
 }
 
+class RejectingStartWorkers extends FakeWorkers {
+	override startPrompt(
+		workerId: string,
+		prompt: string,
+	): Promise<WorkerExecution> {
+		this.calls.push({ operation: "prompt", value: { workerId, prompt } });
+		return Promise.reject(new Error("orchestrator stream failed to start"));
+	}
+}
+
 class FakeWorktrees implements WorktreeManager {
 	integrationBranch?: string;
 	allocationInput?: PrepareTaskWorktreeInput;
@@ -491,6 +501,35 @@ describe("BuildConductor vertical slice", () => {
 			operation: "stop",
 			value: "worker-1",
 		});
+	});
+
+	it("persists a launch failure when the orchestrator stream cannot start", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-stream-start-failure-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new RejectingStartWorkers();
+		const conductor = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+		});
+		const run = await createSingleTaskRun(conductor);
+
+		const launch = await conductor.approveAndLaunch(run, repository);
+		const failed = await launch.completion;
+
+		expect(launch.launches).toEqual([]);
+		expect(failed.state).toBe("failed");
+		expect(failed.tasks.implementation?.state).toBe("failed");
+		expect(failed.attempts[0]).toMatchObject({
+			state: "failed",
+			error: "orchestrator stream failed to start",
+		});
+		expect(workers.calls.filter((call) => call.operation === "stop")).toEqual([
+			{ operation: "stop", value: "worker-1" },
+		]);
 	});
 
 	it("times out a worker and cleans up the process", async () => {

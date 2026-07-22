@@ -1,13 +1,13 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBuildRun } from "../src/domain/run.js";
 import type { TaskPlan } from "../src/domain/types.js";
 import { GitCli, integrationScratchDirectoryPrefix } from "../src/git/git.js";
-import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { GitWorktreeManager, isPathInside } from "../src/git/worktrees.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -97,6 +97,70 @@ describe("GitWorktreeManager", () => {
 		);
 		expect(originalWorktree.currentBranch).toBe("main");
 		expect(taskWorktree.currentBranch).toBe(allocation.branch);
+	});
+
+	it("supports worktree roots containing spaces and Unicode", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const worktreeRoot = join(repositoryRoot, "..", "conductor worktrees Ω");
+		const manager = new GitWorktreeManager(git, worktreeRoot);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+
+		const taskWorktree = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		const finalWorktree = await manager.prepareFinalValidationWorktree(
+			repository,
+			"run-1",
+			1,
+			repository.head,
+		);
+
+		expect(taskWorktree.path).toContain("conductor worktrees Ω");
+		expect(finalWorktree).toContain("conductor worktrees Ω");
+		expect((await git.inspect(taskWorktree.path)).isClean).toBe(true);
+		await manager.removeTaskWorktree(repositoryRoot, taskWorktree.path);
+		await manager.removeTaskWorktree(repositoryRoot, finalWorktree);
+		expect(await git.listWorktrees(repositoryRoot)).toHaveLength(1);
+	});
+
+	it("applies Windows path containment without prefix confusion", () => {
+		const root = "C:\\conductor\\worktrees\\run-1";
+
+		expect(isPathInside(root, `${root}\\task\\attempt-1`, win32)).toBe(true);
+		expect(isPathInside(root, root, win32)).toBe(false);
+		expect(
+			isPathInside(root, "C:\\conductor\\worktrees\\run-10\\task", win32),
+		).toBe(false);
+		expect(isPathInside(root, "C:\\conductor\\worktrees\\outside", win32)).toBe(
+			false,
+		);
+		expect(isPathInside(root, "D:\\run-1\\task", win32)).toBe(false);
+	});
+
+	it("rejects removal at or outside the conductor worktree root", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const worktreeRoot = join(repositoryRoot, "..", "worktrees");
+		const manager = new GitWorktreeManager(git, worktreeRoot);
+
+		await expect(
+			manager.removeTaskWorktree(repositoryRoot, worktreeRoot),
+		).rejects.toThrow(/outside conductor root/);
+		await expect(
+			manager.removeTaskWorktree(
+				repositoryRoot,
+				join(worktreeRoot, "..", "worktrees-other", "run-1"),
+			),
+		).rejects.toThrow(/outside conductor root/);
+		await expect(
+			manager.removeTaskWorktree(repositoryRoot, repositoryRoot),
+		).rejects.toThrow(/outside conductor root/);
 	});
 
 	it("adopts an exact existing allocation after an interrupted create", async () => {

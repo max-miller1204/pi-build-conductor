@@ -459,6 +459,64 @@ describe("RunStore", () => {
 		).toThrow(/run\.integrationBranch must be conductor\/run-1\/integration/);
 	});
 
+	it("rejects active task projections without an active attempt", () => {
+		const run = approveRun(createRun(), "2026-01-01T00:01:00.000Z");
+		const implementation = run.tasks.implementation;
+		if (!implementation) {
+			throw new Error("Missing implementation task");
+		}
+
+		expect(() =>
+			validateStoredRun({
+				...run,
+				tasks: {
+					implementation: { ...implementation, state: "running" },
+				},
+			}),
+		).toThrow(/Active task implementation has no active attempt/);
+	});
+
+	it("rejects duplicate attempt numbers for one task", () => {
+		const run = approveRun(createRun(), "2026-01-01T00:01:00.000Z");
+		const implementation = run.tasks.implementation;
+		if (!implementation) {
+			throw new Error("Missing implementation task");
+		}
+		const firstAttempt = {
+			id: "attempt-1",
+			taskId: "implementation",
+			number: 1,
+			state: "interrupted" as const,
+			branch: "conductor/run-1/task/implementation/attempt-1",
+			worktreePath: "/tmp/worktree-1",
+			baseCommit: run.baseCommit,
+			startedAt: run.updatedAt,
+			finishedAt: run.updatedAt,
+			error: "Conductor restarted",
+		};
+
+		expect(() =>
+			validateStoredRun({
+				...run,
+				tasks: {
+					implementation: {
+						...implementation,
+						attemptIds: ["attempt-1", "attempt-2"],
+					},
+				},
+				attempts: [
+					firstAttempt,
+					{
+						...firstAttempt,
+						id: "attempt-2",
+						branch: "conductor/run-1/task/implementation/attempt-2",
+						worktreePath: "/tmp/worktree-2",
+					},
+				],
+			}),
+		).toThrow(/Duplicate attempt number 1 for task implementation/);
+	});
+
 	it("rejects malformed attempt records", () => {
 		const run = createRun();
 		expect(() =>

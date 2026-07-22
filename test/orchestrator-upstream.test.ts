@@ -5,7 +5,7 @@ import { OfficialOrchestratorBackend } from "../src/workers/orchestrator-backend
 const socketPath = process.env.PI_ORCHESTRATOR_SMOKE_SOCKET;
 
 describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
-	it("spawns, inspects, lists, and stops a real upstream worker", async () => {
+	it("executes a prompt and manages a real upstream worker lifecycle", async () => {
 		if (!socketPath) {
 			throw new Error("PI_ORCHESTRATOR_SMOKE_SOCKET is required");
 		}
@@ -18,6 +18,20 @@ describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
 			label: `pi-build-conductor:upstream-smoke:${randomUUID()}`,
 		});
 		try {
+			const progress: string[] = [];
+			const execution = await backend.startPrompt(
+				worker.id,
+				"Reply with exactly PI_BUILD_CONDUCTOR_SMOKE_OK. Do not use tools.",
+				{ onEvent: (event) => progress.push(event.type) },
+			);
+			const result = await execution.completion;
+			expect(result.status).toBe("succeeded");
+			if (result.status !== "succeeded") {
+				throw new Error(result.error);
+			}
+			expect(result.output).toContain("PI_BUILD_CONDUCTOR_SMOKE_OK");
+			expect(progress).toContain("agent_started");
+
 			const [status, instances] = await Promise.all([
 				backend.status(worker.id),
 				backend.list(),
@@ -29,5 +43,5 @@ describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
 		} finally {
 			await backend.stop(worker.id);
 		}
-	}, 90_000);
+	}, 180_000);
 });

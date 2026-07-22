@@ -421,6 +421,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 		throw new Error("run.attempts must be an array");
 	}
 	const attemptsById = new Map<string, Record<string, unknown>>();
+	const attemptNumbersByTask = new Set<string>();
 	for (const [index, attempt] of value.attempts.entries()) {
 		const path = `run.attempts[${index}]`;
 		if (!isRecord(attempt)) {
@@ -442,6 +443,13 @@ export function validateStoredRun(value: unknown): BuildRun {
 		if (!Number.isInteger(attempt.number) || (attempt.number as number) < 1) {
 			throw new Error(`${path}.number must be a positive integer`);
 		}
+		const taskAttemptNumber = `${String(attempt.taskId)}\0${String(attempt.number)}`;
+		if (attemptNumbersByTask.has(taskAttemptNumber)) {
+			throw new Error(
+				`Duplicate attempt number ${String(attempt.number)} for task ${String(attempt.taskId)}`,
+			);
+		}
+		attemptNumbersByTask.add(taskAttemptNumber);
 		if (
 			typeof attempt.state !== "string" ||
 			!ATTEMPT_STATES.has(attempt.state as AttemptState)

@@ -576,6 +576,7 @@ async function reviewAndLaunchRun(
 			continue;
 		}
 		ctx.ui.setStatus("pi-build-conductor", "checking orchestrator");
+		// pi-lens-ignore: await-in-loop
 		await runtime.workers.list();
 		const freshRepository = await git.inspect(ctx.cwd);
 		if (

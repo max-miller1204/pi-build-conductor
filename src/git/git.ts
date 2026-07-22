@@ -686,18 +686,20 @@ export class GitCli implements GitClient {
 				"Integration history does not match persisted commit order",
 			);
 		}
-		for (const [index, mapping] of input.commits.entries()) {
-			const integratedCommit = commits[index];
-			if (!integratedCommit) {
-				throw new Error("Integration history lost a persisted commit");
-			}
-			await this.verifySourceCommitMapping(
-				input.repositoryRoot,
-				mapping.sourceCommit,
-				mapping.integratedCommit,
-				integratedCommit.parent,
-			);
-		}
+		await Promise.all(
+			input.commits.map(async (mapping, index) => {
+				const integratedCommit = commits[index];
+				if (!integratedCommit) {
+					throw new Error("Integration history lost a persisted commit");
+				}
+				return this.verifySourceCommitMapping(
+					input.repositoryRoot,
+					mapping.sourceCommit,
+					mapping.integratedCommit,
+					integratedCommit.parent,
+				);
+			}),
+		);
 		return {
 			verifiedAt: input.verifiedAt,
 			integrationBranch: input.integrationBranch,

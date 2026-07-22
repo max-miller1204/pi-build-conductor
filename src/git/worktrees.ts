@@ -1,5 +1,5 @@
 import { lstat, mkdir, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import * as nodePath from "node:path";
 import type { BuildRun } from "../domain/types.js";
 import {
 	type GitClient,
@@ -7,9 +7,30 @@ import {
 	type RepositoryInfo,
 } from "./git.js";
 
+const { dirname, join, resolve } = nodePath;
+
 export interface WorktreeAllocation {
 	branch: string;
 	path: string;
+}
+
+export function isPathInside(
+	root: string,
+	target: string,
+	pathApi: Pick<
+		typeof nodePath,
+		"isAbsolute" | "relative" | "resolve"
+	> = nodePath,
+): boolean {
+	const pathFromRoot = pathApi.relative(
+		pathApi.resolve(root),
+		pathApi.resolve(target),
+	);
+	return (
+		pathFromRoot.length > 0 &&
+		!/^\.\.(?:[\\/]|$)/.test(pathFromRoot) &&
+		!pathApi.isAbsolute(pathFromRoot)
+	);
 }
 
 export interface PrepareTaskWorktreeInput {
@@ -197,15 +218,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	): Promise<void> {
 		const root = resolve(this.worktreeRoot);
 		const target = resolve(path);
-		const pathFromRoot = relative(root, target);
-		if (
-			pathFromRoot.length === 0 ||
-			pathFromRoot === ".." ||
-			pathFromRoot.startsWith(
-				`..${process.platform === "win32" ? "\\" : "/"}`,
-			) ||
-			isAbsolute(pathFromRoot)
-		) {
+		if (!isPathInside(root, target)) {
 			throw new Error(
 				`Refusing to remove worktree outside conductor root: ${path}`,
 			);
@@ -294,15 +307,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const retainedUnexpectedWorktrees: string[] = [];
 		for (const worktree of await this.git.listWorktrees(run.repositoryRoot)) {
 			const target = resolve(worktree.path);
-			const fromRunRoot = relative(runRoot, target);
-			if (
-				fromRunRoot === "" ||
-				fromRunRoot === ".." ||
-				fromRunRoot.startsWith(
-					`..${process.platform === "win32" ? "\\" : "/"}`,
-				) ||
-				isAbsolute(fromRunRoot)
-			) {
+			if (!isPathInside(runRoot, target)) {
 				continue;
 			}
 			const expectedHead = expectedWorktreeHeads.get(target);
@@ -327,8 +332,9 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 		await this.git.pruneWorktrees?.(run.repositoryRoot);
 
+		const remainingWorktrees = await this.git.listWorktrees(run.repositoryRoot);
 		const checkedOutBranches = new Set(
-			(await this.git.listWorktrees(run.repositoryRoot)).flatMap((worktree) =>
+			remainingWorktrees.flatMap((worktree) =>
 				worktree.branch ? [worktree.branch] : [],
 			),
 		);
@@ -469,16 +475,8 @@ export class GitWorktreeManager implements WorktreeManager {
 				removedWorktrees.push(target);
 				continue;
 			}
-			const fromRunRoot = relative(runRoot, target);
-			if (
-				fromRunRoot === "" ||
-				fromRunRoot === ".." ||
-				fromRunRoot.startsWith(
-					`..${process.platform === "win32" ? "\\" : "/"}`,
-				) ||
-				isAbsolute(fromRunRoot) ||
-				retainedPaths.has(target)
-			) {
+			const fromRunRoot = nodePath.relative(runRoot, target);
+			if (!isPathInside(runRoot, target) || retainedPaths.has(target)) {
 				continue;
 			}
 			const relativeParts = fromRunRoot.split(/[\\/]/);

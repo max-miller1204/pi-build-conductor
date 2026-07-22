@@ -34,6 +34,7 @@
 		"format": "biome check --write .",
 		"format:check": "biome check .",
 		"test": "vitest run",
+		"test:crash-fixture": "vite-node test/fixtures/crash-after-task-commit.ts",
 		"test:upstream": "vitest run test/orchestrator-upstream.test.ts",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit"
@@ -52,6 +53,7 @@
 		"@types/node": "22.19.19",
 		"@types/proper-lockfile": "^4.1.4",
 		"typescript": "5.9.3",
+		"vite-node": "^3.2.4",
 		"vitest": "3.2.7"
 	},
 	"dependencies": {

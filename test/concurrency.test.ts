@@ -354,6 +354,57 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(failed.tasks.dependent?.state).toBe("blocked");
 	});
 
+	it("stops a label-owned worker spawned before worker-id persistence", async () => {
+		const { conductor, run, store, workers } = await setup([
+			task("implementation"),
+		]);
+		await workers.spawn({
+			cwd: "/worktrees/implementation",
+			label: `pi-build-conductor:${run.id}:attempt-1:implementation`,
+		});
+		await workers.spawn({
+			cwd: "/worktrees/unrelated",
+			label: "pi-build-conductor:other-run:attempt-1:unrelated",
+		});
+		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
+		const implementation = approved.tasks.implementation;
+		if (!implementation) {
+			throw new Error("missing recovery task");
+		}
+		await store.save({
+			...approved,
+			tasks: {
+				implementation: {
+					...implementation,
+					state: "running",
+					attemptIds: ["attempt-1"],
+				},
+			},
+			attempts: [
+				{
+					id: "attempt-1",
+					taskId: "implementation",
+					number: 1,
+					state: "prepared",
+					branch: "implementation",
+					worktreePath: "/worktrees/implementation",
+					baseCommit: approved.baseCommit,
+					startedAt: approved.updatedAt,
+				},
+			],
+		});
+
+		const recovered = await conductor.recoverRun(run.id);
+
+		expect(workers.stopOrder).toEqual(["worker-1"]);
+		expect((await workers.status("worker-2")).status).toBe("online");
+		expect(recovered.attempts[0]).toMatchObject({
+			state: "interrupted",
+			error: "Conductor restarted",
+		});
+		expect(recovered.tasks.implementation?.state).toBe("ready");
+	});
+
 	it("recovers every active worker and makes interrupted tasks retryable", async () => {
 		const { conductor, run, store, workers } = await setup([
 			task("first"),
@@ -571,8 +622,8 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(workers.stopOrder).toEqual(["worker-1"]);
 	});
 
-	it("cancels every active worker once without refilling the pool", async () => {
-		const { conductor, run, workers } = await setup([
+	it("preserves cancellation across restart without refilling or restopping", async () => {
+		const { conductor, run, store, workers, worktrees } = await setup([
 			task("first"),
 			task("second"),
 			task("third"),
@@ -582,6 +633,19 @@ describe("bounded dependency-aware concurrency", () => {
 		const cancelled = await result.completion;
 
 		expect(cancelled.state).toBe("cancelled");
+		expect(workers.startOrder).toEqual(["first", "second"]);
+		expect(workers.stopOrder.sort()).toEqual(["worker-1", "worker-2"]);
+
+		const restarted = new BuildConductor({ store, workers, worktrees });
+		const recovered = await restarted.recoverRun(run.id);
+
+		expect(recovered.state).toBe("cancelled");
+		expect(
+			recovered.attempts.every((attempt) => attempt.state === "cancelled"),
+		).toBe(true);
+		expect(
+			recovered.attempts.every((attempt) => attempt.error === "Run cancelled"),
+		).toBe(true);
 		expect(workers.startOrder).toEqual(["first", "second"]);
 		expect(workers.stopOrder.sort()).toEqual(["worker-1", "worker-2"]);
 	});

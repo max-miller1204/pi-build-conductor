@@ -954,6 +954,7 @@ export class BuildConductor {
 				if (actualHead === expectedHead) {
 					break;
 				}
+				// pi-lens-ignore: await-in-loop
 				await this.dependencies.git.verifyIntegratedCommit(
 					run.repositoryRoot,
 					actualHead,
