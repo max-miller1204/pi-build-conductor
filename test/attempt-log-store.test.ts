@@ -53,6 +53,24 @@ describe("AttemptLogStore", () => {
 			{ type: "tool_started", toolName: "read" },
 			{ type: "tool_finished", toolName: "read", isError: false },
 			{ type: "retrying", message: "Temporary failure" },
+			{
+				type: "ui_blocked",
+				requestId: "request-1",
+				method: "confirm",
+			},
+			{
+				type: "ui_decision",
+				requestId: "request-1",
+				method: "confirm",
+				policy: "decline",
+				outcome: "declined",
+			},
+			{
+				type: "ui_resolved",
+				requestId: "request-1",
+				method: "confirm",
+				outcome: "declined",
+			},
 		];
 		for (const event of events) {
 			store.record("run-1", "attempt-1", event);
@@ -71,6 +89,9 @@ describe("AttemptLogStore", () => {
 			message: "Done",
 		});
 		expect(entries.map((entry) => entry.kind)).toEqual([
+			"progress",
+			"progress",
+			"progress",
 			"progress",
 			"progress",
 			"progress",
@@ -161,6 +182,11 @@ describe("AttemptLogStore", () => {
 			type: "tool_started",
 			toolName: "\u001b]0;owned\u0007shell\u007f",
 		});
+		store.record("run-1", "attempt-1", {
+			type: "ui_blocked",
+			requestId: "request\u0000-1",
+			method: "input",
+		});
 		store.recordTerminal(
 			"run-1",
 			"attempt-1",
@@ -177,6 +203,14 @@ describe("AttemptLogStore", () => {
 			{
 				kind: "progress",
 				event: { type: "tool_started", toolName: "shell" },
+			},
+			{
+				kind: "progress",
+				event: {
+					type: "ui_blocked",
+					requestId: "request-1",
+					method: "input",
+				},
 			},
 			{ kind: "terminal", message: "bad\nreason" },
 		]);

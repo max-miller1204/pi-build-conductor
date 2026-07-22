@@ -1,7 +1,11 @@
 import { chmod, mkdir, open, readFile, stat, truncate } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { WorkerProgressEvent } from "../workers/backend.js";
+import type { BlockedWorkerPolicy, WorkerUiMethod } from "../domain/types.js";
+import type {
+	WorkerProgressEvent,
+	WorkerUiResolutionOutcome,
+} from "../workers/backend.js";
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024;
@@ -62,6 +66,26 @@ const TERMINAL_STATUSES: ReadonlySet<AttemptTerminalStatus> = new Set([
 	"cancelled",
 	"interrupted",
 ]);
+const WORKER_UI_METHODS: ReadonlySet<WorkerUiMethod> = new Set([
+	"select",
+	"confirm",
+	"input",
+	"editor",
+]);
+const BLOCKED_WORKER_POLICIES: ReadonlySet<BlockedWorkerPolicy> = new Set([
+	"decline",
+	"cancel",
+]);
+const UI_DECISION_OUTCOMES = new Set(["declined", "cancelled"]);
+const UI_RESOLUTION_OUTCOMES: ReadonlySet<WorkerUiResolutionOutcome> = new Set([
+	"responded",
+	"declined",
+	"cancelled",
+	"request_timeout",
+	"execution_aborted",
+	"stream_closed",
+	"recovery_interrupted",
+]);
 
 function assertSafeId(id: string, kind: "run" | "attempt"): void {
 	if (!SAFE_ID.test(id)) {
@@ -120,6 +144,27 @@ function sanitizeProgressEvent(
 				type: "retrying",
 				message: sanitizeAttemptLogText(event.message),
 			};
+		case "ui_blocked":
+			return {
+				type: "ui_blocked",
+				requestId: sanitizeAttemptLogText(event.requestId),
+				method: event.method,
+			};
+		case "ui_decision":
+			return {
+				type: "ui_decision",
+				requestId: sanitizeAttemptLogText(event.requestId),
+				method: event.method,
+				policy: event.policy,
+				outcome: event.outcome,
+			};
+		case "ui_resolved":
+			return {
+				type: "ui_resolved",
+				requestId: sanitizeAttemptLogText(event.requestId),
+				method: event.method,
+				outcome: event.outcome,
+			};
 		default: {
 			const unsupported: never = event;
 			throw new Error(
@@ -176,6 +221,54 @@ function parseProgressEvent(
 				return {
 					type: "retrying",
 					message: sanitizeAttemptLogText(value.message),
+				};
+			}
+			break;
+		case "ui_blocked":
+			if (
+				typeof value.requestId === "string" &&
+				typeof value.method === "string" &&
+				WORKER_UI_METHODS.has(value.method as WorkerUiMethod)
+			) {
+				return {
+					type: "ui_blocked",
+					requestId: sanitizeAttemptLogText(value.requestId),
+					method: value.method as WorkerUiMethod,
+				};
+			}
+			break;
+		case "ui_decision":
+			if (
+				typeof value.requestId === "string" &&
+				typeof value.method === "string" &&
+				WORKER_UI_METHODS.has(value.method as WorkerUiMethod) &&
+				typeof value.policy === "string" &&
+				BLOCKED_WORKER_POLICIES.has(value.policy as BlockedWorkerPolicy) &&
+				typeof value.outcome === "string" &&
+				UI_DECISION_OUTCOMES.has(value.outcome)
+			) {
+				return {
+					type: "ui_decision",
+					requestId: sanitizeAttemptLogText(value.requestId),
+					method: value.method as WorkerUiMethod,
+					policy: value.policy as BlockedWorkerPolicy,
+					outcome: value.outcome as "declined" | "cancelled",
+				};
+			}
+			break;
+		case "ui_resolved":
+			if (
+				typeof value.requestId === "string" &&
+				typeof value.method === "string" &&
+				WORKER_UI_METHODS.has(value.method as WorkerUiMethod) &&
+				typeof value.outcome === "string" &&
+				UI_RESOLUTION_OUTCOMES.has(value.outcome as WorkerUiResolutionOutcome)
+			) {
+				return {
+					type: "ui_resolved",
+					requestId: sanitizeAttemptLogText(value.requestId),
+					method: value.method as WorkerUiMethod,
+					outcome: value.outcome as WorkerUiResolutionOutcome,
 				};
 			}
 			break;

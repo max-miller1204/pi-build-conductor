@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type BuildConductorDependencies,
+	blockedWorkerResponse,
 	BuildConductor as ProductionBuildConductor,
 } from "../src/conductor.js";
 import { approveRun } from "../src/domain/run.js";
+import type {
+	BlockedWorkerPolicy,
+	WorkerUiRequest,
+	WorkerUiResponse,
+} from "../src/domain/types.js";
 import type { GitClient, RepositoryInfo } from "../src/git/git.js";
 import type {
 	PrepareTaskWorktreeInput,
@@ -96,6 +102,156 @@ class FakeWorkers implements WorkerBackend {
 
 	async stop(workerId: string): Promise<void> {
 		this.calls.push({ operation: "stop", value: workerId });
+	}
+}
+
+class UiPromptWorkers extends FakeWorkers {
+	readonly responses: WorkerUiResponse[] = [];
+	readonly request: WorkerUiRequest = {
+		id: "ui-request-1",
+		method: "confirm",
+		title: "Allow privileged action?",
+		message: "The worker requested permission",
+	};
+
+	constructor(private readonly holdResponse = false) {
+		super();
+	}
+
+	override startPrompt(
+		workerId: string,
+		prompt: string,
+		options: WorkerExecutionOptions = {},
+	): Promise<WorkerExecution> {
+		const review = reviewResult(prompt);
+		if (review) {
+			return Promise.resolve({ completion: Promise.resolve(review) });
+		}
+		this.calls.push({ operation: "prompt", value: { workerId, prompt } });
+		let settled = false;
+		const completion = new Promise<WorkerExecutionResult>((resolve) => {
+			const settle = (result: WorkerExecutionResult) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				resolve(result);
+			};
+			options.onEvent?.({
+				type: "ui_blocked",
+				requestId: this.request.id,
+				method: this.request.method,
+			});
+			const handling = options.onUiRequest?.(this.request, async (response) => {
+				if (this.holdResponse) {
+					await new Promise<void>((_resolve, reject) => {
+						options.signal?.addEventListener(
+							"abort",
+							() => reject(new Error("response stream aborted")),
+							{ once: true },
+						);
+					});
+				}
+				this.responses.push(response);
+				options.onEvent?.({
+					type: "ui_resolved",
+					requestId: this.request.id,
+					method: this.request.method,
+					outcome: response.kind === "confirmation" ? "declined" : "cancelled",
+				});
+			});
+			void Promise.resolve(handling).then(
+				() => settle({ status: "succeeded" }),
+				(error: unknown) =>
+					settle({
+						status: options.signal?.aborted ? "aborted" : "failed",
+						error: error instanceof Error ? error.message : String(error),
+					}),
+			);
+			options.signal?.addEventListener(
+				"abort",
+				() => {
+					options.onEvent?.({
+						type: "ui_resolved",
+						requestId: this.request.id,
+						method: this.request.method,
+						outcome: "execution_aborted",
+					});
+					const reason = options.signal?.reason;
+					settle({
+						status: "aborted",
+						error: reason instanceof Error ? reason.message : "aborted",
+					});
+				},
+				{ once: true },
+			);
+		});
+		return Promise.resolve({ completion });
+	}
+}
+
+class ConcurrentUiPromptWorkers extends FakeWorkers {
+	readonly responses: Array<{ requestId: string; response: WorkerUiResponse }> =
+		[];
+	private releaseSecond: (() => void) | undefined;
+
+	hasPendingSecondResponse(): boolean {
+		return this.releaseSecond !== undefined;
+	}
+
+	releaseSecondResponse(): void {
+		this.releaseSecond?.();
+	}
+
+	override startPrompt(
+		workerId: string,
+		prompt: string,
+		options: WorkerExecutionOptions = {},
+	): Promise<WorkerExecution> {
+		const review = reviewResult(prompt);
+		if (review) {
+			return Promise.resolve({ completion: Promise.resolve(review) });
+		}
+		this.calls.push({ operation: "prompt", value: { workerId, prompt } });
+		const requests: WorkerUiRequest[] = [
+			{
+				id: "ui-request-first",
+				method: "confirm",
+				title: "First",
+				message: "First request",
+			},
+			{
+				id: "ui-request-second",
+				method: "input",
+				title: "Second",
+			},
+		];
+		const handling = requests.map((request) => {
+			options.onEvent?.({
+				type: "ui_blocked",
+				requestId: request.id,
+				method: request.method,
+			});
+			return options.onUiRequest?.(request, async (response) => {
+				if (request.id === "ui-request-second") {
+					await new Promise<void>((resolve) => {
+						this.releaseSecond = resolve;
+					});
+				}
+				this.responses.push({ requestId: request.id, response });
+				options.onEvent?.({
+					type: "ui_resolved",
+					requestId: request.id,
+					method: request.method,
+					outcome: response.kind === "confirmation" ? "declined" : "cancelled",
+				});
+			});
+		});
+		return Promise.resolve({
+			completion: Promise.all(handling).then(
+				(): WorkerExecutionResult => ({ status: "succeeded" }),
+			),
+		});
 	}
 }
 
@@ -530,6 +686,186 @@ describe("BuildConductor vertical slice", () => {
 		expect(workers.calls.filter((call) => call.operation === "stop")).toEqual([
 			{ operation: "stop", value: "worker-1" },
 		]);
+	});
+
+	it.each([
+		["decline", { kind: "confirmation", confirmed: false }],
+		["cancel", { kind: "cancelled" }],
+	] as const)(
+		"persists and journals a blocked prompt with the %s policy",
+		async (policy, expectedResponse) => {
+			const directory = await mkdtemp(
+				join(tmpdir(), `pi-build-conductor-ui-${policy}-`),
+			);
+			directories.push(directory);
+			const store = new RunStore(directory);
+			const logs = new AttemptLogStore(join(directory, "output"));
+			const workers = new UiPromptWorkers();
+			const conductor = new BuildConductor({
+				store,
+				workers,
+				worktrees: new FakeWorktrees(),
+				attemptLogs: logs,
+				blockedWorkerPolicy: policy as BlockedWorkerPolicy,
+			});
+			const run = await createSingleTaskRun(conductor);
+			const snapshots: import("../src/domain/types.js").BuildRun[] = [];
+
+			const result = await conductor.approveAndLaunch(
+				run,
+				repository,
+				undefined,
+				{
+					onRunUpdated: (updated) => snapshots.push(structuredClone(updated)),
+				},
+			);
+			const completed = await result.completion;
+			const attemptId = result.launches[0]?.attempt.id;
+			if (!attemptId) {
+				throw new Error("Missing launched attempt");
+			}
+			await logs.flush(run.id, attemptId);
+			const entries = await logs.readTail(run.id, attemptId);
+
+			expect(workers.responses[0]).toEqual(expectedResponse);
+			expect(
+				snapshots.some(
+					(snapshot) =>
+						snapshot.blockedWorkers[0]?.requestId === "ui-request-1",
+				),
+			).toBe(true);
+			expect(completed.blockedWorkers).toEqual([]);
+			expect(JSON.stringify(snapshots)).not.toContain(
+				"Allow privileged action?",
+			);
+			expect(JSON.stringify(entries)).not.toContain(
+				"The worker requested permission",
+			);
+			expect(entries).toContainEqual(
+				expect.objectContaining({
+					kind: "progress",
+					event: expect.objectContaining({
+						type: "ui_decision",
+						policy,
+					}),
+				}),
+			);
+		},
+	);
+
+	it("keeps concurrent dialogs blocked until each request resolves", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-concurrent-ui-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new ConcurrentUiPromptWorkers();
+		const conductor = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+		});
+		const run = await createSingleTaskRun(conductor);
+		const result = await conductor.approveAndLaunch(run, repository);
+
+		await vi.waitFor(async () => {
+			expect(
+				(await store.load(run.id)).blockedWorkers.map(
+					(blocked) => blocked.requestId,
+				),
+			).toEqual(["ui-request-second"]);
+			expect(workers.hasPendingSecondResponse()).toBe(true);
+		});
+		workers.releaseSecondResponse();
+		const completed = await result.completion;
+
+		expect(completed.blockedWorkers).toEqual([]);
+		expect(workers.responses).toHaveLength(2);
+		expect(workers.responses).toEqual(
+			expect.arrayContaining([
+				{
+					requestId: "ui-request-first",
+					response: { kind: "confirmation", confirmed: false },
+				},
+				{
+					requestId: "ui-request-second",
+					response: { kind: "cancelled" },
+				},
+			]),
+		);
+	});
+
+	it("times out and recovers scheduling after a worker stays blocked", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-ui-timeout-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const logs = new AttemptLogStore(join(directory, "output"));
+		const workers = new UiPromptWorkers(true);
+		const conductor = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+			attemptLogs: logs,
+			workerTimeoutMs: 10,
+		});
+		const run = await createSingleTaskRun(conductor);
+		const result = await conductor.approveAndLaunch(run, repository);
+		await vi.waitFor(async () =>
+			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
+		);
+
+		const timedOut = await result.completion;
+
+		expect(timedOut.state).toBe("failed");
+		expect(timedOut.blockedWorkers).toEqual([]);
+		expect(timedOut.attempts[0]?.error).toBe(
+			"Worker execution timed out after 10ms",
+		);
+		expect(workers.responses).toEqual([]);
+	});
+
+	it("clears a blocked prompt when the run is cancelled", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-ui-cancel-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new UiPromptWorkers(true);
+		const conductor = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+		});
+		const run = await createSingleTaskRun(conductor);
+		const result = await conductor.approveAndLaunch(run, repository);
+		await vi.waitFor(async () =>
+			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
+		);
+
+		const cancelled = await conductor.cancelRun(await store.load(run.id));
+		const completed = await result.completion;
+
+		expect(cancelled.blockedWorkers).toEqual([]);
+		expect(completed.state).toBe("cancelled");
+		expect(completed.blockedWorkers).toEqual([]);
+		expect(workers.responses).toEqual([]);
+	});
+
+	it("maps only conservative blocked-worker responses", () => {
+		const request: WorkerUiRequest = {
+			id: "request",
+			method: "select",
+			title: "Choose",
+			options: ["unsafe"],
+		};
+		expect(blockedWorkerResponse("decline", request)).toEqual({
+			kind: "cancelled",
+		});
+		expect(blockedWorkerResponse("cancel", request)).toEqual({
+			kind: "cancelled",
+		});
 	});
 
 	it("times out a worker and cleans up the process", async () => {

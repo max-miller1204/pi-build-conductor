@@ -13,6 +13,7 @@ import type {
 	PrepareTaskWorktreeInput,
 	WorktreeManager,
 } from "../src/git/worktrees.js";
+import { AttemptLogStore } from "../src/storage/attempt-log-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import type {
 	SpawnWorkerRequest,
@@ -406,7 +407,7 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("recovers every active worker and makes interrupted tasks retryable", async () => {
-		const { conductor, run, store, workers } = await setup([
+		const { run, store, workers, worktrees } = await setup([
 			task("first"),
 			task("second"),
 		]);
@@ -463,10 +464,27 @@ describe("bounded dependency-aware concurrency", () => {
 					startedAt: approved.updatedAt,
 				},
 			],
+			blockedWorkers: [
+				{
+					attemptKind: "task",
+					attemptId: "first-1",
+					workerId: "worker-1",
+					blockedAt: approved.updatedAt,
+					requestId: "request-before-crash",
+					method: "editor",
+				},
+			],
 		};
 		await store.save(active);
+		const logs = new AttemptLogStore(join(store.directory, "output"));
+		const recovering = new BuildConductor({
+			store,
+			workers,
+			worktrees,
+			attemptLogs: logs,
+		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await recovering.recoverRun(run.id);
 
 		expect(workers.stopOrder).toEqual(["worker-1", "worker-2", "worker-3"]);
 		expect(recovered.attempts.map((attempt) => attempt.state)).toEqual([
@@ -477,6 +495,18 @@ describe("bounded dependency-aware concurrency", () => {
 			"ready",
 			"ready",
 		]);
+		expect(recovered.blockedWorkers).toEqual([]);
+		expect(await logs.readTail(run.id, "first-1")).toContainEqual(
+			expect.objectContaining({
+				kind: "progress",
+				event: {
+					type: "ui_resolved",
+					requestId: "request-before-crash",
+					method: "editor",
+					outcome: "recovery_interrupted",
+				},
+			}),
+		);
 	});
 
 	it("recovers a recorded commit by retrying cleanup without recommitting", async () => {

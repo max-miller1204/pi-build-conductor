@@ -21,6 +21,7 @@ import {
 	RUN_SCHEMA_VERSION,
 	type RunState,
 	type TaskState,
+	type WorkerUiMethod,
 } from "../domain/types.js";
 
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -97,6 +98,12 @@ const PLAN_REVISION_SOURCES = new Set([
 	"restored",
 	"migrated",
 ]);
+const WORKER_UI_METHODS: ReadonlySet<WorkerUiMethod> = new Set([
+	"select",
+	"confirm",
+	"input",
+	"editor",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -111,6 +118,13 @@ function assertString(value: unknown, path: string): asserts value is string {
 function migrateLegacyRun(
 	value: Record<string, unknown>,
 ): Record<string, unknown> {
+	if (value.schemaVersion === 6) {
+		return {
+			...value,
+			schemaVersion: RUN_SCHEMA_VERSION,
+			blockedWorkers: [],
+		};
+	}
 	if (value.schemaVersion !== 4 && value.schemaVersion !== 5) {
 		return value;
 	}
@@ -129,6 +143,7 @@ function migrateLegacyRun(
 				maxConcurrentWorkers: value.maxConcurrentWorkers,
 			},
 		],
+		blockedWorkers: [],
 		...(approved ? { approvedPlanRevision: 1 } : {}),
 	};
 }
@@ -719,6 +734,82 @@ export function validateStoredRun(value: unknown): BuildRun {
 			throw new Error(`Duplicate repair attempt id: ${String(attempt.id)}`);
 		}
 		repairAttemptsById.set(attempt.id as string, attempt);
+	}
+	if (!Array.isArray(value.blockedWorkers)) {
+		throw new Error("run.blockedWorkers must be an array");
+	}
+	const blockedRequestKeys = new Set<string>();
+	for (const [index, blocked] of value.blockedWorkers.entries()) {
+		const path = `run.blockedWorkers[${index}]`;
+		if (!isRecord(blocked)) {
+			throw new Error(`${path} must be an object`);
+		}
+		for (const field of [
+			"attemptId",
+			"workerId",
+			"blockedAt",
+			"requestId",
+		] as const) {
+			assertString(blocked[field], `${path}.${field}`);
+		}
+		for (const sensitiveField of [
+			"title",
+			"message",
+			"options",
+			"placeholder",
+			"prefill",
+		] as const) {
+			if (blocked[sensitiveField] !== undefined) {
+				throw new Error(`${path}.${sensitiveField} must not be persisted`);
+			}
+		}
+		if (
+			typeof blocked.method !== "string" ||
+			!WORKER_UI_METHODS.has(blocked.method as WorkerUiMethod)
+		) {
+			throw new Error(`${path}.method is invalid`);
+		}
+		if (
+			blocked.attemptKind !== "task" &&
+			blocked.attemptKind !== "review" &&
+			blocked.attemptKind !== "repair"
+		) {
+			throw new Error(`${path}.attemptKind is invalid`);
+		}
+		if (blocked.timeoutAt !== undefined) {
+			assertString(blocked.timeoutAt, `${path}.timeoutAt`);
+		}
+		if ((blocked.requestId as string).length > 256) {
+			throw new Error(`${path}.requestId exceeds 256 characters`);
+		}
+		const key = `${String(blocked.workerId)}\0${String(blocked.requestId)}`;
+		if (blockedRequestKeys.has(key)) {
+			throw new Error(
+				`Duplicate blocked worker request ${String(blocked.requestId)} for ${String(blocked.workerId)}`,
+			);
+		}
+		blockedRequestKeys.add(key);
+		let attempt: Record<string, unknown> | undefined;
+		switch (blocked.attemptKind) {
+			case "task":
+				attempt = attemptsById.get(blocked.attemptId as string);
+				break;
+			case "review":
+				attempt = reviewAttemptsById.get(blocked.attemptId as string);
+				break;
+			case "repair":
+				attempt = repairAttemptsById.get(blocked.attemptId as string);
+				break;
+		}
+		if (!attempt) {
+			throw new Error(`${path}.attemptId references an unknown attempt`);
+		}
+		if (attempt.workerId !== blocked.workerId) {
+			throw new Error(`${path}.workerId does not match its attempt`);
+		}
+		if (!isActiveAttemptState(attempt.state as AttemptState)) {
+			throw new Error(`${path} must reference an active attempt`);
+		}
 	}
 	if (value.integrationHead !== expectedIntegrationHead) {
 		throw new Error(
@@ -1438,16 +1529,13 @@ export class RunStore {
 		try {
 			const raw = parseJson(await readFile(path, "utf8"), path);
 			const validated = validateStoredRun(raw);
-			if (
-				isRecord(raw) &&
-				(raw.schemaVersion === 4 || raw.schemaVersion === 5)
-			) {
+			if (isRecord(raw) && [4, 5, 6].includes(Number(raw.schemaVersion))) {
 				return this.withLock(runId, async () => {
 					const latestRaw = parseJson(await readFile(path, "utf8"), path);
 					const migrated = validateStoredRun(latestRaw);
 					if (
 						isRecord(latestRaw) &&
-						(latestRaw.schemaVersion === 4 || latestRaw.schemaVersion === 5)
+						[4, 5, 6].includes(Number(latestRaw.schemaVersion))
 					) {
 						await this.writeAtomic(migrated);
 					}

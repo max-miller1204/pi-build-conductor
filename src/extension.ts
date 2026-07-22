@@ -16,6 +16,7 @@ import {
 import { validateTaskPlan } from "./domain/dag.js";
 import { retryableRunWork } from "./domain/run-control.js";
 import {
+	type BlockedWorkerPolicy,
 	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
@@ -118,6 +119,16 @@ function configuredWorkerTimeoutMs(): number | undefined {
 	return timeout;
 }
 
+function configuredBlockedWorkerPolicy(): BlockedWorkerPolicy {
+	const value = process.env.PI_BUILD_WORKER_UI_POLICY ?? "decline";
+	if (value !== "decline" && value !== "cancel") {
+		throw new Error(
+			"PI_BUILD_WORKER_UI_POLICY must be either decline or cancel",
+		);
+	}
+	return value;
+}
+
 function configuredValidationTimeoutMs(): number | undefined {
 	const value = process.env.PI_BUILD_VALIDATION_TIMEOUT_MS;
 	if (value === undefined) {
@@ -173,6 +184,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
 	const workers = new OfficialOrchestratorBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
+	const blockedWorkerPolicy = configuredBlockedWorkerPolicy();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
 	const finalValidationTimeoutMs = configuredFinalValidationTimeoutMs();
 	const conductor = new BuildConductor({
@@ -191,6 +203,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		}),
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
 		attemptLogs,
+		blockedWorkerPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	return { attemptLogs, conductor, store, workers };
@@ -293,6 +306,21 @@ function attemptLogText(entries: readonly AttemptLogEntry[]): string {
 				break;
 			case "retrying":
 				line(`[${entry.timestamp}] retrying: ${entry.event.message}`);
+				break;
+			case "ui_blocked":
+				line(
+					`[${entry.timestamp}] worker blocked on ${entry.event.method} request ${entry.event.requestId}`,
+				);
+				break;
+			case "ui_decision":
+				line(
+					`[${entry.timestamp}] worker UI policy ${entry.event.policy}: ${entry.event.outcome} ${entry.event.method} request ${entry.event.requestId}`,
+				);
+				break;
+			case "ui_resolved":
+				line(
+					`[${entry.timestamp}] worker UI request ${entry.event.requestId} resolved: ${entry.event.outcome}`,
+				);
 				break;
 		}
 	}
@@ -619,6 +647,12 @@ function progressText(progress: WorkerLifecycleProgress): string | undefined {
 				: `${progress.taskId}: running`;
 		case "retrying":
 			return `${progress.taskId}: retrying`;
+		case "ui_blocked":
+			return `${progress.taskId}: waiting on ${progress.event.method}`;
+		case "ui_decision":
+			return `${progress.taskId}: ${progress.event.outcome} ${progress.event.method}`;
+		case "ui_resolved":
+			return `${progress.taskId}: running`;
 		default:
 			return undefined;
 	}
@@ -643,6 +677,15 @@ function taskStateSummary(run: BuildRun): string {
 			return count ? [`${count} ${state}`] : [];
 		})
 		.join(", ");
+}
+
+function workerBlockSummary(run: BuildRun): string {
+	if (run.blockedWorkers.length === 0) {
+		return "Worker prompts: none";
+	}
+	return `Worker prompts: ${run.blockedWorkers
+		.map((blocked) => `${blocked.attemptId} waiting on ${blocked.method}`)
+		.join(", ")}`;
 }
 
 function reviewStateSummary(run: BuildRun): string {
@@ -678,11 +721,17 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 			}
 		},
 		onRunUpdated: (run) => {
-			ctx.ui.setStatus(runUiKey(run.id), taskStateSummary(run));
+			ctx.ui.setStatus(
+				runUiKey(run.id),
+				run.blockedWorkers.length > 0
+					? `${run.blockedWorkers.length} worker prompt(s) blocked`
+					: taskStateSummary(run),
+			);
 			ctx.ui.setWidget(runUiKey(run.id), [
 				`Build ${run.id}`,
 				`Run: ${run.state}`,
 				`Tasks: ${taskStateSummary(run)}`,
+				workerBlockSummary(run),
 				reviewStateSummary(run),
 				`Integration head: ${run.integrationHead.slice(0, 12)}`,
 			]);

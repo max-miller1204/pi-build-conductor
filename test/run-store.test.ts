@@ -93,16 +93,17 @@ describe("RunStore", () => {
 		const first = await store.load(run.id);
 		const second = await store.load(run.id);
 		expect(first).toMatchObject({
-			schemaVersion: 6,
+			schemaVersion: 7,
 			revision: 0,
 			planRevision: 1,
+			blockedWorkers: [],
 		});
 		expect(second).toEqual(first);
 		const persisted = await readFile(
 			join(store.directory, `${run.id}.json`),
 			"utf8",
 		);
-		expect(persisted).toContain('"schemaVersion": 6');
+		expect(persisted).toContain('"schemaVersion": 7');
 		expect(persisted).toContain('"revision": 0');
 	});
 
@@ -123,7 +124,7 @@ describe("RunStore", () => {
 
 		const migrated = await store.load(run.id);
 		expect(migrated).toMatchObject({
-			schemaVersion: 6,
+			schemaVersion: 7,
 			planRevision: 1,
 			approvedPlanRevision: 1,
 			planRevisions: [
@@ -134,6 +135,25 @@ describe("RunStore", () => {
 				},
 			],
 		});
+	});
+
+	it("migrates schema 6 snapshots with an empty blocked-worker projection", async () => {
+		const store = await temporaryStore();
+		const { blockedWorkers: _blockedWorkers, ...run } = createRun();
+		await writeFile(
+			join(store.directory, `${run.id}.json`),
+			`${JSON.stringify({ ...run, schemaVersion: 6 }, null, 2)}\n`,
+			"utf8",
+		);
+
+		const migrated = await store.load(run.id);
+		expect(migrated).toMatchObject({
+			schemaVersion: 7,
+			blockedWorkers: [],
+		});
+		expect(
+			await readFile(join(store.directory, `${run.id}.json`), "utf8"),
+		).toContain('"blockedWorkers": []');
 	});
 
 	it("keeps current plans, task projections, and historical revisions isolated", () => {
@@ -515,6 +535,80 @@ describe("RunStore", () => {
 				],
 			}),
 		).toThrow(/Duplicate attempt number 1 for task implementation/);
+	});
+
+	it("validates blocked workers against active typed attempts", () => {
+		const run = approveRun(createRun(), "2026-01-01T00:01:00.000Z");
+		const implementation = run.tasks.implementation;
+		if (!implementation) {
+			throw new Error("Missing implementation task");
+		}
+		const active: BuildRun = {
+			...run,
+			tasks: {
+				implementation: {
+					...implementation,
+					state: "running",
+					attemptIds: ["attempt-1"],
+				},
+			},
+			attempts: [
+				{
+					id: "attempt-1",
+					taskId: "implementation",
+					number: 1,
+					state: "running",
+					branch: "conductor/run-1/task/implementation/attempt-1",
+					worktreePath: "/tmp/worktree-1",
+					baseCommit: run.baseCommit,
+					workerId: "worker-1",
+					startedAt: run.updatedAt,
+				},
+			],
+			blockedWorkers: [
+				{
+					attemptKind: "task",
+					attemptId: "attempt-1",
+					workerId: "worker-1",
+					blockedAt: run.updatedAt,
+					requestId: "request-1",
+					method: "confirm",
+				},
+			],
+		};
+
+		expect(validateStoredRun(active).blockedWorkers).toEqual(
+			active.blockedWorkers,
+		);
+		expect(() =>
+			validateStoredRun({
+				...active,
+				blockedWorkers: [
+					...active.blockedWorkers,
+					...(active.blockedWorkers[0]
+						? [{ ...active.blockedWorkers[0] }]
+						: []),
+				],
+			}),
+		).toThrow(/Duplicate blocked worker request/);
+		expect(() =>
+			validateStoredRun({
+				...active,
+				blockedWorkers: active.blockedWorkers.map((blocked) => ({
+					...blocked,
+					workerId: "other-worker",
+				})),
+			}),
+		).toThrow(/workerId does not match/);
+		expect(() =>
+			validateStoredRun({
+				...active,
+				blockedWorkers: active.blockedWorkers.map((blocked) => ({
+					...blocked,
+					title: "sensitive title",
+				})),
+			}),
+		).toThrow(/title must not be persisted/);
 	});
 
 	it("rejects malformed attempt records", () => {

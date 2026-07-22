@@ -39,7 +39,7 @@ function runWith(
 		tasks: definitions,
 	};
 	return {
-		schemaVersion: 6,
+		schemaVersion: 7,
 		revision: 0,
 		id: "run-1",
 		state: "running",
@@ -78,6 +78,7 @@ function runWith(
 		reviewRounds: [],
 		reviewAttempts: [],
 		repairAttempts: [],
+		blockedWorkers: [],
 		finalValidationAttempts: [],
 		maxConcurrentWorkers,
 		createdAt: "2026-01-01T00:00:00.000Z",

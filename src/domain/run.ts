@@ -110,6 +110,7 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		reviewRounds: [],
 		reviewAttempts: [],
 		repairAttempts: [],
+		blockedWorkers: [],
 		finalValidationAttempts: [],
 		maxConcurrentWorkers: input.maxConcurrentWorkers,
 		createdAt: input.now,
@@ -220,7 +221,7 @@ export function approveRun(
 }
 
 export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
-	let changed = false;
+	let changed = run.blockedWorkers.length > 0;
 	const attempts = run.attempts.map((attempt) => {
 		if (
 			attempt.state !== "prepared" &&
@@ -302,6 +303,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 		attempts,
 		reviewAttempts,
 		repairAttempts,
+		blockedWorkers: [],
 		finalValidationAttempts,
 		tasks,
 		updatedAt: now,

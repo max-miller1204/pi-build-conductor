@@ -24,6 +24,99 @@ afterEach(async () => {
 	);
 });
 
+interface UiRequestFrame {
+	type: "extension_ui_request";
+	id: string;
+	method: string;
+	title?: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+	prefill?: string;
+	timeout?: number;
+}
+
+async function fakeUiOrchestrator(
+	uiRequest: UiRequestFrame,
+	options: {
+		requestBeforePromptResponse?: boolean;
+		settleAfterRequestTimeoutMs?: number;
+	} = {},
+): Promise<{ socketPath: string; requests: unknown[] }> {
+	const directory = await mkdtemp(
+		join(tmpdir(), "pi-build-conductor-ui-orchestrator-"),
+	);
+	directories.push(directory);
+	const socketPath = join(directory, "orchestrator.sock");
+	const requests: unknown[] = [];
+	const server = createServer((socket) => {
+		let buffer = "";
+		let streaming = false;
+		const settle = () => {
+			socket.write(
+				`${JSON.stringify({
+					type: "agent_end",
+					messages: [
+						{
+							role: "assistant",
+							stopReason: "stop",
+							content: [{ type: "text", text: "Dialog handled" }],
+						},
+					],
+				})}\n${JSON.stringify({ type: "agent_settled" })}\n`,
+			);
+		};
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString();
+			for (;;) {
+				const newline = buffer.indexOf("\n");
+				if (newline === -1) {
+					return;
+				}
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				const request = JSON.parse(line) as {
+					id?: string;
+					type: string;
+				};
+				requests.push(request);
+				if (!streaming && request.type === "rpc_stream") {
+					streaming = true;
+					socket.write(`${JSON.stringify({ type: "rpc_ready", ok: true })}\n`);
+					continue;
+				}
+				if (request.type === "prompt") {
+					const response = {
+						id: request.id,
+						type: "response",
+						command: "prompt",
+						success: true,
+					};
+					const frames = options.requestBeforePromptResponse
+						? [uiRequest, response]
+						: [response, uiRequest];
+					for (const frame of frames) {
+						socket.write(`${JSON.stringify(frame)}\n`);
+					}
+					if (options.settleAfterRequestTimeoutMs !== undefined) {
+						setTimeout(settle, options.settleAfterRequestTimeoutMs).unref();
+					}
+					continue;
+				}
+				if (request.type === "extension_ui_response") {
+					settle();
+				}
+			}
+		});
+	});
+	servers.push(server);
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	return { socketPath, requests };
+}
+
 async function fakeOrchestrator(
 	options: {
 		failExecution?: boolean;
@@ -198,6 +291,247 @@ describe("OfficialOrchestratorBackend", () => {
 				message: "Implement the task",
 			},
 		]);
+	});
+
+	it.each([
+		{
+			name: "select",
+			request: {
+				type: "extension_ui_request" as const,
+				id: "dialog-select",
+				method: "select",
+				title: "Choose safely",
+				options: ["first", "second"],
+			},
+			answer: { kind: "value" as const, value: "second" },
+			wire: {
+				type: "extension_ui_response",
+				id: "dialog-select",
+				value: "second",
+			},
+			outcome: "responded",
+		},
+		{
+			name: "confirm",
+			request: {
+				type: "extension_ui_request" as const,
+				id: "dialog-confirm",
+				method: "confirm",
+				title: "Allow action?",
+				message: "This changes files",
+			},
+			answer: { kind: "confirmation" as const, confirmed: false },
+			wire: {
+				type: "extension_ui_response",
+				id: "dialog-confirm",
+				confirmed: false,
+			},
+			outcome: "declined",
+		},
+		{
+			name: "input",
+			request: {
+				type: "extension_ui_request" as const,
+				id: "dialog-input",
+				method: "input",
+				title: "Provide secret",
+				placeholder: "token",
+			},
+			answer: { kind: "cancelled" as const },
+			wire: {
+				type: "extension_ui_response",
+				id: "dialog-input",
+				cancelled: true,
+			},
+			outcome: "cancelled",
+		},
+		{
+			name: "editor",
+			request: {
+				type: "extension_ui_request" as const,
+				id: "dialog-editor",
+				method: "editor",
+				title: "Edit content",
+				prefill: "original",
+			},
+			answer: { kind: "value" as const, value: "updated" },
+			wire: {
+				type: "extension_ui_response",
+				id: "dialog-editor",
+				value: "updated",
+			},
+			outcome: "responded",
+		},
+	])(
+		"answers a blocking $name request on its owning stream",
+		async ({ request, answer, wire, outcome }) => {
+			const fake = await fakeUiOrchestrator(request, {
+				requestBeforePromptResponse: true,
+			});
+			const backend = new OfficialOrchestratorBackend({
+				socketPath: fake.socketPath,
+			});
+			const events: unknown[] = [];
+
+			const execution = await backend.startPrompt("worker-1", "Implement it", {
+				onEvent: (event) => events.push(event),
+				onUiRequest: async (_received, respond) => respond(answer),
+			});
+
+			expect(await execution.completion).toEqual({
+				status: "succeeded",
+				output: "Dialog handled",
+			});
+			expect(fake.requests[2]).toEqual(wire);
+			expect(events).toContainEqual({
+				type: "ui_blocked",
+				requestId: request.id,
+				method: request.method,
+			});
+			expect(events).toContainEqual({
+				type: "ui_resolved",
+				requestId: request.id,
+				method: request.method,
+				outcome,
+			});
+		},
+	);
+
+	it("ignores fire-and-forget extension UI events", async () => {
+		const fake = await fakeUiOrchestrator(
+			{
+				type: "extension_ui_request",
+				id: "notification",
+				method: "notify",
+				message: "Worker notice",
+			},
+			{ settleAfterRequestTimeoutMs: 5 },
+		);
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		const events: string[] = [];
+		let dialogRequests = 0;
+
+		const execution = await backend.startPrompt("worker-1", "Implement it", {
+			onEvent: (event) => events.push(event.type),
+			onUiRequest: () => {
+				dialogRequests += 1;
+			},
+		});
+
+		expect(await execution.completion).toMatchObject({ status: "succeeded" });
+		expect(dialogRequests).toBe(0);
+		expect(events).not.toContain("ui_blocked");
+		expect(
+			fake.requests.filter(
+				(request) =>
+					(request as { type?: string }).type === "extension_ui_response",
+			),
+		).toEqual([]);
+	});
+
+	it("expires a timed request and rejects a late response", async () => {
+		const fake = await fakeUiOrchestrator(
+			{
+				type: "extension_ui_request",
+				id: "timed-dialog",
+				method: "input",
+				title: "Input",
+				timeout: 5,
+			},
+			{ settleAfterRequestTimeoutMs: 30 },
+		);
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		let lateResponse: (() => Promise<void>) | undefined;
+		const events: string[] = [];
+
+		const execution = await backend.startPrompt("worker-1", "Implement it", {
+			onEvent: (event) => {
+				if (event.type === "ui_resolved") {
+					events.push(event.outcome);
+				}
+			},
+			onUiRequest: (_request, respond) => {
+				lateResponse = () => respond({ kind: "cancelled" });
+			},
+		});
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		if (!lateResponse) {
+			throw new Error("UI request was not observed");
+		}
+		await expect(lateResponse()).rejects.toThrow(/no longer pending/);
+		expect(await execution.completion).toMatchObject({ status: "succeeded" });
+		expect(events).toContain("request_timeout");
+		expect(
+			fake.requests.filter(
+				(request) =>
+					(request as { type?: string }).type === "extension_ui_response",
+			),
+		).toEqual([]);
+	});
+
+	it("invalidates a blocked request when execution is cancelled", async () => {
+		const fake = await fakeUiOrchestrator({
+			type: "extension_ui_request",
+			id: "cancelled-dialog",
+			method: "editor",
+			title: "Editor",
+		});
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		const controller = new AbortController();
+		const outcomes: string[] = [];
+		const execution = await backend.startPrompt("worker-1", "Implement it", {
+			signal: controller.signal,
+			onEvent: (event) => {
+				if (event.type === "ui_resolved") {
+					outcomes.push(event.outcome);
+				}
+			},
+			onUiRequest: () => {},
+		});
+
+		controller.abort(new Error("Run cancelled"));
+		expect(await execution.completion).toEqual({
+			status: "aborted",
+			error: "Run cancelled",
+		});
+		expect(outcomes).toContain("execution_aborted");
+	});
+
+	it("records cancellation before prompt acceptance as an execution abort", async () => {
+		const fake = await fakeUiOrchestrator(
+			{
+				type: "extension_ui_request",
+				id: "early-cancelled-dialog",
+				method: "confirm",
+				title: "Confirm",
+				message: "Continue?",
+			},
+			{ requestBeforePromptResponse: true },
+		);
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		const controller = new AbortController();
+		const outcomes: string[] = [];
+
+		await expect(
+			backend.startPrompt("worker-1", "Implement it", {
+				signal: controller.signal,
+				onEvent: (event) => {
+					if (event.type === "ui_resolved") {
+						outcomes.push(event.outcome);
+					}
+				},
+				onUiRequest: () => controller.abort(new Error("Run cancelled")),
+			}),
+		).rejects.toThrow("Run cancelled");
+		expect(outcomes).toEqual(["execution_aborted"]);
 	});
 
 	it("reports terminal Pi failures", async () => {

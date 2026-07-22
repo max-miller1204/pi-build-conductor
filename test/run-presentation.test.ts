@@ -174,6 +174,17 @@ function populatedRun(): BuildRun {
 				startedAt: "2026-01-01T00:20:00.000Z",
 			},
 		],
+		blockedWorkers: [
+			{
+				attemptKind: "repair",
+				attemptId: "repair-a",
+				workerId: "worker-repair",
+				blockedAt: "2026-01-01T00:25:00.000Z",
+				requestId: "request-a",
+				method: "input",
+				timeoutAt: "2026-01-01T00:26:00.000Z",
+			},
+		],
 		finalValidationAttempts: [
 			{
 				id: "final-a",
@@ -228,6 +239,8 @@ describe("run inspection presentation", () => {
 		);
 		expect(output).toContain("Created: 2026-01-01T00:00:00.000Z");
 		expect(output).toContain("core [failed]");
+		expect(output).toContain("Blocked workers: 1");
+		expect(output).toContain("repair-a / worker-repair waiting on input");
 		expect(output).toContain("Next: /build-follow run-inspect repair-a");
 		expect(output).not.toContain("\u001b");
 	});
@@ -279,6 +292,10 @@ describe("run inspection presentation", () => {
 			expect(output).toContain(detail);
 			expect(output).toContain(evidence);
 			expect(output).toContain("Next:");
+			if (attemptId === "repair-a") {
+				expect(output).toContain("Worker prompts: 1 pending");
+				expect(output).toContain("waiting on input");
+			}
 		},
 	);
 

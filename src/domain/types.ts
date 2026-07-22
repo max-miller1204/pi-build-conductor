@@ -1,4 +1,4 @@
-export const RUN_SCHEMA_VERSION = 6 as const;
+export const RUN_SCHEMA_VERSION = 7 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
 export const MERGE_READY_EVIDENCE_VERSION = 1 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
@@ -115,6 +115,54 @@ export interface TaskAttempt {
 	error?: string;
 	commit?: string;
 	evidence?: TaskValidationEvidence;
+}
+
+export type WorkerUiMethod = "select" | "confirm" | "input" | "editor";
+
+export type WorkerUiRequest =
+	| {
+			id: string;
+			method: "select";
+			title: string;
+			options: string[];
+			timeoutMs?: number;
+	  }
+	| {
+			id: string;
+			method: "confirm";
+			title: string;
+			message: string;
+			timeoutMs?: number;
+	  }
+	| {
+			id: string;
+			method: "input";
+			title: string;
+			placeholder?: string;
+			timeoutMs?: number;
+	  }
+	| {
+			id: string;
+			method: "editor";
+			title: string;
+			prefill?: string;
+	  };
+
+export type WorkerUiResponse =
+	| { kind: "value"; value: string }
+	| { kind: "confirmation"; confirmed: boolean }
+	| { kind: "cancelled" };
+
+export type BlockedWorkerPolicy = "decline" | "cancel";
+
+export interface BlockedWorkerState {
+	attemptKind: "task" | "review" | "repair";
+	attemptId: string;
+	workerId: string;
+	blockedAt: string;
+	requestId: string;
+	method: WorkerUiMethod;
+	timeoutAt?: string;
 }
 
 export const ACTIVE_ATTEMPT_STATES: ReadonlySet<AttemptState> = new Set([
@@ -314,6 +362,7 @@ export interface BuildRun {
 	reviewRounds: ReviewRound[];
 	reviewAttempts: ReviewAttempt[];
 	repairAttempts: RepairAttempt[];
+	blockedWorkers: BlockedWorkerState[];
 	finalValidationAttempts: FinalValidationAttempt[];
 	mergeReadyEvidence?: MergeReadyEvidence;
 	maxConcurrentWorkers: number;

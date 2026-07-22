@@ -256,6 +256,24 @@ function latestReviewRoundLines(run: BuildRun): string[] {
 	return [line];
 }
 
+function blockedWorkerLines(run: BuildRun, attemptId?: string): string[] {
+	const blockedWorkers = attemptId
+		? run.blockedWorkers.filter((blocked) => blocked.attemptId === attemptId)
+		: run.blockedWorkers;
+	if (blockedWorkers.length === 0) {
+		return [attemptId ? "Worker prompts: none" : "Blocked workers: none"];
+	}
+	return [
+		attemptId
+			? `Worker prompts: ${blockedWorkers.length} pending`
+			: `Blocked workers: ${blockedWorkers.length}`,
+		...blockedWorkers.map(
+			(blocked) =>
+				`- ${safeInline(blocked.attemptId)} / ${safeInline(blocked.workerId)} waiting on ${blocked.method} since ${display(blocked.blockedAt)}${blocked.timeoutAt ? `; timeout ${display(blocked.timeoutAt)}` : ""}`,
+		),
+	];
+}
+
 function finalValidationLines(run: BuildRun): string[] {
 	const attempt = run.finalValidationAttempts.at(-1);
 	if (!attempt) {
@@ -291,6 +309,7 @@ export function renderRunOverview(run: BuildRun): string[] {
 		reviewStateSummary(run),
 		...latestReviewRoundLines(run),
 		`Attempts: ${run.attempts.length} task, ${run.reviewAttempts.length} review, ${run.repairAttempts.length} repair, ${run.finalValidationAttempts.length} final validation`,
+		...blockedWorkerLines(run),
 		...finalValidationLines(run),
 		`Merge-ready evidence: ${run.mergeReadyEvidence ? `generated ${display(run.mergeReadyEvidence.generatedAt)}` : "none"}`,
 		`Next: ${nextRunAction(run)}`,
@@ -547,6 +566,7 @@ export function renderAttemptDetails(
 	return [
 		...common,
 		...details,
+		...blockedWorkerLines(run, attempt.id),
 		`Error: ${display(attempt.error)}`,
 		...renderEvidence(evidence),
 		`Next: ${next}`,

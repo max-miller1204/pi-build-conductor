@@ -12,6 +12,8 @@ import {
 	reconcileTaskStates,
 } from "./domain/scheduler.js";
 import {
+	type BlockedWorkerPolicy,
+	type BlockedWorkerState,
 	type BuildRun,
 	type FinalValidationAttempt,
 	type FinalValidationEvidence,
@@ -28,6 +30,8 @@ import {
 	type TaskAttempt,
 	type TaskDefinition,
 	type TaskPlan,
+	type WorkerUiRequest,
+	type WorkerUiResponse,
 } from "./domain/types.js";
 import type { GitClient, RepositoryInfo } from "./git/git.js";
 import type {
@@ -54,6 +58,7 @@ import type {
 	WorkerBackend,
 	WorkerExecutionResult,
 	WorkerProgressEvent,
+	WorkerUiResponder,
 } from "./workers/backend.js";
 
 const DEFAULT_WORKER_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -70,6 +75,7 @@ export interface BuildConductorDependencies {
 	workerTimeoutMs?: number;
 	workerPollIntervalMs?: number;
 	attemptLogs?: AttemptLogStore;
+	blockedWorkerPolicy?: BlockedWorkerPolicy;
 	verifyReviewWorktree?: (
 		path: string,
 		expectedBranch: string,
@@ -140,6 +146,48 @@ interface MonitoredExecution {
 	completion: Promise<WorkerExecutionResult>;
 	controller: AbortController;
 	options: LaunchOptions;
+}
+
+interface WorkerUiContext {
+	runId: string;
+	kind: "task" | "review" | "repair";
+	taskId: string;
+	attemptId: string;
+	workerId: string;
+	options: LaunchOptions;
+}
+
+export function blockedWorkerResponse(
+	policy: BlockedWorkerPolicy,
+	request: WorkerUiRequest,
+): WorkerUiResponse {
+	if (policy === "decline" && request.method === "confirm") {
+		return { kind: "confirmation", confirmed: false };
+	}
+	return { kind: "cancelled" };
+}
+
+function withoutBlockedAttempt(run: BuildRun, attemptId: string): BuildRun {
+	const blockedWorkers = run.blockedWorkers.filter(
+		(blocked) => blocked.attemptId !== attemptId,
+	);
+	return blockedWorkers.length === run.blockedWorkers.length
+		? run
+		: { ...run, blockedWorkers };
+}
+
+function withoutBlockedRequest(
+	run: BuildRun,
+	workerId: string,
+	requestId: string,
+): BuildRun {
+	const blockedWorkers = run.blockedWorkers.filter(
+		(blocked) =>
+			blocked.workerId !== workerId || blocked.requestId !== requestId,
+	);
+	return blockedWorkers.length === run.blockedWorkers.length
+		? run
+		: { ...run, blockedWorkers };
 }
 
 function buildWorkerPrompt(run: BuildRun, task: TaskDefinition): string {
@@ -302,6 +350,7 @@ export class BuildConductor {
 	private readonly now: () => string;
 	private readonly workerTimeoutMs: number;
 	private readonly workerPollIntervalMs: number;
+	private readonly blockedWorkerPolicy: BlockedWorkerPolicy;
 	private readonly activeExecutions = new Map<
 		string,
 		{ runId: string; controller: AbortController }
@@ -316,6 +365,13 @@ export class BuildConductor {
 			dependencies.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS;
 		this.workerPollIntervalMs =
 			dependencies.workerPollIntervalMs ?? DEFAULT_WORKER_POLL_INTERVAL_MS;
+		this.blockedWorkerPolicy = dependencies.blockedWorkerPolicy ?? "decline";
+		if (
+			this.blockedWorkerPolicy !== "decline" &&
+			this.blockedWorkerPolicy !== "cancel"
+		) {
+			throw new Error("blockedWorkerPolicy must be decline or cancel");
+		}
 		if (!Number.isFinite(this.workerTimeoutMs) || this.workerTimeoutMs <= 0) {
 			throw new Error("workerTimeoutMs must be a positive finite number");
 		}
@@ -336,6 +392,159 @@ export class BuildConductor {
 			this.dependencies.attemptLogs?.record(runId, attemptId, event);
 		} catch {
 			// Output capture must never affect worker execution.
+		}
+	}
+
+	private emitWorkerProgress(
+		context: WorkerUiContext,
+		event: WorkerProgressEvent,
+	): void {
+		this.recordAttemptProgress(context.runId, context.attemptId, event);
+		try {
+			context.options.onProgress?.({
+				runId: context.runId,
+				kind: context.kind,
+				taskId: context.taskId,
+				attemptId: context.attemptId,
+				workerId: context.workerId,
+				event,
+			});
+		} catch {
+			// UI observers must not affect worker execution.
+		}
+	}
+
+	private async clearBlockedWorkers(
+		runId: string,
+		attemptId: string,
+		options: LaunchOptions,
+	): Promise<void> {
+		let changed = false;
+		const updated = await mutateStoredRun(
+			this.dependencies.store,
+			runId,
+			(current) => {
+				const cleared = withoutBlockedAttempt(current, attemptId);
+				changed = cleared !== current;
+				return changed ? { ...cleared, updatedAt: this.now() } : current;
+			},
+		);
+		if (changed) {
+			notifyRunUpdated(options, updated);
+		}
+	}
+
+	private async clearBlockedRequest(
+		context: WorkerUiContext,
+		requestId: string,
+	): Promise<void> {
+		let changed = false;
+		const updated = await mutateStoredRun(
+			this.dependencies.store,
+			context.runId,
+			(current) => {
+				const cleared = withoutBlockedRequest(
+					current,
+					context.workerId,
+					requestId,
+				);
+				changed = cleared !== current;
+				return changed ? { ...cleared, updatedAt: this.now() } : current;
+			},
+		);
+		if (changed) {
+			notifyRunUpdated(context.options, updated);
+		}
+	}
+
+	private async handleWorkerUiRequest(
+		context: WorkerUiContext,
+		request: WorkerUiRequest,
+		respond: WorkerUiResponder,
+	): Promise<void> {
+		const blockedAt = this.now();
+		const timeoutMs = "timeoutMs" in request ? request.timeoutMs : undefined;
+		const blocked: BlockedWorkerState = {
+			attemptKind: context.kind,
+			attemptId: context.attemptId,
+			workerId: context.workerId,
+			blockedAt,
+			requestId: request.id,
+			method: request.method,
+			...(timeoutMs === undefined || Number.isNaN(Date.parse(blockedAt))
+				? {}
+				: {
+						timeoutAt: new Date(
+							Date.parse(blockedAt) + timeoutMs,
+						).toISOString(),
+					}),
+		};
+		let persisted = false;
+		try {
+			const updated = await mutateStoredRun(
+				this.dependencies.store,
+				context.runId,
+				(current) => {
+					let attempt: { state: string; workerId?: string } | undefined;
+					switch (context.kind) {
+						case "task":
+							attempt = current.attempts.find(
+								(candidate) => candidate.id === context.attemptId,
+							);
+							break;
+						case "review":
+							attempt = current.reviewAttempts.find(
+								(candidate) => candidate.id === context.attemptId,
+							);
+							break;
+						case "repair":
+							attempt = current.repairAttempts.find(
+								(candidate) => candidate.id === context.attemptId,
+							);
+							break;
+					}
+					if (
+						!attempt ||
+						attempt.workerId !== context.workerId ||
+						!isActiveAttemptState(attempt.state as TaskAttempt["state"])
+					) {
+						throw new Error(
+							`Worker ${context.workerId} cannot block inactive attempt ${context.attemptId}`,
+						);
+					}
+					if (
+						current.blockedWorkers.some(
+							(candidate) =>
+								candidate.workerId === context.workerId &&
+								candidate.requestId === request.id,
+						)
+					) {
+						throw new Error(
+							`Worker UI request ${request.id} is already blocked`,
+						);
+					}
+					persisted = true;
+					return {
+						...current,
+						blockedWorkers: [...current.blockedWorkers, blocked],
+						updatedAt: this.now(),
+					};
+				},
+			);
+			notifyRunUpdated(context.options, updated);
+			const response = blockedWorkerResponse(this.blockedWorkerPolicy, request);
+			this.emitWorkerProgress(context, {
+				type: "ui_decision",
+				requestId: request.id,
+				method: request.method,
+				policy: this.blockedWorkerPolicy,
+				outcome: response.kind === "confirmation" ? "declined" : "cancelled",
+			});
+			await respond(response);
+		} finally {
+			if (persisted) {
+				await this.clearBlockedRequest(context, request.id);
+			}
 		}
 	}
 
@@ -444,6 +653,7 @@ export class BuildConductor {
 				return {
 					...current,
 					state: "cancelled",
+					blockedWorkers: [],
 					tasks: Object.fromEntries(
 						Object.entries(current.tasks).map(([taskId, task]) => [
 							taskId,
@@ -748,11 +958,45 @@ export class BuildConductor {
 					? [worker.id]
 					: [];
 			});
+			if (run.blockedWorkers.length > 0) {
+				for (const blocked of run.blockedWorkers) {
+					this.recordAttemptProgress(run.id, blocked.attemptId, {
+						type: "ui_resolved",
+						requestId: blocked.requestId,
+						method: blocked.method,
+						outcome: "recovery_interrupted",
+					});
+				}
+				try {
+					await Promise.all(
+						[
+							...new Set(
+								run.blockedWorkers.map((blocked) => blocked.attemptId),
+							),
+						].map((attemptId) =>
+							this.dependencies.attemptLogs?.flush(run.id, attemptId),
+						),
+					);
+				} catch {
+					// Recovery must continue if an output journal cannot be flushed.
+				}
+			}
 			await Promise.all(
 				[...new Set(ownedLiveWorkerIds)].map((workerId) =>
 					this.dependencies.workers.stop(workerId),
 				),
 			);
+			if (run.blockedWorkers.length > 0) {
+				run = await mutateStoredRun(
+					this.dependencies.store,
+					run.id,
+					(current) => ({
+						...current,
+						blockedWorkers: [],
+						updatedAt: this.now(),
+					}),
+				);
+			}
 			const recoverableAttempts = run.attempts.filter(
 				(attempt) =>
 					attempt.state === "validating" && attempt.evidence?.passed === true,
@@ -1203,11 +1447,15 @@ export class BuildConductor {
 				} else if (result.status !== "succeeded") {
 					failureMessage = result.error ?? `Worker execution ${result.status}`;
 				}
-				let current = updateAttempt(stored, execution.attemptId, {
-					state: succeeded ? "validating" : "failed",
-					...(succeeded ? {} : { finishedAt: this.now() }),
-					...(failureMessage ? { error: failureMessage } : {}),
-				});
+				let current = updateAttempt(
+					withoutBlockedAttempt(stored, execution.attemptId),
+					execution.attemptId,
+					{
+						state: succeeded ? "validating" : "failed",
+						...(succeeded ? {} : { finishedAt: this.now() }),
+						...(failureMessage ? { error: failureMessage } : {}),
+					},
+				);
 				const task = current.tasks[attempt.taskId];
 				if (!task) {
 					throw new Error(`Missing task for attempt ${execution.attemptId}`);
@@ -1536,20 +1784,17 @@ export class BuildConductor {
 				{
 					signal: controller.signal,
 					onEvent: (event) => {
-						this.recordAttemptProgress(runId, attemptId, event);
-						try {
-							options.onProgress?.({
-								runId,
-								kind,
-								taskId,
-								attemptId,
-								workerId,
-								event,
-							});
-						} catch {
-							// UI observers must not affect worker execution.
-						}
+						this.emitWorkerProgress(
+							{ runId, kind, taskId, attemptId, workerId, options },
+							event,
+						);
 					},
+					onUiRequest: (request, respond) =>
+						this.handleWorkerUiRequest(
+							{ runId, kind, taskId, attemptId, workerId, options },
+							request,
+							respond,
+						),
 				},
 			);
 			const result = await this.waitForExecution(execution.completion);
@@ -1571,6 +1816,7 @@ export class BuildConductor {
 			clearTimeout(timeout);
 			clearInterval(poll);
 			this.activeExecutions.delete(attemptId);
+			await this.clearBlockedWorkers(runId, attemptId, options);
 		}
 		await this.finishAttemptLog(
 			runId,
@@ -3142,20 +3388,31 @@ export class BuildConductor {
 				{
 					signal: executionController.signal,
 					onEvent: (event) => {
-						this.recordAttemptProgress(current.id, attempt.id, event);
-						try {
-							options.onProgress?.({
+						this.emitWorkerProgress(
+							{
 								runId: current.id,
 								kind: "task",
 								taskId,
 								attemptId: attempt.id,
 								workerId: worker.id,
-								event,
-							});
-						} catch {
-							// UI observers must not affect worker execution.
-						}
+								options,
+							},
+							event,
+						);
 					},
+					onUiRequest: (request, respond) =>
+						this.handleWorkerUiRequest(
+							{
+								runId: current.id,
+								kind: "task",
+								taskId,
+								attemptId: attempt.id,
+								workerId: worker.id,
+								options,
+							},
+							request,
+							respond,
+						),
 				},
 			);
 			current = await mutateStoredRun(
@@ -3235,6 +3492,7 @@ export class BuildConductor {
 							},
 						});
 					}
+					failed = withoutBlockedAttempt(failed, activeAttempt.id);
 					return { ...failed, state: "failed", updatedAt: this.now() };
 				},
 			);

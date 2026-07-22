@@ -28,6 +28,9 @@ Implemented:
 - Duplicate-dispatch prevention and durable active-attempt invariants
 - Worker completion and failure detection through orchestrator events and status checks
 - Execution timeouts, explicit cancellation, and deterministic process cleanup
+- Typed handling for blocked worker select, confirm, input, and editor requests on the owning RPC stream
+- Durable blocked-worker visibility with conservative configurable auto-decline or auto-cancel decisions
+- Redacted prompt decision, timeout, cancellation, and recovery journaling
 - Approved per-task path scopes and focused validation commands
 - Conductor-controlled diff inspection, focused checks, and coherent task commits
 - Durable changed-file, diff fingerprint, check, and commit evidence
@@ -130,33 +133,37 @@ The command performs these steps:
 10. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/` for each selected task.
 11. Spawns an independent Pi instance for each task through the official orchestrator and sends its task prompt.
 12. Streams concurrent worker activity into Pi's live status UI and a durable per-attempt journal.
-13. Detects terminal Pi events and stops each worker process before inspecting its output.
-14. Verifies the assigned branch and base commit, rejects conflicts or out-of-scope changes, and records a diff fingerprint.
-15. Runs `git diff --check` and the exact focused validation commands approved in the plan.
-16. Re-inspects the worktree to reject checks that changed worker output.
-17. Creates one conductor-owned task commit, records its hash and validation evidence, and removes the successful worktree while retaining its branch.
-18. Retains failed worktrees for inspection and blocks dependent tasks after validation or commit failure.
-19. Cherry-picks validated commits onto the integration branch in deterministic topological order.
-20. Starts dependent task worktrees from the refreshed integration head after their dependencies land.
-21. Aborts conflicting cherry-picks without advancing the integration branch or changing the user branch.
-22. Refills available slots only after successful validation, commit creation, cleanup, and required dependency integration unblock downstream work.
-23. Starts a review round at the exact recorded integration head after every task commit is integrated.
-24. Launches fresh correctness, security, maintainability, tests, and documentation reviewers in isolated worktrees under the same configured worker bound.
-25. Rejects reviewer output unless it is a clean, versioned, bounded report for the expected category and integration commit.
-26. Prioritizes critical and high findings, plus high-confidence medium findings, for automatic repair.
-27. Defers lower-priority findings as explicit remaining risks rather than silently discarding them.
-28. Launches a fresh isolated repair worker for all prioritized findings, validates its changes against the union of approved paths and focused commands, and creates a conductor-owned repair commit.
-29. Integrates the repair commit without changing the user branch, then repeats all five reviews with fresh workers at the repaired head.
-30. Preserves `reviewed` as a durable checkpoint and immediately allocates a detached final-validation worktree at the exact integration head.
-31. Runs the explicitly approved complete validation commands in order with bounded output, a reduced environment, process-group termination, and a 30-minute default timeout per command.
-32. Rechecks detached HEAD, the expected commit, and worktree cleanliness before validation and after every command.
-33. Removes the successful validation worktree while retaining a failed command worktree for inspection when safe.
-34. Re-reads the integration ref and proves that `baseCommit..integrationHead` is exactly the persisted single-parent task and repair commit chain.
-35. Proves that the user worktree remains clean on the original base branch and base commit without updating, merging, or pushing it.
-36. Atomically persists the succeeded final attempt, versioned merge-ready evidence, and `completed` state.
+13. Detects blocking worker select, confirm, input, and editor requests, persists the blocked state, and answers on the same RPC stream with the configured conservative policy.
+14. Detects terminal Pi events and stops each worker process before inspecting its output.
+15. Verifies the assigned branch and base commit, rejects conflicts or out-of-scope changes, and records a diff fingerprint.
+16. Runs `git diff --check` and the exact focused validation commands approved in the plan.
+17. Re-inspects the worktree to reject checks that changed worker output.
+18. Creates one conductor-owned task commit, records its hash and validation evidence, and removes the successful worktree while retaining its branch.
+19. Retains failed worktrees for inspection and blocks dependent tasks after validation or commit failure.
+20. Cherry-picks validated commits onto the integration branch in deterministic topological order.
+21. Starts dependent task worktrees from the refreshed integration head after their dependencies land.
+22. Aborts conflicting cherry-picks without advancing the integration branch or changing the user branch.
+23. Refills available slots only after successful validation, commit creation, cleanup, and required dependency integration unblock downstream work.
+24. Starts a review round at the exact recorded integration head after every task commit is integrated.
+25. Launches fresh correctness, security, maintainability, tests, and documentation reviewers in isolated worktrees under the same configured worker bound.
+26. Rejects reviewer output unless it is a clean, versioned, bounded report for the expected category and integration commit.
+27. Prioritizes critical and high findings, plus high-confidence medium findings, for automatic repair.
+28. Defers lower-priority findings as explicit remaining risks rather than silently discarding them.
+29. Launches a fresh isolated repair worker for all prioritized findings, validates its changes against the union of approved paths and focused commands, and creates a conductor-owned repair commit.
+30. Integrates the repair commit without changing the user branch, then repeats all five reviews with fresh workers at the repaired head.
+31. Preserves `reviewed` as a durable checkpoint and immediately allocates a detached final-validation worktree at the exact integration head.
+32. Runs the explicitly approved complete validation commands in order with bounded output, a reduced environment, process-group termination, and a 30-minute default timeout per command.
+33. Rechecks detached HEAD, the expected commit, and worktree cleanliness before validation and after every command.
+34. Removes the successful validation worktree while retaining a failed command worktree for inspection when safe.
+35. Re-reads the integration ref and proves that `baseCommit..integrationHead` is exactly the persisted single-parent task and repair commit chain.
+36. Proves that the user worktree remains clean on the original base branch and base commit without updating, merging, or pushing it.
+37. Atomically persists the succeeded final attempt, versioned merge-ready evidence, and `completed` state.
 
 Worker executions time out after one hour by default.
 Set `PI_BUILD_WORKER_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
+Worker UI requests default to the `decline` policy, which answers confirmations with `false` and cancels select, input, and editor dialogs.
+Set `PI_BUILD_WORKER_UI_POLICY=cancel` to cancel all four dialog types instead.
+The policy never selects an option, confirms permission, or supplies input or editor content.
 Each focused task or repair validation command times out after ten minutes by default.
 Set `PI_BUILD_VALIDATION_TIMEOUT_MS` to a positive duration in milliseconds to override that limit.
 Each final validation command times out after 30 minutes by default.
@@ -205,7 +212,9 @@ An active final validation attempt becomes interrupted after restart.
 Passing final-validation evidence is persisted before cleanup, so resume can reuse it at the same immutable integration head and rerun only Git and user-worktree verification.
 Recovery removes unreferenced resources only below the configured conductor worktree root and `conductor/<run-id>/` branch namespace when their refs still equal a proven allocation start commit.
 Dirty orphan worktrees and clean orphan branches containing unexpected commits are retained for manual inspection.
-Run schema 4 and 5 snapshots migrate deterministically to schema 6 with one imported plan revision.
+Run schema 4 and 5 snapshots migrate deterministically to schema 7 with one imported plan revision.
+Run schema 6 snapshots migrate to schema 7 with an empty blocked-worker projection.
+Unresolved blocked prompts are journaled as recovery interruptions before their owning workers are stopped and their attempts become retryable.
 Run schemas 2 and 3 and plan schema 2 still require a new explicitly approved run.
 The monotonic run snapshot `revision` remains separate from the immutable `planRevision` history.
 
@@ -237,7 +246,9 @@ Replay a completed worker journal or follow an active worker in the terminal wit
 /build-follow <run-id> [attempt-id]
 ```
 
-The journal records assistant text deltas, tool start and finish markers, retry notices, and terminal worker status.
+The journal records assistant text deltas, tool start and finish markers, retry notices, blocked worker prompts, conservative policy decisions, prompt resolution outcomes, and terminal worker status.
+Prompt journals include only the request identifier, method, policy, and outcome.
+They never record dialog titles, messages, options, placeholders, prefills, supplied input, or editor response values.
 It does not contain raw subprocess output that the orchestrator protocol did not emit.
 Journal text is stripped of terminal control sequences, each file is capped at 5 MiB, and display tails are bounded.
 Runs created before journal support report that no captured output is available.
@@ -350,6 +361,9 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Failed validation worktrees are retained for inspection.
 - Successful task branches and source commits are retained after integration.
 - Completed, failed, cancelled, and timed-out attempts always request worker process cleanup.
+- Blocking worker UI requests are answered only on the RPC stream that emitted them.
+- The default worker UI policy declines confirmations and cancels all dialogs that would require selecting or supplying data.
+- Blocked-worker state is removed on response, request timeout, execution timeout, cancellation, and recovery.
 - Validated task commits are cherry-picked sequentially in deterministic topological order on the separate integration branch.
 - Dependent task worktrees start from the refreshed integration head after all dependencies land.
 - Cherry-picks use detached temporary worktrees and an atomic compare-and-swap branch update, so conflicts leave the integration branch at its last good commit.
