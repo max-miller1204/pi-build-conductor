@@ -65,7 +65,10 @@ export interface RunSecurityPolicy {
 		isolation: "worktree-only";
 		sandbox: "none";
 		network: "host";
-		toolPolicy: "orchestrator-allowlist-v1" | "legacy-unrestricted";
+		toolPolicy:
+			| "server-allowlist-v1"
+			| "orchestrator-allowlist-v1"
+			| "legacy-unrestricted";
 		resourceDiscovery: "disabled" | "host";
 		credentialExposure: "host-credentials-available-to-worker";
 		uiPolicy: BlockedWorkerPolicy;

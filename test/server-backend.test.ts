@@ -3,7 +3,10 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { OfficialOrchestratorBackend } from "../src/workers/orchestrator-backend.js";
+import {
+	defaultServerSocketPath,
+	OfficialServerBackend,
+} from "../src/workers/server-backend.js";
 
 const directories: string[] = [];
 const servers: Server[] = [];
@@ -36,7 +39,7 @@ interface UiRequestFrame {
 	timeout?: number;
 }
 
-async function fakeUiOrchestrator(
+async function fakeUiServer(
 	uiRequest: UiRequestFrame,
 	options: {
 		requestBeforePromptResponse?: boolean;
@@ -44,10 +47,10 @@ async function fakeUiOrchestrator(
 	} = {},
 ): Promise<{ socketPath: string; requests: unknown[] }> {
 	const directory = await mkdtemp(
-		join(tmpdir(), "pi-build-conductor-ui-orchestrator-"),
+		join(tmpdir(), "pi-build-conductor-ui-server-"),
 	);
 	directories.push(directory);
-	const socketPath = join(directory, "orchestrator.sock");
+	const socketPath = join(directory, "server.sock");
 	const requests: unknown[] = [];
 	const server = createServer((socket) => {
 		let buffer = "";
@@ -117,7 +120,7 @@ async function fakeUiOrchestrator(
 	return { socketPath, requests };
 }
 
-async function fakeOrchestrator(
+async function fakeServer(
 	options: {
 		failExecution?: boolean;
 		failSetModel?: boolean;
@@ -127,11 +130,9 @@ async function fakeOrchestrator(
 	socketPath: string;
 	requests: unknown[];
 }> {
-	const directory = await mkdtemp(
-		join(tmpdir(), "pi-build-conductor-orchestrator-"),
-	);
+	const directory = await mkdtemp(join(tmpdir(), "pi-build-conductor-server-"));
 	directories.push(directory);
-	const socketPath = join(directory, "orchestrator.sock");
+	const socketPath = join(directory, "server.sock");
 	const requests: unknown[] = [];
 	const instance = {
 		id: "worker-1",
@@ -279,12 +280,27 @@ async function fakeOrchestrator(
 	return { socketPath, requests };
 }
 
-describe("OfficialOrchestratorBackend", () => {
+describe("OfficialServerBackend", () => {
+	it("discovers server.sock from PI_SERVER_DIR or the Pi configuration directory", () => {
+		expect(
+			defaultServerSocketPath(
+				{ PI_SERVER_DIR: "/runtime/server" },
+				"/home/test",
+			),
+		).toBe(join("/runtime/server", "server.sock"));
+		expect(
+			defaultServerSocketPath({ PI_CONFIG_DIR: "/runtime/pi" }, "/home/test"),
+		).toBe(join("/runtime/pi", "server", "server.sock"));
+		expect(defaultServerSocketPath({}, "/home/test")).toBe(
+			join("/home/test", ".pi", "server", "server.sock"),
+		);
+	});
+
 	it("streams worker progress through terminal completion", async () => {
-		const fake = await fakeOrchestrator({
+		const fake = await fakeServer({
 			eventsBeforePromptResponse: true,
 		});
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		const events: string[] = [];
@@ -382,10 +398,10 @@ describe("OfficialOrchestratorBackend", () => {
 	])(
 		"answers a blocking $name request on its owning stream",
 		async ({ request, answer, wire, outcome }) => {
-			const fake = await fakeUiOrchestrator(request, {
+			const fake = await fakeUiServer(request, {
 				requestBeforePromptResponse: true,
 			});
-			const backend = new OfficialOrchestratorBackend({
+			const backend = new OfficialServerBackend({
 				socketPath: fake.socketPath,
 			});
 			const events: unknown[] = [];
@@ -415,7 +431,7 @@ describe("OfficialOrchestratorBackend", () => {
 	);
 
 	it("ignores fire-and-forget extension UI events", async () => {
-		const fake = await fakeUiOrchestrator(
+		const fake = await fakeUiServer(
 			{
 				type: "extension_ui_request",
 				id: "notification",
@@ -424,7 +440,7 @@ describe("OfficialOrchestratorBackend", () => {
 			},
 			{ settleAfterRequestTimeoutMs: 5 },
 		);
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		const events: string[] = [];
@@ -449,7 +465,7 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("expires a timed request and rejects a late response", async () => {
-		const fake = await fakeUiOrchestrator(
+		const fake = await fakeUiServer(
 			{
 				type: "extension_ui_request",
 				id: "timed-dialog",
@@ -459,7 +475,7 @@ describe("OfficialOrchestratorBackend", () => {
 			},
 			{ settleAfterRequestTimeoutMs: 30 },
 		);
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		let lateResponse: (() => Promise<void>) | undefined;
@@ -491,13 +507,13 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("invalidates a blocked request when execution is cancelled", async () => {
-		const fake = await fakeUiOrchestrator({
+		const fake = await fakeUiServer({
 			type: "extension_ui_request",
 			id: "cancelled-dialog",
 			method: "editor",
 			title: "Editor",
 		});
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		const controller = new AbortController();
@@ -521,7 +537,7 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("records cancellation before prompt acceptance as an execution abort", async () => {
-		const fake = await fakeUiOrchestrator(
+		const fake = await fakeUiServer(
 			{
 				type: "extension_ui_request",
 				id: "early-cancelled-dialog",
@@ -531,7 +547,7 @@ describe("OfficialOrchestratorBackend", () => {
 			},
 			{ requestBeforePromptResponse: true },
 		);
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		const controller = new AbortController();
@@ -552,8 +568,8 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("reports terminal Pi failures", async () => {
-		const fake = await fakeOrchestrator({ failExecution: true });
-		const backend = new OfficialOrchestratorBackend({
+		const fake = await fakeServer({ failExecution: true });
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 
@@ -566,8 +582,8 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("preflights and verifies an applied worker launch policy", async () => {
-		const fake = await fakeOrchestrator();
-		const backend = new OfficialOrchestratorBackend({
+		const fake = await fakeServer();
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 		const launchPolicy = {
@@ -595,8 +611,8 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("isolates the first-party spawn and RPC protocol", async () => {
-		const fake = await fakeOrchestrator();
-		const backend = new OfficialOrchestratorBackend({
+		const fake = await fakeServer();
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 
@@ -640,8 +656,8 @@ describe("OfficialOrchestratorBackend", () => {
 	});
 
 	it("stops a spawned worker when model configuration fails", async () => {
-		const fake = await fakeOrchestrator({ failSetModel: true });
-		const backend = new OfficialOrchestratorBackend({
+		const fake = await fakeServer({ failSetModel: true });
+		const backend = new OfficialServerBackend({
 			socketPath: fake.socketPath,
 		});
 

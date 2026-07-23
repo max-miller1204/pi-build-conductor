@@ -13,6 +13,12 @@ const ROLE_TOOLS: Readonly<Record<WorkerRole, readonly string[]>> = {
 	repair: ["read", "grep", "find", "ls", "bash", "edit", "write"],
 };
 
+function isWorkerAllowlistPolicy(value: unknown): boolean {
+	return (
+		value === "server-allowlist-v1" || value === "orchestrator-allowlist-v1"
+	);
+}
+
 function configuredUiPolicy(env: NodeJS.ProcessEnv): BlockedWorkerPolicy {
 	const value = env.PI_BUILD_WORKER_UI_POLICY ?? "decline";
 	if (value !== "decline" && value !== "cancel") {
@@ -56,7 +62,7 @@ export function readSecurityPolicy(
 			isolation: "worktree-only",
 			sandbox: "none",
 			network: "host",
-			toolPolicy: "orchestrator-allowlist-v1",
+			toolPolicy: "server-allowlist-v1",
 			resourceDiscovery: "disabled",
 			credentialExposure: "host-credentials-available-to-worker",
 			uiPolicy: configuredUiPolicy(env),
@@ -97,7 +103,7 @@ export function workerLaunchPolicy(
 	policy: RunSecurityPolicy,
 	role: WorkerRole,
 ): WorkerLaunchPolicy | undefined {
-	if (policy.workers.toolPolicy !== "orchestrator-allowlist-v1") {
+	if (!isWorkerAllowlistPolicy(policy.workers.toolPolicy)) {
 		return undefined;
 	}
 	return {
@@ -113,10 +119,9 @@ export function securityPolicyLines(policy: RunSecurityPolicy): string[] {
 		policy.validation.sandbox === "nono"
 			? "Nono sandbox, network blocked"
 			: "no OS sandbox, host network available";
-	const workerTools =
-		policy.workers.toolPolicy === "orchestrator-allowlist-v1"
-			? "role allowlists enforced by compatible orchestrator"
-			: "legacy unrestricted orchestrator tools";
+	const workerTools = isWorkerAllowlistPolicy(policy.workers.toolPolicy)
+		? "role allowlists enforced by compatible server"
+		: "legacy unrestricted server tools";
 	return [
 		`Policy: v${policy.version} (${policy.source})`,
 		`Workers: ${policy.workers.isolation}; ${workerTools}; resources ${policy.workers.resourceDiscovery}; ${policy.workers.network} network`,
@@ -153,9 +158,8 @@ export function assertRunSecurityPolicy(
 		worker.isolation !== "worktree-only" ||
 		worker.sandbox !== "none" ||
 		worker.network !== "host" ||
-		!["orchestrator-allowlist-v1", "legacy-unrestricted"].includes(
-			String(worker.toolPolicy),
-		) ||
+		(!isWorkerAllowlistPolicy(worker.toolPolicy) &&
+			worker.toolPolicy !== "legacy-unrestricted") ||
 		!["disabled", "host"].includes(String(worker.resourceDiscovery)) ||
 		worker.credentialExposure !== "host-credentials-available-to-worker" ||
 		!["decline", "cancel"].includes(String(worker.uiPolicy))
@@ -163,7 +167,7 @@ export function assertRunSecurityPolicy(
 		throw new Error(`${path}.workers contains an invalid security boundary`);
 	}
 	if (
-		(worker.toolPolicy === "orchestrator-allowlist-v1" &&
+		(isWorkerAllowlistPolicy(worker.toolPolicy) &&
 			worker.resourceDiscovery !== "disabled") ||
 		(worker.toolPolicy === "legacy-unrestricted" &&
 			worker.resourceDiscovery !== "host")

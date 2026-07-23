@@ -303,7 +303,7 @@ class RejectingStartWorkers extends FakeWorkers {
 		prompt: string,
 	): Promise<WorkerExecution> {
 		this.calls.push({ operation: "prompt", value: { workerId, prompt } });
-		return Promise.reject(new Error("orchestrator stream failed to start"));
+		return Promise.reject(new Error("server stream failed to start"));
 	}
 }
 
@@ -667,7 +667,7 @@ describe("BuildConductor vertical slice", () => {
 		});
 	});
 
-	it("persists a launch failure when the orchestrator stream cannot start", async () => {
+	it("persists a launch failure when the server stream cannot start", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-stream-start-failure-"),
 		);
@@ -689,7 +689,7 @@ describe("BuildConductor vertical slice", () => {
 		expect(failed.tasks.implementation?.state).toBe("failed");
 		expect(failed.attempts[0]).toMatchObject({
 			state: "failed",
-			error: "orchestrator stream failed to start",
+			error: "server stream failed to start",
 		});
 		expect(workers.calls.filter((call) => call.operation === "stop")).toEqual([
 			{ operation: "stop", value: "worker-1" },
@@ -1345,7 +1345,7 @@ describe("BuildConductor vertical slice", () => {
 		await result.completion;
 	});
 
-	it("rejects an incompatible orchestrator before approval or Git side effects", async () => {
+	it("rejects an incompatible server before approval or Git side effects", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-policy-preflight-"),
 		);

@@ -85,18 +85,21 @@ interface StreamMessage {
 	}>;
 }
 
-export interface OfficialOrchestratorBackendOptions {
+export interface OfficialServerBackendOptions {
 	socketPath?: string;
 	requestTimeoutMs?: number;
 }
 
-function defaultSocketPath(): string {
-	const orchestratorDirectory = process.env.PI_ORCHESTRATOR_DIR;
-	if (orchestratorDirectory) {
-		return join(orchestratorDirectory, "orchestrator.sock");
+export function defaultServerSocketPath(
+	env: NodeJS.ProcessEnv = process.env,
+	homeDirectory = homedir(),
+): string {
+	const serverDirectory = env.PI_SERVER_DIR;
+	if (serverDirectory) {
+		return join(serverDirectory, "server.sock");
 	}
-	const piDirectory = process.env.PI_CONFIG_DIR ?? join(homedir(), ".pi");
-	return join(piDirectory, "orchestrator", "orchestrator.sock");
+	const piDirectory = env.PI_CONFIG_DIR ?? join(homeDirectory, ".pi");
+	return join(piDirectory, "server", "server.sock");
 }
 
 function requireInstance(
@@ -105,8 +108,7 @@ function requireInstance(
 ): WorkerInstance {
 	if (!response.ok || !response.instance) {
 		throw new Error(
-			response.error ??
-				`Official orchestrator ${operation} returned no instance`,
+			response.error ?? `Official server ${operation} returned no instance`,
 		);
 	}
 	return response.instance;
@@ -354,16 +356,16 @@ function agentFailure(message: StreamMessage): string | undefined {
 }
 
 /**
- * Thin adapter around the experimental first-party orchestrator JSONL socket API.
+ * Thin adapter around the experimental first-party server JSONL socket API.
  * Keep all upstream protocol assumptions in this module so they can be replaced
- * when @earendil-works/pi-orchestrator changes or becomes directly publishable.
+ * when @earendil-works/pi-server changes or becomes directly publishable.
  */
-export class OfficialOrchestratorBackend implements WorkerBackend {
+export class OfficialServerBackend implements WorkerBackend {
 	private readonly socketPath: string;
 	private readonly requestTimeoutMs: number;
 
-	constructor(options: OfficialOrchestratorBackendOptions = {}) {
-		this.socketPath = options.socketPath ?? defaultSocketPath();
+	constructor(options: OfficialServerBackendOptions = {}) {
+		this.socketPath = options.socketPath ?? defaultServerSocketPath();
 		this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
 	}
 
@@ -391,7 +393,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 					return;
 				}
 				if (!response) {
-					reject(new Error("Official orchestrator returned an empty response"));
+					reject(new Error("Official server returned an empty response"));
 					return;
 				}
 				resolve(response);
@@ -399,9 +401,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 
 			timer = setTimeout(() => {
 				finish(
-					new Error(
-						`Official orchestrator request timed out at ${this.socketPath}`,
-					),
+					new Error(`Official server request timed out at ${this.socketPath}`),
 				);
 			}, this.requestTimeoutMs);
 
@@ -419,7 +419,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				if (Buffer.byteLength(frame, "utf8") > MAX_STREAM_FRAME_BYTES) {
 					finish(
 						new Error(
-							`Official orchestrator response exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+							`Official server response exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
 						),
 					);
 					return;
@@ -441,7 +441,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				if (!settled) {
 					finish(
 						new Error(
-							`Official orchestrator closed ${this.socketPath} without a response`,
+							`Official server closed ${this.socketPath} without a response`,
 						),
 					);
 				}
@@ -459,7 +459,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 			throw new Error(
 				response.error ??
 					response.response?.error ??
-					"Official orchestrator RPC failed",
+					"Official server RPC failed",
 			);
 		}
 	}
@@ -474,7 +474,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 		) {
 			throw new Error(
 				response.error ??
-					`Official orchestrator does not support worker launch policy v${policy.version}`,
+					`Official server does not support worker launch policy v${policy.version}`,
 			);
 		}
 	}
@@ -508,7 +508,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 					JSON.stringify(request.launchPolicy)
 			) {
 				throw new Error(
-					`Official orchestrator did not attest worker launch policy v${request.launchPolicy.version}`,
+					`Official server did not attest worker launch policy v${request.launchPolicy.version}`,
 				);
 			}
 			if (request.provider && request.model) {
@@ -535,7 +535,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 	async list(): Promise<WorkerInstance[]> {
 		const response = await this.request({ type: "list" });
 		if (!response.ok || !response.instances) {
-			throw new Error(response.error ?? "Official orchestrator list failed");
+			throw new Error(response.error ?? "Official server list failed");
 		}
 		return response.instances;
 	}
@@ -752,7 +752,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 						failStart(
 							socketError ??
 								new Error(
-									"Official orchestrator stream closed before prompt acceptance",
+									"Official server stream closed before prompt acceptance",
 								),
 						);
 					}
@@ -762,7 +762,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 					failStart(
 						socketError ??
 							new Error(
-								"Official orchestrator stream closed before prompt acceptance",
+								"Official server stream closed before prompt acceptance",
 							),
 					);
 					return;
@@ -797,7 +797,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 						failStart(
 							new Error(
 								message.error ??
-									`Official orchestrator could not stream worker ${workerId}`,
+									`Official server could not stream worker ${workerId}`,
 							),
 						);
 						return;
@@ -810,9 +810,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				if (message.type === "response" && message.id === "conductor_prompt") {
 					if (message.success !== true) {
 						failStart(
-							new Error(
-								message.error ?? "Official orchestrator rejected prompt",
-							),
+							new Error(message.error ?? "Official server rejected prompt"),
 						);
 						return;
 					}
@@ -829,7 +827,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 				}
 				if (message.type === "error" && message.ok === false) {
 					failStart(
-						new Error(message.error ?? "Official orchestrator stream failed"),
+						new Error(message.error ?? "Official server stream failed"),
 					);
 					return;
 				}
@@ -871,7 +869,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 						if (Buffer.byteLength(buffer, "utf8") > MAX_STREAM_FRAME_BYTES) {
 							failStart(
 								new Error(
-									`Official orchestrator frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+									`Official server frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
 								),
 							);
 						}
@@ -885,7 +883,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 					if (Buffer.byteLength(line, "utf8") > MAX_STREAM_FRAME_BYTES) {
 						failStart(
 							new Error(
-								`Official orchestrator frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
+								`Official server frame exceeds ${MAX_STREAM_FRAME_BYTES} bytes`,
 							),
 						);
 						return;
@@ -901,9 +899,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 			};
 			const startTimer = setTimeout(() => {
 				failStart(
-					new Error(
-						`Official orchestrator stream timed out at ${this.socketPath}`,
-					),
+					new Error(`Official server stream timed out at ${this.socketPath}`),
 				);
 			}, this.requestTimeoutMs);
 
@@ -931,7 +927,7 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 	async stop(workerId: string): Promise<void> {
 		const response = await this.request({ type: "stop", instanceId: workerId });
 		if (!response.ok) {
-			throw new Error(response.error ?? "Official orchestrator stop failed");
+			throw new Error(response.error ?? "Official server stop failed");
 		}
 	}
 }

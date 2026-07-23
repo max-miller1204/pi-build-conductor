@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { OfficialOrchestratorBackend } from "../src/workers/orchestrator-backend.js";
+import { OfficialServerBackend } from "../src/workers/server-backend.js";
 
-const socketPath = process.env.PI_ORCHESTRATOR_SMOKE_SOCKET;
+const socketPath = process.env.PI_SERVER_SMOKE_SOCKET;
 
-describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
+describe.runIf(Boolean(socketPath))("official server smoke", () => {
 	it("executes a prompt and manages a real upstream worker lifecycle", async () => {
 		if (!socketPath) {
-			throw new Error("PI_ORCHESTRATOR_SMOKE_SOCKET is required");
+			throw new Error("PI_SERVER_SMOKE_SOCKET is required");
 		}
-		const backend = new OfficialOrchestratorBackend({
+		const backend = new OfficialServerBackend({
 			socketPath,
 			requestTimeoutMs: 60_000,
 		});

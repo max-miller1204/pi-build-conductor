@@ -4,7 +4,7 @@
 
 `pi-build-conductor` coordinates model-driven workers and executes repository-provided validation commands.
 Repository contents, handoff text, model output, review output, and validation scripts are untrusted data.
-The conductor process, selected Git executable, compatible orchestrator service, configured Nono executable, provider process, and host operating system are trusted components.
+The conductor process, selected Git executable, compatible server service, configured Nono executable, provider process, and host operating system are trusted components.
 A compromised trusted component can exceed every boundary described here.
 
 A Git worktree is a source-integrity boundary, not an operating-system sandbox.
@@ -21,11 +21,11 @@ Legacy runs are migrated with an explicit `legacy-migrated` policy that does not
 
 ## Worker authority
 
-The maintained `orchestrator-compat` service supports worker launch policy version 1.
+The maintained `server-compat` service supports worker launch policy version 1.
 The conductor checks that support before approval and requires an exact applied-policy attestation after each spawn.
 A missing capability or mismatched attestation fails closed and never falls back to an unrestricted worker.
 
-The compatible orchestrator disables project and user extension discovery, skills, prompt templates, and context files for policy-controlled workers.
+The compatible server disables project and user extension discovery, skills, prompt templates, and context files for policy-controlled workers.
 It enables only the fixed built-in tool allowlist for the worker role.
 
 | Role | Enabled tools |
@@ -49,7 +49,7 @@ The chosen UI policy is frozen into the run.
 
 Worker Pi processes are not OS-sandboxed in policy version 1.
 They use separate Git worktrees and enforced tool allowlists, but they retain host filesystem and network reachability.
-The orchestrator process also retains the provider credentials needed to call the selected model.
+The server process also retains the provider credentials needed to call the selected model.
 Those credentials and other host credential stores may be reachable through implementation and repair tools.
 Do not run workers on a host that contains credentials or resources they must not be able to reach.
 Use a dedicated account, container, virtual machine, or disposable machine when stronger isolation is required.
@@ -106,7 +106,7 @@ It does not turn prompt instructions, tool allowlists, worktrees, or post-execut
 
 Review the security section in the final approval summary before approving a run.
 Prefer Nono validation when the approved commands do not need network access.
-Run the orchestrator and conductor under a dedicated low-privilege account.
+Run the server and conductor under a dedicated low-privilege account.
 Remove ambient cloud, package registry, SSH, signing, and deployment credentials from the execution host.
 Use a disposable environment for untrusted repositories.
 Inspect retained failed worktrees and bounded logs without executing their contents.
@@ -116,4 +116,4 @@ Rotate any credential that may have been exposed to a worker or unsandboxed comm
 
 Do not include live credentials, private repository contents, or sensitive logs in a public report.
 Report security issues to the repository owner through a private GitHub security advisory when available.
-Include the conductor version, compatible orchestrator commit, security policy shown in the run report, operating system, and a minimal reproduction.
+Include the conductor version, compatible server commit, security policy shown in the run report, operating system, and a minimal reproduction.

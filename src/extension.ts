@@ -45,7 +45,7 @@ import {
 import { RunStore } from "./storage/run-store.js";
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
-import { OfficialOrchestratorBackend } from "./workers/orchestrator-backend.js";
+import { OfficialServerBackend } from "./workers/server-backend.js";
 
 function parsePathArgument(args: string): string {
 	const trimmed = args.trim();
@@ -172,7 +172,7 @@ function createStore(repository: RepositoryInfo): RunStore {
 function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const store = createStore(repository);
 	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
-	const workers = new OfficialOrchestratorBackend();
+	const workers = new OfficialServerBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
 	const securityPolicy = readSecurityPolicy();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
@@ -593,7 +593,7 @@ async function reviewAndLaunchRun(
 			);
 			continue;
 		}
-		ctx.ui.setStatus("pi-build-conductor", "checking orchestrator");
+		ctx.ui.setStatus("pi-build-conductor", "checking server");
 		// pi-lens-ignore: await-in-loop
 		await runtime.workers.list();
 		const freshRepository = await git.inspect(ctx.cwd);

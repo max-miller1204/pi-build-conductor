@@ -21,21 +21,21 @@ import type {
 	WorkerExecutionOptions,
 	WorkerInstance,
 } from "../src/workers/backend.js";
-import { OfficialOrchestratorBackend } from "../src/workers/orchestrator-backend.js";
+import { OfficialServerBackend } from "../src/workers/server-backend.js";
 import { reviewResult } from "./helpers/review.js";
 
 const execute = promisify(execFile);
-const socketPath = process.env.PI_ORCHESTRATOR_SMOKE_SOCKET;
+const socketPath = process.env.PI_SERVER_SMOKE_SOCKET;
 const directories: string[] = [];
-const backends: HybridOrchestratorWorkers[] = [];
+const backends: HybridServerWorkers[] = [];
 
-class HybridOrchestratorWorkers implements WorkerBackend {
+class HybridServerWorkers implements WorkerBackend {
 	readonly realPromptEvents: string[] = [];
 	private readonly synthetic = new Map<string, WorkerInstance>();
 	private readonly realWorkerIds = new Set<string>();
 	private nextSyntheticWorker = 1;
 
-	constructor(private readonly official: OfficialOrchestratorBackend) {}
+	constructor(private readonly official: OfficialServerBackend) {}
 
 	async preflightPolicy(policy: WorkerLaunchPolicy): Promise<void> {
 		await this.official.preflightPolicy(policy);
@@ -165,16 +165,16 @@ afterEach(async () => {
 	);
 });
 
-describe.runIf(Boolean(socketPath))("real orchestrator conductor flow", () => {
+describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 	it("takes one real Pi worker from task prompt to merge-ready evidence", async () => {
 		if (!socketPath) {
-			throw new Error("PI_ORCHESTRATOR_SMOKE_SOCKET is required");
+			throw new Error("PI_SERVER_SMOKE_SOCKET is required");
 		}
 		const { parent, repositoryRoot } = await createRepository();
 		const git = new GitCli();
 		const repository = await git.inspect(repositoryRoot);
-		const workers = new HybridOrchestratorWorkers(
-			new OfficialOrchestratorBackend({
+		const workers = new HybridServerWorkers(
+			new OfficialServerBackend({
 				socketPath,
 				requestTimeoutMs: 60_000,
 			}),
@@ -243,13 +243,13 @@ describe.runIf(Boolean(socketPath))("real orchestrator conductor flow", () => {
 
 	it("persists a timeout from a real Pi worker and stops it", async () => {
 		if (!socketPath) {
-			throw new Error("PI_ORCHESTRATOR_SMOKE_SOCKET is required");
+			throw new Error("PI_SERVER_SMOKE_SOCKET is required");
 		}
 		const { parent, repositoryRoot } = await createRepository();
 		const git = new GitCli();
 		const repository = await git.inspect(repositoryRoot);
-		const workers = new HybridOrchestratorWorkers(
-			new OfficialOrchestratorBackend({
+		const workers = new HybridServerWorkers(
+			new OfficialServerBackend({
 				socketPath,
 				requestTimeoutMs: 60_000,
 			}),

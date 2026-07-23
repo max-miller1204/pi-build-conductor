@@ -199,7 +199,7 @@ function buildWorkerPrompt(run: BuildRun, task: TaskDefinition): string {
 	return `You are the implementation worker for build run ${run.id}.
 
 ENFORCED AUTHORITY
-Active tools: ${policy?.tools.join(", ") ?? "legacy orchestrator defaults"}.
+Active tools: ${policy?.tools.join(", ") ?? "legacy server defaults"}.
 Resource discovery: ${run.securityPolicy.workers.resourceDiscovery}.
 Your Pi process and tools are not OS-sandboxed. Host filesystem, network, and credentials may be reachable, but they are outside your authority.
 Work only in the current Git worktree and current branch.
@@ -852,7 +852,7 @@ export class BuildConductor {
 			try {
 				workers = await this.dependencies.workers.list();
 			} catch {
-				// Terminal Git cleanup remains useful when the orchestrator is offline.
+				// Terminal Git cleanup remains useful when the server is offline.
 			}
 			for (const worker of workers) {
 				const ownedByLabel =

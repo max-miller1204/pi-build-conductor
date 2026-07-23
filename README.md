@@ -24,18 +24,18 @@ Implemented:
 - Exclusive per-run lifecycle leases that prevent concurrent resume and duplicate side effects
 - Git branch and worktree isolation
 - A narrow `WorkerBackend` interface
-- An adapter for the official orchestrator JSONL socket API
+- An adapter for the official server JSONL socket API
 - Deterministic launch and live lifecycle monitoring with a worker limit configured from two through four
 - Dependency-aware pool refill as tasks succeed and unblock downstream work
 - Duplicate-dispatch prevention and durable active-attempt invariants
-- Worker completion and failure detection through orchestrator events and status checks
+- Worker completion and failure detection through server events and status checks
 - Execution timeouts, explicit cancellation, and deterministic process cleanup
 - Typed handling for blocked worker select, confirm, input, and editor requests on the owning RPC stream
 - Durable blocked-worker visibility with conservative configurable auto-decline or auto-cancel decisions
 - Redacted prompt decision, timeout, cancellation, and recovery journaling
 - Approved per-task path scopes and focused validation commands
 - Immutable per-run security policy used by approval, retries, recovery, prompts, validation, and reports
-- Compatible-orchestrator capability negotiation and exact worker launch-policy attestation
+- Compatible-server capability negotiation and exact worker launch-policy attestation
 - Fixed role-based tool allowlists with Bash and mutation tools removed from reviewers
 - Worker project extensions, skills, prompt templates, and context-file discovery disabled
 - Fresh temporary validation homes, reduced credential-free command environments, and disabled Git credential prompting
@@ -68,24 +68,24 @@ Implemented:
 - `src/git` owns branch, diff inspection, commit, cherry-pick, and worktree operations.
 - `src/validation` enforces approved task scope and runs focused and final checks without a shell, with an optional Nono sandbox.
 - `src/security` defines the immutable run policy, role tool profiles, configuration validation, and shared security summaries.
-- `src/workers` isolates the experimental orchestrator protocol and worker permission attestation behind `WorkerBackend`.
+- `src/workers` isolates the experimental server protocol and worker permission attestation behind `WorkerBackend`.
 - `src/planning` calls the selected Pi model and validates its JSON plan.
 - `src/review` defines reviewer prompts, the structured report protocol, and deterministic repair policy.
 - `src/conductor.ts` coordinates durable state transitions, Git isolation, worker launch, review, and repair.
 - `src/extension.ts` provides the build, approval, and recovery commands.
 
-The orchestrator adapter is based on the first-party API at upstream commit [`c889eb8`](https://github.com/earendil-works/pi/blob/c889eb8809a0f40ccd937dc915b10147bec39115/packages/orchestrator/src/ipc/protocol.ts).
+The server adapter is based on the first-party API in upstream Pi [`v0.81.1`](https://github.com/earendil-works/pi/blob/20be4b18e61766a0f07c5c6cefac88ba3a7ad827/packages/server/src/ipc/protocol.ts).
 
-All assumptions about that experimental API are confined to `src/workers/orchestrator-backend.ts`.
+All assumptions about that experimental API are confined to `src/workers/server-backend.ts`.
 
 ## Installation
 
 Requirements:
 
 - Node.js 22.19 or newer
-- Pi 0.80.10 or newer
+- Pi 0.81.1 or newer
 - Git
-- The first-party `@earendil-works/pi-orchestrator` service
+- The first-party `@earendil-works/pi-server` service
 
 Install directly from GitHub:
 
@@ -103,21 +103,22 @@ npm run check
 pi -e .
 ```
 
-The upstream orchestrator package is experimental and is not currently published to the public npm registry.
+The upstream server package is experimental and is not currently published to the public npm registry.
 
-Use the maintained [`orchestrator-compat`](https://github.com/max-miller1204/pi/tree/orchestrator-compat) branch until the required fixes are available upstream:
+Use the maintained [`server-compat`](https://github.com/max-miller1204/pi/tree/server-compat) branch until the required fixes are available upstream:
 
 ```bash
-git clone --branch orchestrator-compat https://github.com/max-miller1204/pi.git
+git clone --branch server-compat https://github.com/max-miller1204/pi.git
 cd pi
 npm ci --ignore-scripts
 npm run build
-npm exec --workspace packages/orchestrator -- orchestrator serve
+npm exec --workspace packages/server -- server serve
 ```
 
 The fork's `main` branch remains synchronized with `earendil-works/pi`.
-The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions, restores the packaged `orchestrator` CLI executable, and implements worker launch policy version 1.
+The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions and implements worker launch policy version 1 in `packages/server`.
 The launch policy disables resource discovery and applies the exact built-in tool allowlist requested for implementation, review, or repair workers.
+The conductor discovers the socket at `$PI_SERVER_DIR/server.sock`, or at `${PI_CONFIG_DIR:-$HOME/.pi}/server/server.sock` when `PI_SERVER_DIR` is unset.
 The conductor rejects an old service before approval and rejects any spawned worker that does not attest the exact requested policy.
 
 The optional upstream smoke test exercises a real service from spawn through shutdown.
@@ -142,7 +143,7 @@ The command performs these steps:
 8. Creates `conductor/<run-id>/integration` without checking it out.
 9. Selects ready tasks in deterministic plan order, up to the approved concurrency limit.
 10. Creates a separate task branch and worktree under `~/.pi/build-conductor/worktrees/` for each selected task.
-11. Spawns an independent Pi instance for each task through the official orchestrator and sends its task prompt.
+11. Spawns an independent Pi instance for each task through the official server and sends its task prompt.
 12. Streams concurrent worker activity into Pi's live status UI and a durable per-attempt journal.
 13. Detects blocking worker select, confirm, input, and editor requests, persists the blocked state, and answers on the same RPC stream with the configured conservative policy.
 14. Detects terminal Pi events and stops each worker process before inspecting its output.
@@ -227,7 +228,7 @@ After an interrupted conductor session, run:
 ```
 
 An awaiting-approval run resumes directly in the structured editor without creating an integration branch or contacting workers.
-Recovery of an approved run checks the official orchestrator and stops every still-live worker owned by the run, including workers spawned just before their identifier could be persisted.
+Recovery of an approved run checks the official server and stops every still-live worker owned by the run, including workers spawned just before their identifier could be persisted.
 Uncommitted in-flight attempts become interrupted and retryable.
 Succeeded reviewer reports remain durable, while interrupted categories are relaunched with fresh workers.
 A validating task attempt with a recorded task commit is verified and cleanup is retried without creating a duplicate commit.
@@ -275,7 +276,7 @@ Replay a completed worker journal or follow an active worker in the terminal wit
 The journal records assistant text deltas, tool start and finish markers, retry notices, blocked worker prompts, conservative policy decisions, prompt resolution outcomes, and terminal worker status.
 Prompt journals include only the request identifier, method, policy, and outcome.
 They never record dialog titles, messages, options, placeholders, prefills, supplied input, or editor response values.
-It does not contain raw subprocess output that the orchestrator protocol did not emit.
+It does not contain raw subprocess output that the server protocol did not emit.
 Journal text is stripped of terminal control sequences, each file is capped at 5 MiB, and display tails are bounded.
 Runs created before journal support report that no captured output is available.
 
@@ -368,7 +369,7 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Every task, reviewer, and repair worker receives a separate branch and worktree.
 - Worktrees are source-integrity boundaries, not OS sandboxes.
 - New runs persist an immutable security policy before approval and reuse it for retries and recovery.
-- A compatible orchestrator must support worker launch policy version 1 and attest the exact applied policy.
+- A compatible server must support worker launch policy version 1 and attest the exact applied policy.
 - Worker extensions, skills, prompt templates, and context files are disabled, and fixed tool allowlists are applied by role.
 - Reviewers receive only `read`, `grep`, `find`, and `ls`, with no Bash or mutation tools.
 - Implementation and repair workers remain unsandboxed and may be able to reach host files, credentials, and the network.
@@ -421,10 +422,10 @@ npm run typecheck
 npm test
 ```
 
-With a compatible official orchestrator service running:
+With a compatible official server service running:
 
 ```bash
-PI_ORCHESTRATOR_SMOKE_SOCKET=/path/to/orchestrator.sock npm run test:upstream
+PI_SERVER_SMOKE_SOCKET=/path/to/server.sock npm run test:upstream
 ```
 
 The package intentionally does not depend on Herdr.

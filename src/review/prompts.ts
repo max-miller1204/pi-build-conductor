@@ -36,7 +36,7 @@ Review the complete integrated result at commit ${baseCommit}, compared with bas
 ${CATEGORY_GUIDANCE[category]}
 
 ENFORCED AUTHORITY
-Active tools: ${policy?.tools.join(", ") ?? "legacy orchestrator defaults"}.
+Active tools: ${policy?.tools.join(", ") ?? "legacy server defaults"}.
 Mutation and Bash tools are unavailable under the current role policy.
 Your Pi process and read tools are not OS-sandboxed. Host files, network, and credentials are outside your authority.
 Do not modify files, create commits, change Git refs or worktrees, push, publish, deploy, access credential stores, or mutate any external system.
@@ -87,7 +87,7 @@ export function buildRepairPrompt(
 	return `You are the repair worker for build run ${run.id}.
 
 ENFORCED AUTHORITY
-Active tools: ${policy?.tools.join(", ") ?? "legacy orchestrator defaults"}.
+Active tools: ${policy?.tools.join(", ") ?? "legacy server defaults"}.
 Your Pi process and tools are not OS-sandboxed. Host filesystem, network, and credentials may be reachable, but they are outside your authority.
 Work only in the current Git worktree and current branch.
 Write only within these approved repository-relative paths:

@@ -15,7 +15,7 @@ describe("run security policy", () => {
 			workers: {
 				sandbox: "none",
 				network: "host",
-				toolPolicy: "orchestrator-allowlist-v1",
+				toolPolicy: "server-allowlist-v1",
 				resourceDiscovery: "disabled",
 				uiPolicy: "decline",
 			},
@@ -58,6 +58,19 @@ describe("run security policy", () => {
 		expect(() =>
 			readSecurityPolicy({ PI_BUILD_NONO_PATH: "/usr/bin/nono" }),
 		).toThrow(/requires/);
+	});
+
+	it("accepts persisted orchestrator policy names during server migration", () => {
+		const policy = readSecurityPolicy({});
+		policy.workers.toolPolicy = "orchestrator-allowlist-v1";
+
+		assertRunSecurityPolicy(policy);
+		expect(workerLaunchPolicy(policy, "review")?.tools).toEqual([
+			"read",
+			"grep",
+			"find",
+			"ls",
+		]);
 	});
 
 	it("uses closed role allowlists and removes destructive reviewer tools", () => {
