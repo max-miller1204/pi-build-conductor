@@ -116,11 +116,11 @@ npm run build
 npm exec --workspace packages/server -- server serve
 ```
 
+The `server` executable is the `packages/server` workspace bin, which the compatibility branch's `packages/server/package.json` declares at `./dist/cli.js`.
 The fork's `main` branch remains synchronized with `earendil-works/pi`.
 The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions and implements worker launch policy version 1 in `packages/server`.
-The launch policy disables resource discovery and applies the exact built-in tool allowlist requested for implementation, review, or repair workers.
+The launch-policy contract, exact attestation requirement, and per-role tool allowlists are specified in [SECURITY.md](SECURITY.md#worker-authority).
 The conductor discovers the socket at `$PI_SERVER_DIR/server.sock`, or at `${PI_CONFIG_DIR:-$HOME/.pi}/server/server.sock` when `PI_SERVER_DIR` is unset.
-The conductor rejects an old service before approval and rejects any spawned worker that does not attest the exact requested policy.
 
 The optional upstream smoke tests exercise a real service from worker spawn through shutdown and take one real Pi worker from task prompt to merge-ready evidence.
 
@@ -370,10 +370,8 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Every task, reviewer, and repair worker receives a separate branch and worktree.
 - Worktrees are source-integrity boundaries, not OS sandboxes.
 - New runs persist an immutable security policy before approval and reuse it for retries and recovery.
-- A compatible server must support worker launch policy version 1 and attest the exact applied policy.
-- Worker extensions, skills, prompt templates, and context files are disabled, and fixed tool allowlists are applied by role.
-- Reviewers receive only `read`, `grep`, `find`, and `ls`, with no Bash or mutation tools.
-- Implementation and repair workers remain unsandboxed and may be able to reach host files, credentials, and the network.
+- Launch-policy negotiation, exact attestation, and the per-role tool allowlists follow the worker authority contract in [SECURITY.md](SECURITY.md#worker-authority).
+- Worker sandboxing limits and credential reachability are described in [SECURITY.md](SECURITY.md#worker-sandbox-and-credentials).
 - Reviewers are fresh agents that did not implement the run and are instructed to leave their worktrees unchanged.
 - Reviewer worktrees are accepted only when their branch, commit, and clean state still match the allocated review snapshot.
 - Dependencies gate dispatch, and newly unblocked tasks are selected in deterministic plan order.
