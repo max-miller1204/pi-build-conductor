@@ -1,4 +1,4 @@
-import { lstat, mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import * as nodePath from "node:path";
 import type { BuildRun } from "../domain/types.js";
 import {
@@ -7,7 +7,7 @@ import {
 	type RepositoryInfo,
 } from "./git.js";
 
-const { dirname, join, resolve } = nodePath;
+const { basename, dirname, isAbsolute, join, relative, resolve } = nodePath;
 
 export interface WorktreeAllocation {
 	branch: string;
@@ -31,6 +31,27 @@ export function isPathInside(
 		!/^\.\.(?:[\\/]|$)/.test(pathFromRoot) &&
 		!pathApi.isAbsolute(pathFromRoot)
 	);
+}
+
+async function canonicalizeExistingPrefix(path: string): Promise<string> {
+	let current = resolve(path);
+	const trailing: string[] = [];
+	for (;;) {
+		try {
+			const canonical = await realpath(current);
+			return trailing.length === 0 ? canonical : join(canonical, ...trailing);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+			const parent = dirname(current);
+			if (parent === current) {
+				return current;
+			}
+			trailing.unshift(basename(current));
+			current = parent;
+		}
+	}
 }
 
 export interface PrepareTaskWorktreeInput {
@@ -70,10 +91,29 @@ export interface WorktreeManager {
 }
 
 export class GitWorktreeManager implements WorktreeManager {
+	private canonicalRoot?: Promise<string>;
+
 	constructor(
 		private readonly git: GitClient,
 		private readonly worktreeRoot: string,
 	) {}
+
+	private canonicalWorktreeRoot(): Promise<string> {
+		this.canonicalRoot ??= canonicalizeExistingPrefix(this.worktreeRoot);
+		return this.canonicalRoot;
+	}
+
+	private async canonicalPath(path: string): Promise<string> {
+		const target = resolve(path);
+		const fromRoot = relative(resolve(this.worktreeRoot), target);
+		if (fromRoot.length === 0) {
+			return this.canonicalWorktreeRoot();
+		}
+		if (!/^\.\.(?:[\\/]|$)/.test(fromRoot) && !isAbsolute(fromRoot)) {
+			return join(await this.canonicalWorktreeRoot(), fromRoot);
+		}
+		return canonicalizeExistingPrefix(target);
+	}
 
 	async prepareIntegrationBranch(
 		repository: RepositoryInfo,
@@ -133,12 +173,13 @@ export class GitWorktreeManager implements WorktreeManager {
 			}
 			try {
 				await lstat(path);
+				const canonicalPath = await this.canonicalPath(path);
 				const [repository, worktree] = await Promise.all([
 					this.git.inspect(input.repository.root),
 					this.git.inspect(path),
 				]);
 				if (
-					worktree.root !== resolve(path) ||
+					worktree.root !== canonicalPath ||
 					worktree.commonDirectory !== repository.commonDirectory ||
 					worktree.currentBranch !== branch ||
 					worktree.head !== expectedHead ||
@@ -231,18 +272,19 @@ export class GitWorktreeManager implements WorktreeManager {
 			}
 			throw error;
 		}
+		const canonicalTarget = await this.canonicalPath(target);
 		const [repository, worktree] = await Promise.all([
 			this.git.inspect(repositoryRoot),
 			this.git.inspect(target),
 		]);
 		if (
-			worktree.root !== target ||
+			worktree.root !== canonicalTarget ||
 			worktree.commonDirectory !== repository.commonDirectory ||
 			worktree.root === repository.root
 		) {
 			throw new Error(`Refusing to remove an unexpected worktree: ${path}`);
 		}
-		await this.git.removeWorktree(repository.root, target);
+		await this.git.removeWorktree(repository.root, canonicalTarget);
 	}
 
 	async pruneRunResources(
@@ -266,13 +308,13 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 
 		const orphanReport = await this.reconcileRunResources(run);
-		const runRoot = resolve(this.worktreeRoot, run.id);
+		const runRoot = await this.canonicalPath(join(this.worktreeRoot, run.id));
 		const prefix = `conductor/${run.id}/`;
 		const expectedWorktreeHeads = new Map<string, string>();
 		const deletableBranchHeads = new Map<string, string>();
 		for (const attempt of run.attempts) {
 			expectedWorktreeHeads.set(
-				resolve(attempt.worktreePath),
+				await this.canonicalPath(attempt.worktreePath),
 				attempt.commit ?? attempt.baseCommit,
 			);
 			if (!attempt.commit) {
@@ -281,14 +323,14 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 		for (const attempt of run.reviewAttempts) {
 			expectedWorktreeHeads.set(
-				resolve(attempt.worktreePath),
+				await this.canonicalPath(attempt.worktreePath),
 				attempt.baseCommit,
 			);
 			deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
 		}
 		for (const attempt of run.repairAttempts) {
 			expectedWorktreeHeads.set(
-				resolve(attempt.worktreePath),
+				await this.canonicalPath(attempt.worktreePath),
 				attempt.commit ?? attempt.baseCommit,
 			);
 			if (!attempt.commit) {
@@ -297,7 +339,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 		for (const attempt of run.finalValidationAttempts) {
 			expectedWorktreeHeads.set(
-				resolve(attempt.worktreePath),
+				await this.canonicalPath(attempt.worktreePath),
 				attempt.integrationCommit,
 			);
 		}
@@ -417,7 +459,7 @@ export class GitWorktreeManager implements WorktreeManager {
 				retainedUnexpectedBranches: [],
 			};
 		}
-		const runRoot = resolve(this.worktreeRoot, run.id);
+		const runRoot = await this.canonicalPath(join(this.worktreeRoot, run.id));
 		const prefix = `conductor/${run.id}/`;
 		const retainedPaths = new Set<string>();
 		const protectedBranches = new Set<string>([run.integrationBranch]);
@@ -434,7 +476,7 @@ export class GitWorktreeManager implements WorktreeManager {
 					attempt.state,
 				)
 			) {
-				retainedPaths.add(resolve(attempt.worktreePath));
+				retainedPaths.add(await this.canonicalPath(attempt.worktreePath));
 			}
 		}
 		for (const attempt of [...run.reviewAttempts, ...run.repairAttempts]) {
@@ -445,12 +487,12 @@ export class GitWorktreeManager implements WorktreeManager {
 					attempt.state,
 				)
 			) {
-				retainedPaths.add(resolve(attempt.worktreePath));
+				retainedPaths.add(await this.canonicalPath(attempt.worktreePath));
 			}
 		}
 		for (const attempt of run.finalValidationAttempts) {
 			if (attempt.state === "running" || attempt.state === "failed") {
-				retainedPaths.add(resolve(attempt.worktreePath));
+				retainedPaths.add(await this.canonicalPath(attempt.worktreePath));
 			}
 		}
 
@@ -458,9 +500,13 @@ export class GitWorktreeManager implements WorktreeManager {
 		const retainedDirtyWorktrees: string[] = [];
 		const retainedUnexpectedWorktrees: string[] = [];
 		const retainedUnexpectedBranches: string[] = [];
-		const integrationScratchPrefix = integrationScratchDirectoryPrefix(
+		const scratchPrefix = integrationScratchDirectoryPrefix(
 			run.repositoryRoot,
 			run.integrationBranch,
+		);
+		const integrationScratchPrefix = join(
+			await this.canonicalPath(dirname(scratchPrefix)),
+			basename(scratchPrefix),
 		);
 		let worktrees = await this.git.listWorktrees(run.repositoryRoot);
 		for (const worktree of worktrees) {

@@ -252,7 +252,7 @@ export async function executeValidationCommand(
 				},
 				(error: unknown) => {
 					resolvePromise({
-						exitCode: null,
+						exitCode: closeExitCode ?? null,
 						stdoutTail: stdout.toString("utf8"),
 						stderrTail: appendTail(
 							stderr,

@@ -1,7 +1,15 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+	lstat,
+	mkdir,
+	mkdtemp,
+	realpath,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { createBuildRun } from "../src/domain/run.js";
@@ -25,6 +33,17 @@ async function createRepository(): Promise<string> {
 	await execute("git", ["add", "README.md"], { cwd: repository });
 	await execute("git", ["commit", "-m", "Initial"], { cwd: repository });
 	return repository;
+}
+
+async function createSymlinkedWorktreeRoot(
+	repositoryRoot: string,
+): Promise<string> {
+	const parent = dirname(repositoryRoot);
+	const target = join(parent, "real-worktrees");
+	const link = join(parent, "linked-worktrees");
+	await mkdir(target, { recursive: true });
+	await symlink(target, link, "dir");
+	return join(link, "worktrees");
 }
 
 function createRun(repositoryRoot: string, baseCommit: string) {
@@ -127,6 +146,57 @@ describe("GitWorktreeManager", () => {
 		await manager.removeTaskWorktree(repositoryRoot, taskWorktree.path);
 		await manager.removeTaskWorktree(repositoryRoot, finalWorktree);
 		expect(await git.listWorktrees(repositoryRoot)).toHaveLength(1);
+	});
+
+	it("reuses and removes worktrees under a symlinked worktree root", async () => {
+		const repositoryRoot = await createRepository();
+		const linkedRoot = await createSymlinkedWorktreeRoot(repositoryRoot);
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(git, linkedRoot);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const input = {
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		};
+
+		const first = await manager.prepareTaskWorktree(input);
+		const second = await manager.prepareTaskWorktree(input);
+
+		expect(second).toEqual(first);
+		expect(first.path.startsWith(linkedRoot)).toBe(true);
+		await manager.removeTaskWorktree(repositoryRoot, first.path);
+		await expect(lstat(first.path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await git.listWorktrees(repositoryRoot)).toHaveLength(1);
+	});
+
+	it("reconciles orphans under a symlinked worktree root", async () => {
+		const repositoryRoot = await createRepository();
+		const linkedRoot = await createSymlinkedWorktreeRoot(repositoryRoot);
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const manager = new GitWorktreeManager(git, linkedRoot);
+		await manager.prepareIntegrationBranch(repository, "run-1");
+		const orphan = await manager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "orphan",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		const canonicalOrphan = await realpath(orphan.path);
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+
+		expect(report.removedWorktrees).toEqual([canonicalOrphan]);
+		expect(report.removedBranches).toEqual([orphan.branch]);
+		await expect(lstat(orphan.path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await git.branchExists(repositoryRoot, orphan.branch)).toBe(false);
 	});
 
 	it("applies Windows path containment without prefix confusion", () => {

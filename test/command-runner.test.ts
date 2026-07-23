@@ -1,4 +1,5 @@
-import { access } from "node:fs/promises";
+import { access, chmod, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunSecurityPolicy } from "../src/domain/types.js";
 import {
@@ -6,6 +7,9 @@ import {
 	buildValidationInvocation,
 	executeValidationCommand,
 } from "../src/validation/command-runner.js";
+
+const cannotRestrictDirectories =
+	process.platform === "win32" || process.getuid?.() === 0;
 
 const nonoValidation: RunSecurityPolicy["validation"] = {
 	sandbox: "nono",
@@ -110,6 +114,41 @@ describe("validation command runner", () => {
 		expect(home).toContain("pi-build-conductor-validation-");
 		await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
 	});
+
+	it.skipIf(cannotRestrictDirectories)(
+		"keeps the real exit code when the runtime cannot be removed",
+		async () => {
+			const result = await executeValidationCommand(
+				{
+					command: process.execPath,
+					args: [
+						"-e",
+						[
+							"const { chmodSync, mkdirSync, writeFileSync } = require('node:fs');",
+							"const { join } = require('node:path');",
+							"const locked = join(process.env.TMPDIR, 'locked');",
+							"mkdirSync(locked, { recursive: true });",
+							"writeFileSync(join(locked, 'cached.txt'), 'x');",
+							"chmodSync(locked, 0o555);",
+							"console.log(process.env.HOME);",
+						].join("\n"),
+					],
+				},
+				process.cwd(),
+				undefined,
+				10_000,
+				64 * 1024,
+			);
+			const executionRoot = dirname(dirname(result.stdoutTail.trim()));
+			await chmod(join(executionRoot, "runtime", "tmp", "locked"), 0o755);
+			await rm(executionRoot, { recursive: true, force: true });
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stderrTail).toContain(
+				"Failed to remove validation runtime",
+			);
+		},
+	);
 
 	it("fails closed when the configured Nono executable is missing", async () => {
 		const result = await executeValidationCommand(
