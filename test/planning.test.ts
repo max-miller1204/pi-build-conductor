@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseGeneratedPlan } from "../src/planning/pi-plan-generator.js";
 
 const validPlan = {
-	version: 1,
+	version: 3,
+	finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
 	title: "Feature",
 	tasks: [
 		{
@@ -11,6 +12,8 @@ const validPlan = {
 			description: "Implement it",
 			dependencies: [],
 			acceptanceCriteria: ["Tests pass"],
+			allowedPaths: ["src/feature/"],
+			validationCommands: [{ command: "npm", args: ["test"] }],
 		},
 	],
 };
@@ -24,7 +27,7 @@ describe("parseGeneratedPlan", () => {
 
 	it("rejects structurally invalid model output", () => {
 		expect(() =>
-			parseGeneratedPlan('{"version":1,"title":"Empty","tasks":[]}'),
+			parseGeneratedPlan('{"version":2,"title":"Empty","tasks":[]}'),
 		).toThrow(/invalid task plan/);
 	});
 });

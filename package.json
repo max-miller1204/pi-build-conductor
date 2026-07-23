@@ -18,6 +18,7 @@
 	"files": [
 		"src",
 		"README.md",
+		"SECURITY.md",
 		"LICENSE"
 	],
 	"exports": {
@@ -34,7 +35,8 @@
 		"format": "biome check --write .",
 		"format:check": "biome check .",
 		"test": "vitest run",
-		"test:upstream": "vitest run test/orchestrator-upstream.test.ts",
+		"test:crash-fixture": "vite-node test/fixtures/crash-after-task-commit.ts",
+		"test:upstream": "vitest run test/server-upstream.test.ts test/conductor-upstream.test.ts",
 		"test:watch": "vitest",
 		"typecheck": "tsc --noEmit"
 	},
@@ -42,15 +44,26 @@
 		"node": ">=22.19.0"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "^0.80.10",
-		"@earendil-works/pi-coding-agent": "^0.80.10"
+		"@earendil-works/pi-ai": "^0.81.1",
+		"@earendil-works/pi-coding-agent": "^0.81.1"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
-		"@earendil-works/pi-ai": "0.80.10",
-		"@earendil-works/pi-coding-agent": "0.80.10",
+		"@earendil-works/pi-ai": "0.81.1",
+		"@earendil-works/pi-coding-agent": "0.81.1",
 		"@types/node": "22.19.19",
+		"@types/proper-lockfile": "^4.1.4",
 		"typescript": "5.9.3",
+		"vite-node": "^3.2.4",
 		"vitest": "3.2.7"
+	},
+	"dependencies": {
+		"proper-lockfile": "^4.1.2"
+	},
+	"overrides": {
+		"protobufjs": "7.6.5",
+		"@earendil-works/pi-coding-agent": {
+			"brace-expansion": "5.0.7"
+		}
 	}
 }
