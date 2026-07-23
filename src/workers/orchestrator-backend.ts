@@ -2,7 +2,11 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { WorkerUiRequest, WorkerUiResponse } from "../domain/types.js";
+import type {
+	WorkerLaunchPolicy,
+	WorkerUiRequest,
+	WorkerUiResponse,
+} from "../domain/types.js";
 import type {
 	SpawnWorkerRequest,
 	WorkerBackend,
@@ -29,6 +33,7 @@ interface InstanceSummary {
 	label?: string;
 	sessionId?: string;
 	sessionFile?: string;
+	appliedPolicy?: WorkerLaunchPolicy;
 }
 
 interface WireResponse {
@@ -37,6 +42,9 @@ interface WireResponse {
 	error?: string;
 	instance?: InstanceSummary;
 	instances?: InstanceSummary[];
+	capabilities?: {
+		workerLaunchPolicyVersions?: number[];
+	};
 	response?: {
 		success: boolean;
 		command: string;
@@ -456,6 +464,21 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 		}
 	}
 
+	async preflightPolicy(policy: WorkerLaunchPolicy): Promise<void> {
+		const response = await this.request({ type: "capabilities" });
+		if (
+			!response.ok ||
+			!response.capabilities?.workerLaunchPolicyVersions?.includes(
+				policy.version,
+			)
+		) {
+			throw new Error(
+				response.error ??
+					`Official orchestrator does not support worker launch policy v${policy.version}`,
+			);
+		}
+	}
+
 	async spawn(request: SpawnWorkerRequest): Promise<WorkerInstance> {
 		if ((request.provider === undefined) !== (request.model === undefined)) {
 			throw new Error("provider and model must be supplied together");
@@ -471,19 +494,30 @@ export class OfficialOrchestratorBackend implements WorkerBackend {
 			payload.provider = request.provider;
 			payload.model = request.model;
 		}
+		if (request.launchPolicy) {
+			payload.launchPolicy = request.launchPolicy;
+		}
 		const instance = requireInstance(
 			await this.request(payload, { timeoutAfterConnect: false }),
 			"spawn",
 		);
-		if (!request.provider || !request.model) {
-			return instance;
-		}
 		try {
-			await this.rpc(instance.id, {
-				type: "set_model",
-				provider: request.provider,
-				modelId: request.model,
-			});
+			if (
+				request.launchPolicy &&
+				JSON.stringify(instance.appliedPolicy) !==
+					JSON.stringify(request.launchPolicy)
+			) {
+				throw new Error(
+					`Official orchestrator did not attest worker launch policy v${request.launchPolicy.version}`,
+				);
+			}
+			if (request.provider && request.model) {
+				await this.rpc(instance.id, {
+					type: "set_model",
+					provider: request.provider,
+					modelId: request.model,
+				});
+			}
 			return instance;
 		} catch (error) {
 			try {

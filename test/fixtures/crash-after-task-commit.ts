@@ -161,7 +161,7 @@ class WritingWorker implements WorkerBackend {
 		const worker = await this.status(workerId);
 		await writeFile(
 			`${worker.cwd}/result.txt`,
-			prompt.startsWith("You are an isolated repair worker")
+			prompt.startsWith("You are the repair worker")
 				? "repaired before crash\n"
 				: "committed before crash\n",
 			"utf8",

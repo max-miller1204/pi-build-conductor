@@ -1,5 +1,6 @@
 import type {
 	FinalValidationEvidence,
+	RunSecurityPolicy,
 	ValidationCheckEvidence,
 	ValidationCommand,
 } from "../domain/types.js";
@@ -13,6 +14,7 @@ export interface FinalValidationInput {
 	worktreePath: string;
 	integrationCommit: string;
 	commands: ValidationCommand[];
+	securityPolicy?: RunSecurityPolicy;
 	signal?: AbortSignal;
 }
 
@@ -84,6 +86,7 @@ export class LocalFinalValidator implements FinalValidator {
 				input.signal,
 				this.commandTimeoutMs,
 				this.outputTailBytes,
+				input.securityPolicy?.validation,
 			);
 			const passed =
 				result.exitCode === 0 && !result.timedOut && !result.aborted;
@@ -96,6 +99,7 @@ export class LocalFinalValidator implements FinalValidator {
 				stdoutTail: result.stdoutTail,
 				stderrTail: result.stderrTail,
 				passed,
+				executionBoundary: result.executionBoundary,
 			});
 			if (!passed) {
 				const message = result.aborted

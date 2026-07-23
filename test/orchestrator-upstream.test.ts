@@ -13,9 +13,17 @@ describe.runIf(Boolean(socketPath))("official orchestrator smoke", () => {
 			socketPath,
 			requestTimeoutMs: 60_000,
 		});
+		const launchPolicy = {
+			version: 1 as const,
+			role: "review" as const,
+			tools: ["read", "grep", "find", "ls"],
+			resourceDiscovery: "disabled" as const,
+		};
+		await backend.preflightPolicy(launchPolicy);
 		const worker = await backend.spawn({
 			cwd: process.cwd(),
 			label: `pi-build-conductor:upstream-smoke:${randomUUID()}`,
+			launchPolicy,
 		});
 		try {
 			const progress: string[] = [];

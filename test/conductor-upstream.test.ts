@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { BuildConductor } from "../src/conductor.js";
-import type { TaskDefinition } from "../src/domain/types.js";
+import type {
+	TaskDefinition,
+	WorkerLaunchPolicy,
+} from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 import { RunStore } from "../src/storage/run-store.js";
@@ -33,6 +36,10 @@ class HybridOrchestratorWorkers implements WorkerBackend {
 	private nextSyntheticWorker = 1;
 
 	constructor(private readonly official: OfficialOrchestratorBackend) {}
+
+	async preflightPolicy(policy: WorkerLaunchPolicy): Promise<void> {
+		await this.official.preflightPolicy(policy);
+	}
 
 	async spawn(request: SpawnWorkerRequest): Promise<WorkerInstance> {
 		if (request.label?.includes(":review-")) {

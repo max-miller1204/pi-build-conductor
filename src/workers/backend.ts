@@ -1,5 +1,6 @@
 import type {
 	BlockedWorkerPolicy,
+	WorkerLaunchPolicy,
 	WorkerUiMethod,
 	WorkerUiRequest,
 	WorkerUiResponse,
@@ -19,6 +20,7 @@ export interface WorkerInstance {
 	label?: string;
 	sessionId?: string;
 	sessionFile?: string;
+	appliedPolicy?: WorkerLaunchPolicy;
 }
 
 export interface SpawnWorkerRequest {
@@ -26,6 +28,7 @@ export interface SpawnWorkerRequest {
 	label?: string;
 	provider?: string;
 	model?: string;
+	launchPolicy?: WorkerLaunchPolicy;
 }
 
 export type WorkerUiResolutionOutcome =
@@ -83,6 +86,7 @@ export interface WorkerExecution {
 }
 
 export interface WorkerBackend {
+	preflightPolicy?(policy: WorkerLaunchPolicy): Promise<void>;
 	spawn(request: SpawnWorkerRequest): Promise<WorkerInstance>;
 	list(): Promise<WorkerInstance[]>;
 	status(workerId: string): Promise<WorkerInstance>;

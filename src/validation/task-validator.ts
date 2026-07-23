@@ -1,4 +1,5 @@
 import type {
+	RunSecurityPolicy,
 	TaskAttempt,
 	TaskDefinition,
 	TaskValidationEvidence,
@@ -13,6 +14,7 @@ const DEFAULT_OUTPUT_TAIL_BYTES = 64 * 1024;
 export interface TaskValidationInput {
 	task: TaskDefinition;
 	attempt: TaskAttempt;
+	securityPolicy?: RunSecurityPolicy;
 	signal?: AbortSignal;
 }
 
@@ -166,6 +168,7 @@ export class LocalTaskValidator implements TaskValidator {
 				input.signal,
 				this.commandTimeoutMs,
 				this.outputTailBytes,
+				input.securityPolicy?.validation,
 			);
 			const passed =
 				result.exitCode === 0 && !result.timedOut && !result.aborted;
@@ -178,6 +181,7 @@ export class LocalTaskValidator implements TaskValidator {
 				stdoutTail: result.stdoutTail,
 				stderrTail: result.stderrTail,
 				passed,
+				executionBoundary: result.executionBoundary,
 			});
 			if (!passed) {
 				const reason = result.aborted

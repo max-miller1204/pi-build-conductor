@@ -1,6 +1,8 @@
 # pi-build-conductor
 
-`pi-build-conductor` is a Pi package for turning a build handoff into isolated, dependency-aware implementation work.
+`pi-build-conductor` is a Pi package for turning a build handoff into worktree-isolated, dependency-aware implementation work.
+
+See [SECURITY.md](SECURITY.md) for the worker trust model, sandbox boundary, credential exposure, residual risks, and operator guidance.
 
 The current vertical slice reads a handoff, generates or loads a validated task DAG, lets the user edit and explicitly approve it, launches a bounded pool of isolated workers, integrates validated task commits, runs independent review and repair passes, and produces merge-ready evidence after the approved complete validation suite passes.
 
@@ -32,6 +34,12 @@ Implemented:
 - Durable blocked-worker visibility with conservative configurable auto-decline or auto-cancel decisions
 - Redacted prompt decision, timeout, cancellation, and recovery journaling
 - Approved per-task path scopes and focused validation commands
+- Immutable per-run security policy used by approval, retries, recovery, prompts, validation, and reports
+- Compatible-orchestrator capability negotiation and exact worker launch-policy attestation
+- Fixed role-based tool allowlists with Bash and mutation tools removed from reviewers
+- Worker project extensions, skills, prompt templates, and context-file discovery disabled
+- Fresh temporary validation homes, reduced credential-free command environments, and disabled Git credential prompting
+- Optional fail-closed Nono validation sandbox with fixed filesystem permissions and blocked network
 - Conductor-controlled diff inspection, focused checks, and coherent task commits
 - Durable changed-file, diff fingerprint, check, and commit evidence
 - Deterministic sequential cherry-pick integration on a separate branch
@@ -58,8 +66,9 @@ Implemented:
 - `src/domain` contains run, task, attempt, and DAG state without process or UI dependencies.
 - `src/storage` persists versioned run snapshots under the repository's Git common directory.
 - `src/git` owns branch, diff inspection, commit, cherry-pick, and worktree operations.
-- `src/validation` enforces approved task scope and runs focused and final checks without a shell.
-- `src/workers` isolates the experimental orchestrator protocol behind `WorkerBackend`.
+- `src/validation` enforces approved task scope and runs focused and final checks without a shell, with an optional Nono sandbox.
+- `src/security` defines the immutable run policy, role tool profiles, configuration validation, and shared security summaries.
+- `src/workers` isolates the experimental orchestrator protocol and worker permission attestation behind `WorkerBackend`.
 - `src/planning` calls the selected Pi model and validates its JSON plan.
 - `src/review` defines reviewer prompts, the structured report protocol, and deterministic repair policy.
 - `src/conductor.ts` coordinates durable state transitions, Git isolation, worker launch, review, and repair.
@@ -107,7 +116,9 @@ npm exec --workspace packages/orchestrator -- orchestrator serve
 ```
 
 The fork's `main` branch remains synchronized with `earendil-works/pi`.
-The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions and restores the packaged `orchestrator` CLI executable.
+The compatibility branch resolves `@earendil-works/pi-coding-agent/rpc-entry` with ESM import conditions, restores the packaged `orchestrator` CLI executable, and implements worker launch policy version 1.
+The launch policy disables resource discovery and applies the exact built-in tool allowlist requested for implementation, review, or repair workers.
+The conductor rejects an old service before approval and rejects any spawned worker that does not attest the exact requested policy.
 
 The optional upstream smoke test exercises a real service from spawn through shutdown.
 
@@ -172,6 +183,20 @@ The worker pool defaults to two concurrent workers.
 Set `PI_BUILD_MAX_CONCURRENT_WORKERS` to an integer from two through four to choose the initial value.
 The structured plan review can change that value to two, three, or four before approval, and the approved value is persisted with the exact plan revision.
 
+Validation uses a fresh temporary `HOME`, XDG directories, and temporary directory for every command.
+It excludes ambient API keys, SSH agent access, and the operator's credential configuration from the command environment.
+This reduced environment is not a filesystem sandbox when validation sandboxing is disabled.
+
+Set `PI_BUILD_VALIDATION_SANDBOX=nono` and `PI_BUILD_NONO_PATH=/absolute/path/to/nono` to sandbox focused and final validation.
+Nono receives fixed `--allow-cwd`, temporary-runtime access, and `--block-net` arguments.
+A missing or failing Nono executable fails closed without retrying the command unsandboxed.
+The default is `PI_BUILD_VALIDATION_SANDBOX=none` for compatibility and is prominently reported during approval and inspection.
+
+Workers remain unsandboxed Pi processes with host filesystem and network reachability.
+Role tool allowlists and disabled resource discovery reduce their callable authority but do not protect host credentials from every worker tool.
+Use a dedicated low-privilege or disposable environment when stronger isolation is required.
+See [SECURITY.md](SECURITY.md) for the complete trust model.
+
 ## Plan review and approval
 
 The review menu shows deterministic DAG layers and explicit dependency edges without requiring the user to inspect the full plan JSON.
@@ -184,7 +209,7 @@ Every valid change appends an immutable revision containing the complete plan an
 Restoring history appends a new revision rather than mutating or deleting earlier records.
 
 The final approval summary identifies the run, exact plan revision, task and edge counts, DAG layers, worker limit, every approved path and executable command, and integration branch.
-It also states that validation runs repository code without a sandbox and that only conductor metadata has been persisted so far.
+It also shows the immutable worker and validation boundary, warns when repository code is unsandboxed, states the worker credential exposure, and confirms that only conductor metadata has been persisted so far.
 Declining final approval returns to editing.
 Dismissing the review menu exits safely and keeps the run awaiting approval for `/build-resume`.
 Explicit cancellation requires separate confirmation and records the run as cancelled without creating Git refs, worktrees, workers, or validation processes.
@@ -212,8 +237,9 @@ An active final validation attempt becomes interrupted after restart.
 Passing final-validation evidence is persisted before cleanup, so resume can reuse it at the same immutable integration head and rerun only Git and user-worktree verification.
 Recovery removes unreferenced resources only below the configured conductor worktree root and `conductor/<run-id>/` branch namespace when their refs still equal a proven allocation start commit.
 Dirty orphan worktrees and clean orphan branches containing unexpected commits are retained for manual inspection.
-Run schema 4 and 5 snapshots migrate deterministically to schema 7 with one imported plan revision.
-Run schema 6 snapshots migrate to schema 7 with an empty blocked-worker projection.
+Run schema 4 and 5 snapshots migrate deterministically to schema 8 with one imported plan revision.
+Run schema 6 snapshots migrate to schema 8 with an empty blocked-worker projection.
+Run schema 7 snapshots migrate to schema 8 with an explicit legacy unsandboxed and unrestricted security policy.
 Unresolved blocked prompts are journaled as recovery interruptions before their owning workers are stopped and their attempts become retryable.
 Run schemas 2 and 3 and plan schema 2 still require a new explicitly approved run.
 The monotonic run snapshot `revision` remains separate from the immutable `planRevision` history.
@@ -340,6 +366,12 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Only restart-safe conductor metadata and valid plan revisions are persisted before explicit approval.
 - No Git refs, worktrees, workers, or validation commands are created or started before explicit plan approval.
 - Every task, reviewer, and repair worker receives a separate branch and worktree.
+- Worktrees are source-integrity boundaries, not OS sandboxes.
+- New runs persist an immutable security policy before approval and reuse it for retries and recovery.
+- A compatible orchestrator must support worker launch policy version 1 and attest the exact applied policy.
+- Worker extensions, skills, prompt templates, and context files are disabled, and fixed tool allowlists are applied by role.
+- Reviewers receive only `read`, `grep`, `find`, and `ls`, with no Bash or mutation tools.
+- Implementation and repair workers remain unsandboxed and may be able to reach host files, credentials, and the network.
 - Reviewers are fresh agents that did not implement the run and are instructed to leave their worktrees unchanged.
 - Reviewer worktrees are accepted only when their branch, commit, and clean state still match the allocated review snapshot.
 - Dependencies gate dispatch, and newly unblocked tasks are selected in deterministic plan order.
@@ -348,8 +380,9 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Worker-created commits, branch switches, base resets, conflicts, Git submodules, and empty diffs are rejected.
 - Both sides of a rename must stay within the plan's approved path scope.
 - Task commits use a controlled temporary index, bypass repository hooks, and reject clean filters that would alter validated bytes.
-- Validation commands execute directly without a shell, receive a reduced environment, have bounded output and time, and may not modify the validated snapshot.
-- Focused validation executes repository code and is not a security sandbox.
+- Validation commands execute directly without a shell, receive a fresh temporary home and reduced environment, have bounded output and time, and may not modify the validated snapshot.
+- Optional Nono validation uses fixed worktree and temporary-runtime permissions with blocked network and no unsandboxed fallback.
+- Unsandboxed focused validation executes repository code with host filesystem and network access.
 - Run state is written atomically outside the checked-out file tree with file and parent-directory synchronization.
 - Every state mutation is serialized by a cross-process lock and advances a monotonic snapshot revision.
 - Every valid pre-approval plan change appends an immutable plan revision, and approval freezes execution to that exact revision.
@@ -377,6 +410,8 @@ A failed repair worker fails the run immediately, while interrupted repairs may 
 - Ignored command artifacts may remain because Git porcelain intentionally excludes ignored files.
 - Completion requires a succeeded final attempt at the current integration head, exact linear history evidence, and proof that the user worktree stayed clean and untouched.
 - Failed and cancelled runs cannot contain merge-ready evidence.
+- Merge-ready evidence records the immutable security policy and per-check execution boundary.
+- Merge-ready evidence does not prove the absence of host, credential, network, cloud, or other external side effects.
 
 ## Development
 

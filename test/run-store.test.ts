@@ -93,7 +93,7 @@ describe("RunStore", () => {
 		const first = await store.load(run.id);
 		const second = await store.load(run.id);
 		expect(first).toMatchObject({
-			schemaVersion: 7,
+			schemaVersion: 8,
 			revision: 0,
 			planRevision: 1,
 			blockedWorkers: [],
@@ -103,7 +103,7 @@ describe("RunStore", () => {
 			join(store.directory, `${run.id}.json`),
 			"utf8",
 		);
-		expect(persisted).toContain('"schemaVersion": 7');
+		expect(persisted).toContain('"schemaVersion": 8');
 		expect(persisted).toContain('"revision": 0');
 	});
 
@@ -124,7 +124,7 @@ describe("RunStore", () => {
 
 		const migrated = await store.load(run.id);
 		expect(migrated).toMatchObject({
-			schemaVersion: 7,
+			schemaVersion: 8,
 			planRevision: 1,
 			approvedPlanRevision: 1,
 			planRevisions: [
@@ -148,7 +148,7 @@ describe("RunStore", () => {
 
 		const migrated = await store.load(run.id);
 		expect(migrated).toMatchObject({
-			schemaVersion: 7,
+			schemaVersion: 8,
 			blockedWorkers: [],
 		});
 		expect(
@@ -279,6 +279,18 @@ describe("RunStore", () => {
 				return { ...current };
 			}),
 		).rejects.toThrow(/Plan revision 1 is immutable/);
+		await expect(
+			store.transaction(initial.id, (current) => ({
+				...current,
+				securityPolicy: {
+					...current.securityPolicy,
+					workers: {
+						...current.securityPolicy.workers,
+						uiPolicy: "cancel" as const,
+					},
+				},
+			})),
+		).rejects.toThrow(/security policy is immutable/);
 		await expect(
 			store.transaction(initial.id, (current) => {
 				current.id = "redirected-run";

@@ -9,6 +9,7 @@ import type {
 	TaskPlan,
 	TaskState,
 } from "../src/domain/types.js";
+import { legacySecurityPolicy } from "../src/security/policy.js";
 
 function definition(id: string, dependencies: string[] = []): TaskDefinition {
 	return {
@@ -39,7 +40,7 @@ function runWith(
 		tasks: definitions,
 	};
 	return {
-		schemaVersion: 7,
+		schemaVersion: 8,
 		revision: 0,
 		id: "run-1",
 		state: "running",
@@ -48,6 +49,7 @@ function runWith(
 		baseCommit: "abc",
 		integrationBranch: "conductor/run-1/integration",
 		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+		securityPolicy: legacySecurityPolicy(),
 		plan,
 		planRevision: 1,
 		planRevisions: [

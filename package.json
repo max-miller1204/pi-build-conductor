@@ -18,6 +18,7 @@
 	"files": [
 		"src",
 		"README.md",
+		"SECURITY.md",
 		"LICENSE"
 	],
 	"exports": {

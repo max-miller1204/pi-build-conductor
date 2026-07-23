@@ -1,3 +1,4 @@
+import { legacySecurityPolicy } from "../security/policy.js";
 import { validateTaskPlan } from "./dag.js";
 import { reconcileTaskStates } from "./scheduler.js";
 import {
@@ -6,6 +7,7 @@ import {
 	MIN_CONCURRENT_WORKERS,
 	type PlanRevisionSource,
 	RUN_SCHEMA_VERSION,
+	type RunSecurityPolicy,
 	type RunTask,
 	type TaskPlan,
 } from "./types.js";
@@ -17,6 +19,7 @@ export interface CreateRunInput {
 	baseCommit: string;
 	integrationBranch: string;
 	handoff: BuildRun["handoff"];
+	securityPolicy?: RunSecurityPolicy;
 	plan: TaskPlan;
 	maxConcurrentWorkers: number;
 	planSource?: Exclude<PlanRevisionSource, "edited" | "restored" | "migrated">;
@@ -93,6 +96,9 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		baseCommit: input.baseCommit,
 		integrationBranch: input.integrationBranch,
 		handoff: input.handoff,
+		securityPolicy: structuredClone(
+			input.securityPolicy ?? legacySecurityPolicy(),
+		),
 		plan,
 		planRevision,
 		planRevisions: [

@@ -101,17 +101,17 @@
       "id": "goal-mrtf4yxl-017cc555",
       "title": "Define sandbox and permission policy",
       "description": "Document the worker trust model, add optional sandbox integration, constrain credentials and destructive tools where possible, and make security boundaries explicit in prompts, configuration, and reports.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-20T16:07:58.424Z",
-      "updatedAt": "2026-07-20T16:07:58.424Z"
+      "updatedAt": "2026-07-23T01:24:58.368Z"
     },
     {
       "id": "goal-mrwiz9k3-04bbbc8f",
       "title": "Handle blocked worker prompts through typed RPC",
       "description": "Detect Pi extension_ui_request events for select, confirm, input, and editor dialogs; expose blocked-worker state; send extension_ui_response through the worker RPC channel; apply a conservative configurable auto-cancel or decline policy; journal decisions; and add end-to-end tests for response, timeout, cancellation, and recovery behavior.",
-      "status": "active",
+      "status": "done",
       "createdAt": "2026-07-22T20:18:49.251Z",
-      "updatedAt": "2026-07-22T20:46:37.757Z"
+      "updatedAt": "2026-07-23T01:24:11.143Z"
     }
   ]
 }

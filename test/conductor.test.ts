@@ -10,6 +10,7 @@ import {
 import { approveRun } from "../src/domain/run.js";
 import type {
 	BlockedWorkerPolicy,
+	WorkerLaunchPolicy,
 	WorkerUiRequest,
 	WorkerUiResponse,
 } from "../src/domain/types.js";
@@ -102,6 +103,13 @@ class FakeWorkers implements WorkerBackend {
 
 	async stop(workerId: string): Promise<void> {
 		this.calls.push({ operation: "stop", value: workerId });
+	}
+}
+
+class UnsupportedPolicyWorkers extends FakeWorkers {
+	async preflightPolicy(policy: WorkerLaunchPolicy): Promise<void> {
+		this.calls.push({ operation: "preflight", value: policy });
+		throw new Error("worker launch policy v1 is unsupported");
 	}
 }
 
@@ -753,6 +761,37 @@ describe("BuildConductor vertical slice", () => {
 		},
 	);
 
+	it("uses the persisted UI policy after conductor configuration changes", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-persisted-ui-policy-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const creator = new BuildConductor({
+			store,
+			workers: new FakeWorkers(),
+			worktrees: new FakeWorktrees(),
+			blockedWorkerPolicy: "decline",
+		});
+		const run = await createSingleTaskRun(creator);
+		const workers = new UiPromptWorkers();
+		const resumedConfiguration = new BuildConductor({
+			store,
+			workers,
+			worktrees: new FakeWorktrees(),
+			blockedWorkerPolicy: "cancel",
+		});
+
+		const result = await resumedConfiguration.approveAndLaunch(run, repository);
+		await result.completion;
+
+		expect(run.securityPolicy.workers.uiPolicy).toBe("decline");
+		expect(workers.responses[0]).toEqual({
+			kind: "confirmation",
+			confirmed: false,
+		});
+	});
+
 	it("keeps concurrent dialogs blocked until each request resolves", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-concurrent-ui-"),
@@ -808,7 +847,7 @@ describe("BuildConductor vertical slice", () => {
 			workers,
 			worktrees: new FakeWorktrees(),
 			attemptLogs: logs,
-			workerTimeoutMs: 10,
+			workerTimeoutMs: 250,
 		});
 		const run = await createSingleTaskRun(conductor);
 		const result = await conductor.approveAndLaunch(run, repository);
@@ -821,7 +860,7 @@ describe("BuildConductor vertical slice", () => {
 		expect(timedOut.state).toBe("failed");
 		expect(timedOut.blockedWorkers).toEqual([]);
 		expect(timedOut.attempts[0]?.error).toBe(
-			"Worker execution timed out after 10ms",
+			"Worker execution timed out after 250ms",
 		);
 		expect(workers.responses).toEqual([]);
 	});
@@ -1306,6 +1345,28 @@ describe("BuildConductor vertical slice", () => {
 		await result.completion;
 	});
 
+	it("rejects an incompatible orchestrator before approval or Git side effects", async () => {
+		const directory = await mkdtemp(
+			join(tmpdir(), "pi-build-conductor-policy-preflight-"),
+		);
+		directories.push(directory);
+		const store = new RunStore(directory);
+		const workers = new UnsupportedPolicyWorkers();
+		const worktrees = new FakeWorktrees();
+		const conductor = new BuildConductor({ store, workers, worktrees });
+		const run = await createSingleTaskRun(conductor);
+
+		await expect(conductor.approveAndLaunch(run, repository)).rejects.toThrow(
+			/worker launch policy v1 is unsupported/,
+		);
+
+		expect((await store.load(run.id)).state).toBe("awaiting_approval");
+		expect(worktrees.integrationBranch).toBeUndefined();
+		expect(workers.calls.filter((call) => call.operation === "spawn")).toEqual(
+			[],
+		);
+	});
+
 	it("rejects stale plan approval before Git or worker side effects", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-stale-approval-"),
@@ -1440,11 +1501,24 @@ describe("BuildConductor vertical slice", () => {
 			value: {
 				cwd: "/worktree",
 				label: `pi-build-conductor:${run.id}:${launch?.attempt.id}:implementation`,
+				launchPolicy: {
+					version: 1,
+					role: "implementation",
+					tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
+					resourceDiscovery: "disabled",
+				},
 				provider: "anthropic",
 				model: "claude-sonnet-4-5",
 			},
 		});
 		expect(workers.calls[1]).toMatchObject({ operation: "prompt" });
+		const prompt = (workers.calls[1]?.value as { prompt?: string })?.prompt;
+		expect(prompt).toContain("ENFORCED AUTHORITY");
+		expect(prompt).toContain("<untrusted_task_json>");
+		expect(prompt).toContain(
+			"Host filesystem, network, and credentials may be reachable",
+		);
+		expect(prompt).toContain("Do not push, publish, deploy");
 		expect(await store.load(run.id)).toEqual(result.run);
 		await conductor.cancelRun(result.run);
 		await result.completion;

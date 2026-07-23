@@ -23,6 +23,10 @@ import {
 	type TaskState,
 	type WorkerUiMethod,
 } from "../domain/types.js";
+import {
+	assertRunSecurityPolicy,
+	legacySecurityPolicy,
+} from "../security/policy.js";
 
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
@@ -118,33 +122,50 @@ function assertString(value: unknown, path: string): asserts value is string {
 function migrateLegacyRun(
 	value: Record<string, unknown>,
 ): Record<string, unknown> {
-	if (value.schemaVersion === 6) {
-		return {
+	let migrated = value;
+	if (value.schemaVersion === 7) {
+		migrated = { ...value, schemaVersion: RUN_SCHEMA_VERSION };
+	} else if (value.schemaVersion === 6) {
+		migrated = {
 			...value,
 			schemaVersion: RUN_SCHEMA_VERSION,
 			blockedWorkers: [],
 		};
+	} else if (value.schemaVersion === 4 || value.schemaVersion === 5) {
+		const approved = value.approvedAt !== undefined;
+		migrated = {
+			...value,
+			schemaVersion: RUN_SCHEMA_VERSION,
+			revision: value.schemaVersion === 4 ? 0 : value.revision,
+			planRevision: 1,
+			planRevisions: [
+				{
+					number: 1,
+					createdAt: value.approvedAt ?? value.createdAt,
+					source: "migrated",
+					plan: value.plan,
+					maxConcurrentWorkers: value.maxConcurrentWorkers,
+				},
+			],
+			blockedWorkers: [],
+			...(approved ? { approvedPlanRevision: 1 } : {}),
+		};
 	}
-	if (value.schemaVersion !== 4 && value.schemaVersion !== 5) {
+	if (migrated === value) {
 		return value;
 	}
-	const approved = value.approvedAt !== undefined;
+	const securityPolicy = legacySecurityPolicy();
+	const mergeReadyEvidence = isRecord(migrated.mergeReadyEvidence)
+		? {
+				...migrated.mergeReadyEvidence,
+				version: MERGE_READY_EVIDENCE_VERSION,
+				securityPolicy,
+			}
+		: migrated.mergeReadyEvidence;
 	return {
-		...value,
-		schemaVersion: RUN_SCHEMA_VERSION,
-		revision: value.schemaVersion === 4 ? 0 : value.revision,
-		planRevision: 1,
-		planRevisions: [
-			{
-				number: 1,
-				createdAt: value.approvedAt ?? value.createdAt,
-				source: "migrated",
-				plan: value.plan,
-				maxConcurrentWorkers: value.maxConcurrentWorkers,
-			},
-		],
-		blockedWorkers: [],
-		...(approved ? { approvedPlanRevision: 1 } : {}),
+		...migrated,
+		securityPolicy,
+		...(mergeReadyEvidence === undefined ? {} : { mergeReadyEvidence }),
 	};
 }
 
@@ -207,6 +228,20 @@ function validateEvidence(value: unknown, path: string): void {
 		if (typeof check.passed !== "boolean") {
 			throw new Error(`${checkPath}.passed must be a boolean`);
 		}
+		if (check.executionBoundary !== undefined) {
+			if (!isRecord(check.executionBoundary)) {
+				throw new Error(`${checkPath}.executionBoundary must be an object`);
+			}
+			const boundary = check.executionBoundary;
+			if (
+				!["none", "nono"].includes(String(boundary.sandbox)) ||
+				!["host", "blocked"].includes(String(boundary.network)) ||
+				boundary.environment !== "temporary-home-reduced" ||
+				(boundary.sandbox === "nono") !== (boundary.network === "blocked")
+			) {
+				throw new Error(`${checkPath}.executionBoundary is invalid`);
+			}
+		}
 	}
 }
 
@@ -241,6 +276,7 @@ export function validateStoredRun(value: unknown): BuildRun {
 	) {
 		throw new Error(`Invalid run state: ${String(value.state)}`);
 	}
+	assertRunSecurityPolicy(value.securityPolicy);
 	for (const field of [
 		"repositoryRoot",
 		"baseBranch",
@@ -800,6 +836,8 @@ export function validateStoredRun(value: unknown): BuildRun {
 			case "repair":
 				attempt = repairAttemptsById.get(blocked.attemptId as string);
 				break;
+			default:
+				throw new Error(`${path}.attemptKind is invalid`);
 		}
 		if (!attempt) {
 			throw new Error(`${path}.attemptId references an unknown attempt`);
@@ -1037,6 +1075,18 @@ export function validateStoredRun(value: unknown): BuildRun {
 			"baseCommit",
 		] as const) {
 			assertString(mergeReady[field], `run.mergeReadyEvidence.${field}`);
+		}
+		assertRunSecurityPolicy(
+			mergeReady.securityPolicy,
+			"run.mergeReadyEvidence.securityPolicy",
+		);
+		if (
+			JSON.stringify(mergeReady.securityPolicy) !==
+			JSON.stringify(value.securityPolicy)
+		) {
+			throw new Error(
+				"run.mergeReadyEvidence.securityPolicy must match the immutable run policy",
+			);
 		}
 		if (
 			mergeReady.integrationBranch !== value.integrationBranch ||
@@ -1333,6 +1383,12 @@ function assertPlanHistoryTransition(
 	current: BuildRun,
 	proposed: BuildRun,
 ): void {
+	if (
+		JSON.stringify(proposed.securityPolicy) !==
+		JSON.stringify(current.securityPolicy)
+	) {
+		throw new Error("Run security policy is immutable");
+	}
 	if (proposed.planRevisions.length < current.planRevisions.length) {
 		throw new Error("Plan revision history cannot be truncated");
 	}

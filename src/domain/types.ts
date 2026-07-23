@@ -1,6 +1,6 @@
-export const RUN_SCHEMA_VERSION = 7 as const;
+export const RUN_SCHEMA_VERSION = 8 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
-export const MERGE_READY_EVIDENCE_VERSION = 1 as const;
+export const MERGE_READY_EVIDENCE_VERSION = 2 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
 export const MAX_CONCURRENT_WORKERS = 4 as const;
 
@@ -42,6 +42,39 @@ export interface ValidationCommand {
 	args: string[];
 }
 
+export type ValidationSandboxMode = "none" | "nono";
+export type WorkerRole = "implementation" | "review" | "repair";
+
+export interface ValidationExecutionBoundary {
+	sandbox: ValidationSandboxMode;
+	network: "host" | "blocked";
+	environment: "temporary-home-reduced";
+}
+
+export interface WorkerLaunchPolicy {
+	version: 1;
+	role: WorkerRole;
+	tools: string[];
+	resourceDiscovery: "disabled";
+}
+
+export interface RunSecurityPolicy {
+	version: 1;
+	source: "configured" | "legacy-migrated";
+	workers: {
+		isolation: "worktree-only";
+		sandbox: "none";
+		network: "host";
+		toolPolicy: "orchestrator-allowlist-v1" | "legacy-unrestricted";
+		resourceDiscovery: "disabled" | "host";
+		credentialExposure: "host-credentials-available-to-worker";
+		uiPolicy: BlockedWorkerPolicy;
+	};
+	validation: ValidationExecutionBoundary & {
+		sandboxExecutable?: string;
+	};
+}
+
 export interface ChangedFileEvidence {
 	path: string;
 	status: string;
@@ -57,6 +90,7 @@ export interface ValidationCheckEvidence {
 	stdoutTail: string;
 	stderrTail: string;
 	passed: boolean;
+	executionBoundary?: ValidationExecutionBoundary;
 }
 
 export interface TaskValidationEvidence {
@@ -331,6 +365,7 @@ export interface FinalReviewSummary {
 export interface MergeReadyEvidence {
 	version: typeof MERGE_READY_EVIDENCE_VERSION;
 	generatedAt: string;
+	securityPolicy: RunSecurityPolicy;
 	integrationBranch: string;
 	integrationHead: string;
 	baseBranch: string;
@@ -352,6 +387,7 @@ export interface BuildRun {
 	baseCommit: string;
 	integrationBranch: string;
 	handoff: HandoffRecord;
+	securityPolicy: RunSecurityPolicy;
 	plan: TaskPlan;
 	planRevision: number;
 	planRevisions: PlanRevision[];

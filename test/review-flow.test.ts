@@ -63,12 +63,12 @@ class ReviewFlowWorkers implements WorkerBackend {
 		_options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
 		const worker = await this.status(workerId);
-		if (prompt.includes("isolated implementation worker")) {
+		if (prompt.includes("implementation worker for build run")) {
 			await mkdir(join(worker.cwd, "src"), { recursive: true });
 			await writeFile(join(worker.cwd, "src", "result.txt"), "implemented\n");
 			return { completion: Promise.resolve({ status: "succeeded" }) };
 		}
-		if (prompt.includes("isolated repair worker")) {
+		if (prompt.includes("repair worker for build run")) {
 			await mkdir(join(worker.cwd, "src"), { recursive: true });
 			await writeFile(join(worker.cwd, "src", "review-fix.txt"), "repaired\n");
 			return { completion: Promise.resolve({ status: "succeeded" }) };

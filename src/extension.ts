@@ -16,7 +16,6 @@ import {
 import { validateTaskPlan } from "./domain/dag.js";
 import { retryableRunWork } from "./domain/run-control.js";
 import {
-	type BlockedWorkerPolicy,
 	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
@@ -38,6 +37,7 @@ import {
 	reviewPlanInteractively,
 } from "./planning/plan-editor.js";
 import { renderApprovalSummary } from "./planning/plan-presentation.js";
+import { readSecurityPolicy, securityPolicyLines } from "./security/policy.js";
 import {
 	type AttemptLogEntry,
 	AttemptLogStore,
@@ -119,16 +119,6 @@ function configuredWorkerTimeoutMs(): number | undefined {
 	return timeout;
 }
 
-function configuredBlockedWorkerPolicy(): BlockedWorkerPolicy {
-	const value = process.env.PI_BUILD_WORKER_UI_POLICY ?? "decline";
-	if (value !== "decline" && value !== "cancel") {
-		throw new Error(
-			"PI_BUILD_WORKER_UI_POLICY must be either decline or cancel",
-		);
-	}
-	return value;
-}
-
 function configuredValidationTimeoutMs(): number | undefined {
 	const value = process.env.PI_BUILD_VALIDATION_TIMEOUT_MS;
 	if (value === undefined) {
@@ -184,7 +174,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
 	const workers = new OfficialOrchestratorBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
-	const blockedWorkerPolicy = configuredBlockedWorkerPolicy();
+	const securityPolicy = readSecurityPolicy();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
 	const finalValidationTimeoutMs = configuredFinalValidationTimeoutMs();
 	const conductor = new BuildConductor({
@@ -203,7 +193,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		}),
 		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
 		attemptLogs,
-		blockedWorkerPolicy,
+		securityPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	return { attemptLogs, conductor, store, workers };
@@ -801,6 +791,7 @@ function showCompletion(
 		`Run: ${run.state}`,
 		`Plan revision: ${run.approvedPlanRevision ?? run.planRevision}`,
 		`Worker limit: ${run.maxConcurrentWorkers}`,
+		...securityPolicyLines(run.securityPolicy),
 		`Tasks: ${taskStateSummary(run)}`,
 		reviewStateSummary(run),
 		...workerLines,
@@ -817,6 +808,7 @@ function showCompletion(
 		...(evidence
 			? ["User branch stayed clean and untouched at the recorded base commit."]
 			: ["User branch cleanliness was not certified as merge-ready."]),
+		"Security limitation: merge-ready evidence does not prove that workers or repository code caused no host, credential, network, or external side effects.",
 		`State file: ${store.directory}`,
 	]);
 	if (run.state === "completed") {

@@ -5,6 +5,7 @@ import type {
 	TaskPlan,
 	ValidationCommand,
 } from "../domain/types.js";
+import { securityPolicyLines } from "../security/policy.js";
 
 const SIMPLE_ARGUMENT = /^[A-Za-z0-9_./:@%+=,-]+$/;
 
@@ -112,8 +113,16 @@ export function renderApprovalSummary(run: BuildRun): string {
 		...taskAuthority,
 		"Final validation:",
 		...finalCommands,
-		"After approval: create isolated Git worktrees, launch workers, integrate validated commits, run five independent reviews and repairs, then run final validation.",
-		"Validation executes repository code without a sandbox.",
+		"Security boundary:",
+		...securityPolicyLines(run.securityPolicy),
+		"After approval: create worktree-isolated workers, integrate validated commits, run five independent reviews and repairs, then run final validation.",
+		...(run.securityPolicy.validation.sandbox === "none"
+			? [
+					"WARNING: validation executes untrusted repository code without an OS sandbox.",
+				]
+			: []),
+		"Prompt instructions and post-run diff checks cannot prevent host or external side effects.",
+		"Merge-ready evidence proves recorded Git and validation state, not the absence of external side effects.",
 		"Only conductor metadata has been persisted. No Git refs, worktrees, workers, or validation commands have started.",
 	].join("\n");
 }

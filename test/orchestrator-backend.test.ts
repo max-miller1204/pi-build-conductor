@@ -155,6 +155,7 @@ async function fakeOrchestrator(
 					id?: string;
 					type: string;
 					command?: { type: string };
+					launchPolicy?: unknown;
 				};
 				try {
 					request = JSON.parse(line) as typeof request;
@@ -213,9 +214,25 @@ async function fakeOrchestrator(
 					);
 					continue;
 				}
+				if (request.type === "capabilities") {
+					socket.end(
+						`${JSON.stringify({
+							type: "capabilities_result",
+							ok: true,
+							capabilities: { workerLaunchPolicyVersions: [1] },
+						})}\n`,
+					);
+					return;
+				}
 				if (request.type === "spawn") {
 					socket.end(
-						`${JSON.stringify({ type: "spawn_result", ok: true, instance })}\n`,
+						`${JSON.stringify({
+							type: "spawn_result",
+							ok: true,
+							instance: request.launchPolicy
+								? { ...instance, appliedPolicy: request.launchPolicy }
+								: instance,
+						})}\n`,
 					);
 					return;
 				}
@@ -546,6 +563,35 @@ describe("OfficialOrchestratorBackend", () => {
 			status: "failed",
 			error: "provider failed",
 		});
+	});
+
+	it("preflights and verifies an applied worker launch policy", async () => {
+		const fake = await fakeOrchestrator();
+		const backend = new OfficialOrchestratorBackend({
+			socketPath: fake.socketPath,
+		});
+		const launchPolicy = {
+			version: 1 as const,
+			role: "review" as const,
+			tools: ["read", "grep", "find", "ls"],
+			resourceDiscovery: "disabled" as const,
+		};
+
+		await backend.preflightPolicy(launchPolicy);
+		const worker = await backend.spawn({
+			cwd: "/repo/worktree",
+			launchPolicy,
+		});
+
+		expect(worker.appliedPolicy).toEqual(launchPolicy);
+		expect(fake.requests).toEqual([
+			{ type: "capabilities" },
+			{
+				type: "spawn",
+				cwd: "/repo/worktree",
+				launchPolicy,
+			},
+		]);
 	});
 
 	it("isolates the first-party spawn and RPC protocol", async () => {

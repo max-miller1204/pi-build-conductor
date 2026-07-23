@@ -12,6 +12,7 @@ import type {
 } from "../domain/types.js";
 import { REVIEW_CATEGORIES } from "../domain/types.js";
 import { formatCommand } from "../planning/plan-presentation.js";
+import { securityPolicyLines, workerLaunchPolicy } from "../security/policy.js";
 
 const MAX_INLINE_LENGTH = 500;
 const MAX_OUTPUT_LENGTH = 2_000;
@@ -88,9 +89,11 @@ function outputTailLines(label: string, output: string): string[] {
 }
 
 function renderCheck(check: ValidationCheckEvidence, index: number): string[] {
+	const boundary = check.executionBoundary;
 	return [
 		`Check ${index + 1}: ${check.passed ? "passed" : "failed"} (exit ${check.exitCode ?? "none"}) - ${commandText(check)}`,
 		`  Started: ${display(check.startedAt)} | Finished: ${display(check.finishedAt)}`,
+		`  Boundary: ${boundary ? `${boundary.sandbox} sandbox, ${boundary.network} network, ${boundary.environment}` : "legacy unrecorded"}`,
 		...outputTailLines("stdout", check.stdoutTail),
 		...outputTailLines("stderr", check.stderrTail),
 	];
@@ -302,6 +305,8 @@ export function renderRunOverview(run: BuildRun): string[] {
 		`Integration: ${display(run.integrationBranch)} @ ${display(run.integrationHead)}`,
 		`Plan revision: ${run.planRevision}${run.approvedPlanRevision ? ` (approved ${run.approvedPlanRevision})` : ""} | Worker limit: ${run.maxConcurrentWorkers}`,
 		`Handoff: ${display(run.handoff.sourcePath)}`,
+		"Security boundary:",
+		...securityPolicyLines(run.securityPolicy).map((line) => safeInline(line)),
 		`Tasks: ${taskStateSummary(run)}`,
 		...run.plan.tasks.map((definition) =>
 			renderRunTaskOverview(definition, run.tasks[definition.id]),
@@ -497,10 +502,28 @@ export function renderAttemptDetails(
 ): string[] {
 	const resolution = resolveRunAttempt(run, attemptId);
 	const { attempt } = resolution;
+	const workerRole =
+		resolution.kind === "task"
+			? "implementation"
+			: resolution.kind === "review"
+				? "review"
+				: resolution.kind === "repair"
+					? "repair"
+					: undefined;
+	const launchPolicy = workerRole
+		? workerLaunchPolicy(run.securityPolicy, workerRole)
+		: undefined;
 	const common = [
 		`Attempt ${safeInline(attempt.id)} (${resolution.kind})`,
 		`State: ${attempt.state} | Number: ${attempt.number}`,
 		`Started: ${display(attempt.startedAt)} | Finished: ${display(attempt.finishedAt, "in progress")}`,
+		...(workerRole
+			? [
+					`Worker authority: ${workerRole}; tools ${launchPolicy?.tools.join(", ") ?? "legacy unrestricted"}; resources ${run.securityPolicy.workers.resourceDiscovery}`,
+				]
+			: [
+					`Validation authority: ${run.securityPolicy.validation.sandbox} sandbox; ${run.securityPolicy.validation.network} network; ${run.securityPolicy.validation.environment}`,
+				]),
 	];
 	let details: string[];
 	let evidence: TaskValidationEvidence | FinalValidationEvidence | undefined;
