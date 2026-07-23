@@ -18,6 +18,7 @@ Every new run stores a versioned security policy before approval.
 The policy is immutable for the lifetime of the run, including retries and recovery after restart.
 Approval, worker prompts, worker launches, validation, run inspection, and merge-ready evidence use this stored policy rather than current environment defaults.
 Legacy runs are migrated with an explicit `legacy-migrated` policy that does not claim controls that were not recorded at creation time.
+Runs approved before the server migration keep their persisted `orchestrator-allowlist-v1` tool policy and stay enforced as worker launch policy version 1.
 
 ## Worker authority
 

@@ -13,6 +13,7 @@ const ROLE_TOOLS: Readonly<Record<WorkerRole, readonly string[]>> = {
 	repair: ["read", "grep", "find", "ls", "bash", "edit", "write"],
 };
 
+// Runs persisted before the server migration name the same allowlist policy.
 function isWorkerAllowlistPolicy(value: unknown): boolean {
 	return (
 		value === "server-allowlist-v1" || value === "orchestrator-allowlist-v1"

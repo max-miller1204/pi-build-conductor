@@ -125,6 +125,8 @@ async function fakeServer(
 		failExecution?: boolean;
 		failSetModel?: boolean;
 		eventsBeforePromptResponse?: boolean;
+		launchPolicyVersions?: number[];
+		attestedPolicy?: unknown;
 	} = {},
 ): Promise<{
 	socketPath: string;
@@ -220,7 +222,9 @@ async function fakeServer(
 						`${JSON.stringify({
 							type: "capabilities_result",
 							ok: true,
-							capabilities: { workerLaunchPolicyVersions: [1] },
+							capabilities: {
+								workerLaunchPolicyVersions: options.launchPolicyVersions ?? [1],
+							},
 						})}\n`,
 					);
 					return;
@@ -231,7 +235,11 @@ async function fakeServer(
 							type: "spawn_result",
 							ok: true,
 							instance: request.launchPolicy
-								? { ...instance, appliedPolicy: request.launchPolicy }
+								? {
+										...instance,
+										appliedPolicy:
+											options.attestedPolicy ?? request.launchPolicy,
+									}
 								: instance,
 						})}\n`,
 					);
@@ -608,6 +616,51 @@ describe("OfficialServerBackend", () => {
 				launchPolicy,
 			},
 		]);
+	});
+
+	it("rejects a server without the requested launch policy version", async () => {
+		const fake = await fakeServer({ launchPolicyVersions: [] });
+		const backend = new OfficialServerBackend({
+			socketPath: fake.socketPath,
+		});
+
+		await expect(
+			backend.preflightPolicy({
+				version: 1,
+				role: "review",
+				tools: ["read", "grep", "find", "ls"],
+				resourceDiscovery: "disabled",
+			}),
+		).rejects.toThrow(
+			"Official server does not support worker launch policy v1",
+		);
+		expect(fake.requests).toEqual([{ type: "capabilities" }]);
+	});
+
+	it("stops a worker the server did not attest with the exact policy", async () => {
+		const launchPolicy = {
+			version: 1 as const,
+			role: "review" as const,
+			tools: ["read", "grep", "find", "ls"],
+			resourceDiscovery: "disabled" as const,
+		};
+		const fake = await fakeServer({
+			attestedPolicy: {
+				...launchPolicy,
+				tools: [...launchPolicy.tools, "bash"],
+			},
+		});
+		const backend = new OfficialServerBackend({
+			socketPath: fake.socketPath,
+		});
+
+		await expect(
+			backend.spawn({ cwd: "/repo/worktree", launchPolicy }),
+		).rejects.toThrow("Official server did not attest worker launch policy v1");
+		expect(fake.requests.at(-1)).toEqual({
+			type: "stop",
+			instanceId: "worker-1",
+		});
 	});
 
 	it("isolates the first-party spawn and RPC protocol", async () => {

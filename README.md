@@ -69,8 +69,9 @@ Implemented:
 - `src/validation` enforces approved task scope and runs focused and final checks without a shell, with an optional Nono sandbox.
 - `src/security` defines the immutable run policy, role tool profiles, configuration validation, and shared security summaries.
 - `src/workers` isolates the experimental server protocol and worker permission attestation behind `WorkerBackend`.
-- `src/planning` calls the selected Pi model and validates its JSON plan.
+- `src/planning` calls the selected Pi model, validates its JSON plan, and owns structured plan editing and presentation.
 - `src/review` defines reviewer prompts, the structured report protocol, and deterministic repair policy.
+- `src/inspection` renders run, task, attempt, evidence, and failure details for the run browsing commands.
 - `src/conductor.ts` coordinates durable state transitions, Git isolation, worker launch, review, and repair.
 - `src/extension.ts` provides the build, approval, and recovery commands.
 
@@ -121,7 +122,7 @@ The launch policy disables resource discovery and applies the exact built-in too
 The conductor discovers the socket at `$PI_SERVER_DIR/server.sock`, or at `${PI_CONFIG_DIR:-$HOME/.pi}/server/server.sock` when `PI_SERVER_DIR` is unset.
 The conductor rejects an old service before approval and rejects any spawned worker that does not attest the exact requested policy.
 
-The optional upstream smoke test exercises a real service from spawn through shutdown.
+The optional upstream smoke tests exercise a real service from worker spawn through shutdown and take one real Pi worker from task prompt to merge-ready evidence.
 
 ## MVP workflow
 
