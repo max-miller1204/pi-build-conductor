@@ -15,13 +15,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out release tag
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
       - name: Install locked dependencies
@@ -56,13 +56,13 @@ jobs:
       id-token: write
     steps:
       - name: Check out release tag
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
           fetch-depth: 0
       - name: Set up Node.js and npm registry
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
