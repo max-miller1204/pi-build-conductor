@@ -22,7 +22,7 @@ Runs approved before the server migration keep their persisted `orchestrator-all
 
 ## Worker authority
 
-The maintained `server-compat` service supports worker launch policy version 1.
+The compatible server commit pinned in `package.json` supports worker launch policy version 1.
 The conductor checks that support before approval and requires an exact applied-policy attestation after each spawn.
 A missing capability or mismatched attestation fails closed and never falls back to an unrestricted worker.
 

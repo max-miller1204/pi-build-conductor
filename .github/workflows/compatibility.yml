@@ -1,0 +1,68 @@
+---
+name: Pi server compatibility
+
+"on":
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/compatibility.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/run-server-compatibility.mjs"
+      - "src/workers/**"
+      - "test/server-compatibility.test.ts"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      conductor_ref:
+        description: Conductor Git ref to test
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-compatibility:
+    name: Pi 0.81.1 compatible server
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out conductor
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ inputs.conductor_ref || github.sha }}
+          persist-credentials: false
+      - name: Check out pinned compatible Pi server
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          repository: max-miller1204/pi
+          ref: c08917e1163c4742ecb7065c099ec57cf5b6c3e5
+          path: compatible-pi
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          node-version: "22.19.0"
+          cache: npm
+      - name: Install conductor dependencies
+        run: npm ci --ignore-scripts
+      - name: Install compatible Pi dependencies
+        working-directory: compatible-pi
+        run: npm ci --ignore-scripts
+      - name: Test server policy implementation
+        working-directory: compatible-pi
+        run: npm test --workspace packages/server
+      - name: Build compatible Pi
+        working-directory: compatible-pi
+        run: npm run build
+      - name: Exercise the real server socket and worker lifecycle
+        env:
+          PI_COMPAT_CHECKOUT: ${{ github.workspace }}/compatible-pi
+        run: npm run test:compatibility
