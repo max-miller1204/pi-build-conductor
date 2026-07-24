@@ -56,12 +56,12 @@ jobs:
       - name: Install compatible Pi dependencies
         working-directory: compatible-pi
         run: npm ci --ignore-scripts
-      - name: Test server policy implementation
-        working-directory: compatible-pi
-        run: npm test --workspace packages/server
       - name: Build compatible Pi
         working-directory: compatible-pi
         run: npm run build
+      - name: Test server policy implementation
+        working-directory: compatible-pi
+        run: npm test --workspace packages/server
       - name: Exercise the real server socket and worker lifecycle
         env:
           PI_COMPAT_CHECKOUT: ${{ github.workspace }}/compatible-pi
