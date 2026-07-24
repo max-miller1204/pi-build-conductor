@@ -1,0 +1,9 @@
+* @max-miller1204
+
+/.github/workflows/ @max-miller1204
+/scripts/check-release.mjs @max-miller1204
+/scripts/smoke-package.mjs @max-miller1204
+/scripts/run-server-compatibility.mjs @max-miller1204
+/package.json @max-miller1204
+/package-lock.json @max-miller1204
+/RELEASING.md @max-miller1204
