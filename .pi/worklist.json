@@ -93,9 +93,9 @@
       "id": "goal-mrtf4xj5-ace1989f",
       "title": "Package release and CI automation",
       "description": "Add GitHub Actions for checks and upstream compatibility, define versioning and release workflows, validate GitHub installation, prepare npm publication when appropriate, and document supported Pi and orchestrator versions.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-20T16:07:56.609Z",
-      "updatedAt": "2026-07-20T16:07:56.609Z"
+      "updatedAt": "2026-07-24T00:32:59.122Z"
     },
     {
       "id": "goal-mrtf4yxl-017cc555",
