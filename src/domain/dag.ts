@@ -105,20 +105,12 @@ export function readStringArray(
 	return result;
 }
 
-export function readAllowedPaths(
+export function readSafeRepositoryPaths(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
 ): string[] {
 	const paths = readStringArray(value, path, issues);
-	if (paths.length === 0) {
-		addIssue(
-			issues,
-			"required_paths",
-			path,
-			`${path} must contain at least one repository-relative path`,
-		);
-	}
 	for (const [index, entry] of paths.entries()) {
 		const itemPath = `${path}[${index}]`;
 		const directory = entry.endsWith("/");
@@ -164,6 +156,23 @@ export function readAllowedPaths(
 			"duplicate_path",
 			path,
 			`${path} must not contain duplicates`,
+		);
+	}
+	return paths;
+}
+
+export function readAllowedPaths(
+	value: unknown,
+	path: string,
+	issues: PlanValidationIssue[],
+): string[] {
+	const paths = readSafeRepositoryPaths(value, path, issues);
+	if (paths.length === 0) {
+		addIssue(
+			issues,
+			"required_paths",
+			path,
+			`${path} must contain at least one repository-relative path`,
 		);
 	}
 	return paths;

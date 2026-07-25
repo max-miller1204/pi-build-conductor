@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
 	STEP_KINDS,
+	stepCapabilities,
+	stepPathLocks,
 	validateWorkflowPlan,
 	validateWorkflowPlanResult,
 	WORKFLOW_PLAN_SCHEMA_VERSION,
@@ -169,6 +171,149 @@ describe("workflow step definitions", () => {
 			expect(mutating.issues).toContainEqual(
 				expect.objectContaining({ code: "required_final_validation" }),
 			);
+		}
+	});
+
+	it("accepts full execution declarations on a step", () => {
+		const plan = workflowPlan();
+		const declared = {
+			...plan,
+			steps: plan.steps.map((step) =>
+				step.id === "implement"
+					? {
+							...step,
+							dependencies: ["approve-approach", "survey"],
+							inputs: [{ stepId: "survey", output: "entry-point-report" }],
+							outputs: ["endpoint-diff"],
+							capabilities: ["read-repository", "mutate-repository"],
+							pathLocks: ["src/server/", "package.json"],
+							resourceLocks: ["npm-registry"],
+							timeoutMs: 600000,
+							retry: { maxAttempts: 2 },
+						}
+					: step.id === "survey"
+						? { ...step, outputs: ["entry-point-report"] }
+						: step,
+			),
+		};
+		expect(validateWorkflowPlan(declared)).toEqual(declared);
+	});
+
+	it("applies least-authority defaults for undeclared settings", () => {
+		const plan = validateWorkflowPlan(workflowPlan());
+		const byId = new Map(plan.steps.map((step) => [step.id, step]));
+		const survey = byId.get("survey");
+		const implement = byId.get("implement");
+		const approve = byId.get("approve-approach");
+		if (!survey || !implement || !approve) {
+			throw new Error("Missing fixture steps");
+		}
+		expect(stepCapabilities(survey)).toEqual(["read-repository"]);
+		expect(stepCapabilities(implement)).toEqual([
+			"read-repository",
+			"mutate-repository",
+			"execute-commands",
+		]);
+		expect(stepCapabilities(approve)).toEqual([]);
+		expect(stepPathLocks(implement)).toEqual(["src/server/"]);
+		expect(stepPathLocks(survey)).toEqual([]);
+	});
+
+	it("rejects capabilities beyond the step kind's maximum authority", () => {
+		const plan = workflowPlan();
+		const result = validateWorkflowPlanResult({
+			...plan,
+			steps: plan.steps.map((step) =>
+				step.kind === "investigation"
+					? { ...step, capabilities: ["mutate-repository"] }
+					: step,
+			),
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.issues).toContainEqual(
+				expect.objectContaining({ code: "capability_not_allowed" }),
+			);
+		}
+	});
+
+	it("rejects inputs that skip dependencies or undeclared outputs", () => {
+		const plan = workflowPlan();
+		const withInput = (
+			inputs: { stepId: string; output: string }[],
+			outputs?: string[],
+		) => ({
+			...plan,
+			steps: plan.steps.map((step) =>
+				step.id === "implement"
+					? {
+							...step,
+							dependencies: inputs.some((input) => input.stepId === "survey")
+								? ["approve-approach", "survey"]
+								: step.dependencies,
+							inputs,
+						}
+					: step.id === "survey" && outputs
+						? { ...step, outputs }
+						: step,
+			),
+		});
+
+		const skipsDependency = validateWorkflowPlanResult(
+			withInput([{ stepId: "verify-build", output: "build-log" }]),
+		);
+		expect(skipsDependency.ok).toBe(false);
+		if (!skipsDependency.ok) {
+			expect(skipsDependency.issues).toContainEqual(
+				expect.objectContaining({ code: "input_without_dependency" }),
+			);
+		}
+
+		const undeclaredOutput = validateWorkflowPlanResult(
+			withInput([{ stepId: "survey", output: "missing-report" }]),
+		);
+		expect(undeclaredOutput.ok).toBe(false);
+		if (!undeclaredOutput.ok) {
+			expect(undeclaredOutput.issues).toContainEqual(
+				expect.objectContaining({ code: "unknown_input_output" }),
+			);
+		}
+
+		const valid = validateWorkflowPlanResult(
+			withInput(
+				[{ stepId: "survey", output: "entry-point-report" }],
+				["entry-point-report"],
+			),
+		);
+		expect(valid.ok).toBe(true);
+	});
+
+	it("rejects invalid locks, timeouts, retries, and duplicate outputs", () => {
+		const plan = workflowPlan();
+		const withImplement = (extra: Record<string, unknown>) => ({
+			...plan,
+			steps: plan.steps.map((step) =>
+				step.id === "implement" ? { ...step, ...extra } : step,
+			),
+		});
+
+		const cases: [Record<string, unknown>, string][] = [
+			[{ pathLocks: ["../escape"] }, "unsafe_path"],
+			[{ resourceLocks: ["Not Valid!"] }, "resource_lock_format"],
+			[{ resourceLocks: ["npm", "npm"] }, "duplicate_resource_lock"],
+			[{ timeoutMs: -5 }, "invalid_timeout"],
+			[{ timeoutMs: 1.5 }, "invalid_timeout"],
+			[{ retry: { maxAttempts: 0 } }, "invalid_retry"],
+			[{ retry: { maxAttempts: 99 } }, "invalid_retry"],
+			[{ outputs: ["diff", "diff"] }, "duplicate_output"],
+			[{ outputs: ["Not Valid!"] }, "output_format"],
+		];
+		for (const [extra, code] of cases) {
+			const result = validateWorkflowPlanResult(withImplement(extra));
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.issues).toContainEqual(expect.objectContaining({ code }));
+			}
 		}
 	});
 

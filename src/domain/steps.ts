@@ -7,6 +7,7 @@ import {
 	readAllowedPaths,
 	readCommandObject,
 	readNonEmptyString,
+	readSafeRepositoryPaths,
 	readStringArray,
 	readValidationCommands,
 } from "./dag.js";
@@ -23,13 +24,70 @@ export const STEP_KINDS = [
 
 export type StepKind = (typeof STEP_KINDS)[number];
 
+export const STEP_CAPABILITIES = [
+	"read-repository",
+	"mutate-repository",
+	"execute-commands",
+] as const;
+
+export type StepCapability = (typeof STEP_CAPABILITIES)[number];
+
+export const MAX_STEP_RETRY_ATTEMPTS = 5 as const;
+
 const STEP_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
+const OUTPUT_NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+const RESOURCE_LOCK_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+/** Reference to an artifact a dependency step declared as an output. */
+export interface StepInputReference {
+	stepId: string;
+	output: string;
+}
+
+export interface StepRetryPolicy {
+	maxAttempts: number;
+}
 
 interface StepDefinitionCommon {
 	id: string;
 	title: string;
 	description: string;
 	dependencies: string[];
+	inputs?: StepInputReference[];
+	outputs?: string[];
+	capabilities?: StepCapability[];
+	pathLocks?: string[];
+	resourceLocks?: string[];
+	timeoutMs?: number;
+	retry?: StepRetryPolicy;
+}
+
+// The maximum authority each step kind may declare; undeclared capabilities
+// default to this full set, and declaring a subset narrows it further.
+const KIND_CAPABILITIES: Record<StepKind, readonly StepCapability[]> = {
+	investigation: ["read-repository"],
+	change: ["read-repository", "mutate-repository", "execute-commands"],
+	command: ["read-repository", "execute-commands"],
+	approval: [],
+};
+
+export function stepCapabilities(step: StepDefinition): StepCapability[] {
+	return [...(step.capabilities ?? KIND_CAPABILITIES[step.kind])];
+}
+
+export function stepPathLocks(step: StepDefinition): string[] {
+	if (step.pathLocks) {
+		return [...step.pathLocks];
+	}
+	return step.kind === "change" ? [...step.allowedPaths] : [];
+}
+
+export function stepResourceLocks(step: StepDefinition): string[] {
+	return [...(step.resourceLocks ?? [])];
+}
+
+export function stepRetryPolicy(step: StepDefinition): StepRetryPolicy {
+	return step.retry ?? { maxAttempts: 1 };
 }
 
 /** Read-only exploration that must answer explicit questions. */
@@ -75,6 +133,161 @@ export type WorkflowPlanValidationResult =
 	| { ok: true; plan: WorkflowPlan; issues: [] }
 	| { ok: false; issues: PlanValidationIssue[] };
 
+function readInputs(
+	value: unknown,
+	path: string,
+	issues: PlanValidationIssue[],
+): StepInputReference[] {
+	if (!Array.isArray(value)) {
+		addIssue(
+			issues,
+			"input_array",
+			path,
+			`${path} must be an array of { stepId, output } references`,
+		);
+		return [];
+	}
+	return value.map((item, index) => {
+		const itemPath = `${path}[${index}]`;
+		if (!isRecord(item)) {
+			addIssue(
+				issues,
+				"input_object",
+				itemPath,
+				`${itemPath} must be an object`,
+			);
+			return { stepId: "", output: "" };
+		}
+		return {
+			stepId: readNonEmptyString(item.stepId, `${itemPath}.stepId`, issues),
+			output: readNonEmptyString(item.output, `${itemPath}.output`, issues),
+		};
+	});
+}
+
+function readNamedIdentifiers(
+	value: unknown,
+	path: string,
+	pattern: RegExp,
+	formatCode: string,
+	duplicateCode: string,
+	issues: PlanValidationIssue[],
+): string[] {
+	const names = readStringArray(value, path, issues);
+	for (const [index, name] of names.entries()) {
+		if (name.length > 0 && !pattern.test(name)) {
+			addIssue(
+				issues,
+				formatCode,
+				`${path}[${index}]`,
+				`${path}[${index}] must match ${pattern}`,
+			);
+		}
+	}
+	if (new Set(names).size !== names.length) {
+		addIssue(
+			issues,
+			duplicateCode,
+			path,
+			`${path} must not contain duplicates`,
+		);
+	}
+	return names;
+}
+
+function readDeclarations(
+	value: Record<string, unknown>,
+	path: string,
+	issues: PlanValidationIssue[],
+): Partial<StepDefinitionCommon> {
+	const declarations: Partial<StepDefinitionCommon> = {};
+	if (value.inputs !== undefined) {
+		declarations.inputs = readInputs(value.inputs, `${path}.inputs`, issues);
+	}
+	if (value.outputs !== undefined) {
+		declarations.outputs = readNamedIdentifiers(
+			value.outputs,
+			`${path}.outputs`,
+			OUTPUT_NAME_PATTERN,
+			"output_format",
+			"duplicate_output",
+			issues,
+		);
+	}
+	if (value.capabilities !== undefined) {
+		const capabilities = readStringArray(
+			value.capabilities,
+			`${path}.capabilities`,
+			issues,
+		);
+		for (const [index, capability] of capabilities.entries()) {
+			if (
+				capability.length > 0 &&
+				!(STEP_CAPABILITIES as readonly string[]).includes(capability)
+			) {
+				addIssue(
+					issues,
+					"unknown_capability",
+					`${path}.capabilities[${index}]`,
+					`${path}.capabilities[${index}] must be one of ${STEP_CAPABILITIES.join(", ")}`,
+				);
+			}
+		}
+		declarations.capabilities = capabilities as StepCapability[];
+	}
+	if (value.pathLocks !== undefined) {
+		declarations.pathLocks = readSafeRepositoryPaths(
+			value.pathLocks,
+			`${path}.pathLocks`,
+			issues,
+		);
+	}
+	if (value.resourceLocks !== undefined) {
+		declarations.resourceLocks = readNamedIdentifiers(
+			value.resourceLocks,
+			`${path}.resourceLocks`,
+			RESOURCE_LOCK_PATTERN,
+			"resource_lock_format",
+			"duplicate_resource_lock",
+			issues,
+		);
+	}
+	if (value.timeoutMs !== undefined) {
+		if (
+			!Number.isSafeInteger(value.timeoutMs) ||
+			(value.timeoutMs as number) <= 0
+		) {
+			addIssue(
+				issues,
+				"invalid_timeout",
+				`${path}.timeoutMs`,
+				`${path}.timeoutMs must be a positive integer of milliseconds`,
+			);
+		} else {
+			declarations.timeoutMs = value.timeoutMs as number;
+		}
+	}
+	if (value.retry !== undefined) {
+		const retry = value.retry;
+		if (
+			!isRecord(retry) ||
+			!Number.isSafeInteger(retry.maxAttempts) ||
+			(retry.maxAttempts as number) < 1 ||
+			(retry.maxAttempts as number) > MAX_STEP_RETRY_ATTEMPTS
+		) {
+			addIssue(
+				issues,
+				"invalid_retry",
+				`${path}.retry`,
+				`${path}.retry.maxAttempts must be an integer from 1 to ${MAX_STEP_RETRY_ATTEMPTS}`,
+			);
+		} else {
+			declarations.retry = { maxAttempts: retry.maxAttempts as number };
+		}
+	}
+	return declarations;
+}
+
 function readStepCommon(
 	value: Record<string, unknown>,
 	path: string,
@@ -93,6 +306,7 @@ function readStepCommon(
 			`${path}.dependencies`,
 			issues,
 		),
+		...readDeclarations(value, path, issues),
 	};
 }
 
@@ -131,15 +345,17 @@ function readStep(
 		};
 	}
 	const common = readStepCommon(value, path, issues);
+	let step: StepDefinition;
 	switch (value.kind) {
 		case "investigation":
-			return {
+			step = {
 				...common,
 				kind: "investigation",
 				questions: readQuestions(value.questions, `${path}.questions`, issues),
 			};
+			break;
 		case "change":
-			return {
+			step = {
 				...common,
 				kind: "change",
 				acceptanceCriteria: readStringArray(
@@ -158,18 +374,21 @@ function readStep(
 					issues,
 				),
 			};
+			break;
 		case "command":
-			return {
+			step = {
 				...common,
 				kind: "command",
 				command: readCommandObject(value.command, `${path}.command`, issues),
 			};
+			break;
 		case "approval":
-			return {
+			step = {
 				...common,
 				kind: "approval",
 				prompt: readNonEmptyString(value.prompt, `${path}.prompt`, issues),
 			};
+			break;
 		default:
 			addIssue(
 				issues,
@@ -179,6 +398,20 @@ function readStep(
 			);
 			return { ...common, kind: "investigation", questions: [] };
 	}
+	if (common.capabilities) {
+		const allowed = new Set<string>(KIND_CAPABILITIES[step.kind]);
+		for (const [index, capability] of common.capabilities.entries()) {
+			if (capability.length > 0 && !allowed.has(capability)) {
+				addIssue(
+					issues,
+					"capability_not_allowed",
+					`${path}.capabilities[${index}]`,
+					`${path}.capabilities[${index}] exceeds the ${step.kind} step authority (allowed: ${KIND_CAPABILITIES[step.kind].join(", ") || "none"})`,
+				);
+			}
+		}
+	}
+	return step;
 }
 
 export function validateWorkflowPlanResult(
@@ -299,6 +532,33 @@ export function validateWorkflowPlanResult(
 					"unknown_dependency",
 					`steps[${stepIndex}].dependencies[${dependencyIndex}]`,
 					`step ${step.id} depends on unknown step ${dependency}`,
+				);
+			}
+		}
+	}
+	const outputsByStep = new Map(
+		steps.map((step) => [step.id, new Set(step.outputs ?? [])]),
+	);
+	for (const [stepIndex, step] of steps.entries()) {
+		const dependencies = new Set(step.dependencies);
+		for (const [inputIndex, input] of (step.inputs ?? []).entries()) {
+			const inputPath = `steps[${stepIndex}].inputs[${inputIndex}]`;
+			if (input.stepId.length === 0 || input.output.length === 0) {
+				continue;
+			}
+			if (!dependencies.has(input.stepId)) {
+				addIssue(
+					issues,
+					"input_without_dependency",
+					inputPath,
+					`step ${step.id} consumes an output of ${input.stepId} without declaring it as a dependency`,
+				);
+			} else if (!outputsByStep.get(input.stepId)?.has(input.output)) {
+				addIssue(
+					issues,
+					"unknown_input_output",
+					inputPath,
+					`step ${input.stepId} does not declare output ${input.output}`,
 				);
 			}
 		}
