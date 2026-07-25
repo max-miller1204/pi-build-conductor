@@ -16,6 +16,8 @@ import type { TaskAttempt, TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 import { Orchestrator } from "../src/orchestrator.js";
+import { capabilityProfileFor } from "../src/security/capabilities.js";
+import { readSecurityPolicy } from "../src/security/policy.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
@@ -312,6 +314,44 @@ describe("task validation and orchestrator-owned commits", () => {
 			head: fixture.repository.head,
 			isClean: false,
 		});
+	});
+
+	it("rejects repository mutations that exceed the frozen capability profile", async () => {
+		const fixture = await allocateTaskWorktree();
+		await mkdir(join(fixture.allocation.path, "src"), { recursive: true });
+		await writeFile(
+			join(fixture.allocation.path, "src", "result.txt"),
+			"done\n",
+			"utf8",
+		);
+		const validator = new LocalTaskValidator(fixture.git);
+		const securityPolicy = readSecurityPolicy({});
+		if (!securityPolicy.workers.capabilityProfiles) {
+			throw new Error("expected capability profiles");
+		}
+		securityPolicy.workers.capabilityProfiles.change = capabilityProfileFor([
+			"read-repository",
+			"execute-commands",
+		]);
+
+		await expect(
+			validator.validate({
+				task: task(),
+				attempt: fixture.attempt,
+				securityPolicy,
+			}),
+		).rejects.toThrow(
+			/mutations without the mutate-repository capability.*src\/result\.txt/,
+		);
+
+		// The same diff passes once the frozen profile grants mutation authority.
+		const permissive = readSecurityPolicy({});
+		const result = await validator.validate({
+			task: task(),
+			attempt: fixture.attempt,
+			securityPolicy: permissive,
+		});
+		expect(result.evidence.passed).toBe(true);
 	});
 
 	it("rejects worker-created commits and validation commands that mutate files", async () => {

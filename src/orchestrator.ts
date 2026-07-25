@@ -50,6 +50,7 @@ import {
 	materializeReviewFindings,
 	parseReviewReport,
 } from "./review/review-report.js";
+import { describeCapabilityProfile } from "./security/capabilities.js";
 import { readSecurityPolicy, workerLaunchPolicy } from "./security/policy.js";
 import type { AttemptLogStore } from "./storage/attempt-log-store.js";
 import type { RunStore } from "./storage/run-store.js";
@@ -207,11 +208,12 @@ function buildWorkerPrompt(
 	context: StepExecutionContext,
 ): string {
 	const policy = workerLaunchPolicy(run.securityPolicy, "implementation");
+	const frozenProfile = run.securityPolicy.workers.capabilityProfiles?.change;
 	return `You are the implementation worker for orchestration run ${run.id}.
 
 ENFORCED AUTHORITY
 Active tools: ${policy?.tools.join(", ") ?? "legacy server defaults"}.
-Resource discovery: ${run.securityPolicy.workers.resourceDiscovery}.
+${frozenProfile ? `Approved authority (frozen at run creation): ${describeCapabilityProfile(frozenProfile)}. Repository changes are rejected during validation if they exceed it.\n` : ""}Resource discovery: ${run.securityPolicy.workers.resourceDiscovery}.
 Your Pi process and tools are not OS-sandboxed. Host filesystem, network, and credentials may be reachable, but they are outside your authority.
 Work only in the current Git worktree and current branch.
 Write only within these approved repository-relative paths:

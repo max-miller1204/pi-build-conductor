@@ -129,6 +129,46 @@ export function stepCapabilityProfile(
 	return narrowCapabilityProfile(profiles[step.kind], declared);
 }
 
+/**
+ * The external-effect boundary every profile carries: no capability can
+ * express deployment, publishing, cloud administration, or other remote
+ * mutations, so they stay disabled until safely supported.
+ */
+export const EXTERNAL_EFFECT_BOUNDARY =
+	"External effects forbidden: no deployment, publishing, cloud administration, or remote mutation authority exists in any capability profile";
+
+/** One bounded human-readable line describing a profile's authority. */
+export function describeCapabilityProfile(profile: CapabilityProfile): string {
+	return `capabilities: ${profile.capabilities.join(", ") || "none"}; tools: ${profile.tools.join(", ") || "none"}; external effects: ${profile.externalEffects}`;
+}
+
+export class CapabilityViolationError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CapabilityViolationError";
+	}
+}
+
+/**
+ * Enforces the approved capability boundary against observed worker output:
+ * a worker whose profile lacks `mutate-repository` must leave the repository
+ * untouched, whatever its prompt claimed or its tools allowed.
+ */
+export function assertCapabilityBoundary(
+	profile: CapabilityProfile,
+	observed: { changedPaths: readonly string[] },
+): void {
+	if (
+		observed.changedPaths.length > 0 &&
+		!profile.capabilities.includes("mutate-repository")
+	) {
+		const paths = [...new Set(observed.changedPaths)].join(", ");
+		throw new CapabilityViolationError(
+			`Observed repository mutations without the mutate-repository capability (approved: ${profile.capabilities.join(", ") || "none"}): ${paths}`,
+		);
+	}
+}
+
 export function assertCapabilityProfiles(
 	value: unknown,
 	path: string,
