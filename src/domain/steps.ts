@@ -11,7 +11,11 @@ import {
 	readStringArray,
 	readValidationCommands,
 } from "./dag.js";
-import type { ValidationCommand } from "./types.js";
+import {
+	STEP_CAPABILITIES,
+	type StepCapability,
+	type ValidationCommand,
+} from "./types.js";
 
 export const WORKFLOW_PLAN_SCHEMA_VERSION = 4 as const;
 
@@ -23,14 +27,6 @@ export const STEP_KINDS = [
 ] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
-
-export const STEP_CAPABILITIES = [
-	"read-repository",
-	"mutate-repository",
-	"execute-commands",
-] as const;
-
-export type StepCapability = (typeof STEP_CAPABILITIES)[number];
 
 export const MAX_STEP_RETRY_ATTEMPTS = 5 as const;
 
@@ -64,12 +60,16 @@ interface StepDefinitionCommon {
 
 // The maximum authority each step kind may declare; undeclared capabilities
 // default to this full set, and declaring a subset narrows it further.
-const KIND_CAPABILITIES: Record<StepKind, readonly StepCapability[]> = {
+export const STEP_KIND_CAPABILITY_MAXIMA: Record<
+	StepKind,
+	readonly StepCapability[]
+> = {
 	investigation: ["read-repository"],
 	change: ["read-repository", "mutate-repository", "execute-commands"],
 	command: ["read-repository", "execute-commands"],
 	approval: [],
 };
+const KIND_CAPABILITIES = STEP_KIND_CAPABILITY_MAXIMA;
 
 export function stepCapabilities(step: StepDefinition): StepCapability[] {
 	return [...(step.capabilities ?? KIND_CAPABILITIES[step.kind])];

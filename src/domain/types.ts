@@ -42,6 +42,46 @@ export interface ValidationCommand {
 	args: string[];
 }
 
+/**
+ * The capability vocabulary shared by workflow step declarations and worker
+ * authority profiles. External effects (deployment, publishing, cloud
+ * administration, remote mutation) are deliberately not expressible.
+ */
+export const STEP_CAPABILITIES = [
+	"read-repository",
+	"mutate-repository",
+	"execute-commands",
+] as const;
+
+export type StepCapability = (typeof STEP_CAPABILITIES)[number];
+
+/**
+ * A frozen worker authority profile: the capabilities one worker archetype
+ * may exercise and the exact tool allowlist that enforces them.
+ */
+export interface CapabilityProfile {
+	capabilities: StepCapability[];
+	tools: string[];
+	resourceDiscovery: "disabled";
+	externalEffects: "forbidden";
+}
+
+export const CAPABILITY_PROFILE_NAMES = [
+	"investigation",
+	"change",
+	"command",
+	"approval",
+	"review",
+	"repair",
+] as const;
+
+export type CapabilityProfileName = (typeof CAPABILITY_PROFILE_NAMES)[number];
+
+export type RunCapabilityProfiles = Record<
+	CapabilityProfileName,
+	CapabilityProfile
+>;
+
 export type ValidationSandboxMode = "none" | "nono";
 export type WorkerRole = "implementation" | "review" | "repair";
 
@@ -59,7 +99,12 @@ export interface WorkerLaunchPolicy {
 }
 
 export interface RunSecurityPolicy {
-	version: 1;
+	/**
+	 * Version 1 policies predate capability profiles and resolve worker
+	 * authority from fixed role defaults. Version 2 policies freeze the
+	 * complete capability profile snapshot at run creation.
+	 */
+	version: 1 | 2;
 	source: "configured" | "legacy-migrated";
 	workers: {
 		isolation: "worktree-only";
@@ -72,6 +117,8 @@ export interface RunSecurityPolicy {
 		resourceDiscovery: "disabled" | "host";
 		credentialExposure: "host-credentials-available-to-worker";
 		uiPolicy: BlockedWorkerPolicy;
+		/** Present exactly when `version` is 2. */
+		capabilityProfiles?: RunCapabilityProfiles;
 	};
 	validation: ValidationExecutionBoundary & {
 		sandboxExecutable?: string;

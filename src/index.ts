@@ -18,6 +18,7 @@ export * from "./planning/plan-presentation.js";
 export * from "./review/prompts.js";
 export * from "./review/review-policy.js";
 export * from "./review/review-report.js";
+export * from "./security/capabilities.js";
 export * from "./security/policy.js";
 export * from "./storage/artifact-store.js";
 export * from "./storage/attempt-log-store.js";

@@ -149,9 +149,9 @@
       "id": "goal-mry8o2kt-abdd9d8e",
       "title": "Make artifacts first-class outputs",
       "description": "Persist typed reports, decisions, findings, test evidence, patches, commits, and merge candidates so dependent steps coordinate through explicit inspectable artifacts instead of only integrated Git changes.",
-      "status": "active",
+      "status": "open",
       "createdAt": "2026-07-24T01:05:43.181Z",
-      "updatedAt": "2026-07-25T20:54:37.205Z"
+      "updatedAt": "2026-07-25T21:05:46.670Z"
     },
     {
       "id": "goal-mry8o2lg-797b80b6",
@@ -181,9 +181,9 @@
       "id": "goal-mry8o2ll-fd9d991a",
       "title": "Define generalized orchestration safety",
       "description": "Preserve immutable approval and least-authority execution, introduce capability profiles for each step type, expose sandbox policy during approval, and keep deployment, publishing, cloud administration, and other external mutations disabled until safely supported.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.209Z",
-      "updatedAt": "2026-07-24T01:05:43.209Z"
+      "updatedAt": "2026-07-25T21:05:46.671Z"
     },
     {
       "id": "goal-mry8o2lm-a8c5a52c",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 3
+  "revision": 4
 }
