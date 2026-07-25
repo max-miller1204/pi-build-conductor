@@ -1,5 +1,6 @@
 export * from "./configuration.js";
 export * from "./domain/dag.js";
+export * from "./domain/plan-translation.js";
 export * from "./domain/run.js";
 export * from "./domain/run-control.js";
 export * from "./domain/scheduler.js";
