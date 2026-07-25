@@ -53,7 +53,7 @@ export class PlanValidationError extends Error {
 	}
 }
 
-function addIssue(
+export function addIssue(
 	issues: PlanValidationIssue[],
 	code: string,
 	path: string,
@@ -63,11 +63,11 @@ function addIssue(
 	issues.push({ code, path, message, ...metadata });
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readNonEmptyString(
+export function readNonEmptyString(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
@@ -84,7 +84,7 @@ function readNonEmptyString(
 	return value.trim();
 }
 
-function readStringArray(
+export function readStringArray(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
@@ -105,7 +105,7 @@ function readStringArray(
 	return result;
 }
 
-function readAllowedPaths(
+export function readAllowedPaths(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
@@ -169,7 +169,67 @@ function readAllowedPaths(
 	return paths;
 }
 
-function readValidationCommands(
+export function readCommandObject(
+	item: unknown,
+	itemPath: string,
+	issues: PlanValidationIssue[],
+): ValidationCommand {
+	if (!isRecord(item)) {
+		addIssue(
+			issues,
+			"command_object",
+			itemPath,
+			`${itemPath} must be an object`,
+		);
+		return { command: "", args: [] };
+	}
+	const command = readNonEmptyString(
+		item.command,
+		`${itemPath}.command`,
+		issues,
+	);
+	if (command.includes("\0")) {
+		addIssue(
+			issues,
+			"nul_byte",
+			`${itemPath}.command`,
+			`${itemPath}.command cannot contain a NUL byte`,
+		);
+	}
+	if (!Array.isArray(item.args)) {
+		addIssue(
+			issues,
+			"command_args",
+			`${itemPath}.args`,
+			`${itemPath}.args must be an array of strings`,
+		);
+		return { command, args: [] };
+	}
+	const args = item.args.map((argument, argumentIndex) => {
+		const argumentPath = `${itemPath}.args[${argumentIndex}]`;
+		if (typeof argument !== "string") {
+			addIssue(
+				issues,
+				"command_arg",
+				argumentPath,
+				`${argumentPath} must be a string`,
+			);
+			return "";
+		}
+		if (argument.includes("\0")) {
+			addIssue(
+				issues,
+				"nul_byte",
+				argumentPath,
+				`${argumentPath} cannot contain a NUL byte`,
+			);
+		}
+		return argument;
+	});
+	return { command, args };
+}
+
+export function readValidationCommands(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
@@ -183,62 +243,9 @@ function readValidationCommands(
 		);
 		return [];
 	}
-	return value.map((item, index) => {
-		const itemPath = `${path}[${index}]`;
-		if (!isRecord(item)) {
-			addIssue(
-				issues,
-				"command_object",
-				itemPath,
-				`${itemPath} must be an object`,
-			);
-			return { command: "", args: [] };
-		}
-		const command = readNonEmptyString(
-			item.command,
-			`${itemPath}.command`,
-			issues,
-		);
-		if (command.includes("\0")) {
-			addIssue(
-				issues,
-				"nul_byte",
-				`${itemPath}.command`,
-				`${itemPath}.command cannot contain a NUL byte`,
-			);
-		}
-		if (!Array.isArray(item.args)) {
-			addIssue(
-				issues,
-				"command_args",
-				`${itemPath}.args`,
-				`${itemPath}.args must be an array of strings`,
-			);
-			return { command, args: [] };
-		}
-		const args = item.args.map((argument, argumentIndex) => {
-			const argumentPath = `${itemPath}.args[${argumentIndex}]`;
-			if (typeof argument !== "string") {
-				addIssue(
-					issues,
-					"command_arg",
-					argumentPath,
-					`${argumentPath} must be a string`,
-				);
-				return "";
-			}
-			if (argument.includes("\0")) {
-				addIssue(
-					issues,
-					"nul_byte",
-					argumentPath,
-					`${argumentPath} cannot contain a NUL byte`,
-				);
-			}
-			return argument;
-		});
-		return { command, args };
-	});
+	return value.map((item, index) =>
+		readCommandObject(item, `${path}[${index}]`, issues),
+	);
 }
 
 function readTask(
@@ -290,7 +297,9 @@ function readTask(
 	};
 }
 
-function findCycle(tasks: TaskDefinition[]): string[] | undefined {
+export function findCycle(
+	tasks: readonly { id: string; dependencies: string[] }[],
+): string[] | undefined {
 	const dependencies = new Map(
 		tasks.map((task) => [task.id, task.dependencies]),
 	);

@@ -141,9 +141,9 @@
       "id": "goal-mry8o2km-9e209bd0",
       "title": "Generalize tasks into workflow steps",
       "description": "Replace implementation-only task assumptions with typed investigation, change, command, and approval steps that declare dependencies, capabilities, path or resource locks, validation, outputs, timeouts, and retry policies.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.174Z",
-      "updatedAt": "2026-07-24T01:05:43.174Z"
+      "updatedAt": "2026-07-25T20:41:49.029Z"
     },
     {
       "id": "goal-mry8o2kt-abdd9d8e",
@@ -189,9 +189,9 @@
       "id": "goal-mry8o2lm-a8c5a52c",
       "title": "Rename and migrate the product surface",
       "description": "Adopt neutral package, command, type, configuration, storage, and documentation naming centered on orchestration, provide /orchestrate as the main interface, and retain temporary /build aliases plus readers for existing run schemas.",
-      "status": "active",
+      "status": "open",
       "createdAt": "2026-07-24T01:05:43.210Z",
-      "updatedAt": "2026-07-25T20:18:37.396Z"
+      "updatedAt": "2026-07-25T20:41:49.029Z"
     },
     {
       "id": "goal-mry8o2lo-4cca8faf",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 1
+  "revision": 2
 }
