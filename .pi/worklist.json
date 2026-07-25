@@ -141,17 +141,17 @@
       "id": "goal-mry8o2km-9e209bd0",
       "title": "Generalize tasks into workflow steps",
       "description": "Replace implementation-only task assumptions with typed investigation, change, command, and approval steps that declare dependencies, capabilities, path or resource locks, validation, outputs, timeouts, and retry policies.",
-      "status": "active",
+      "status": "open",
       "createdAt": "2026-07-24T01:05:43.174Z",
-      "updatedAt": "2026-07-25T20:41:49.029Z"
+      "updatedAt": "2026-07-25T20:54:37.205Z"
     },
     {
       "id": "goal-mry8o2kt-abdd9d8e",
       "title": "Make artifacts first-class outputs",
       "description": "Persist typed reports, decisions, findings, test evidence, patches, commits, and merge candidates so dependent steps coordinate through explicit inspectable artifacts instead of only integrated Git changes.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.181Z",
-      "updatedAt": "2026-07-24T01:05:43.181Z"
+      "updatedAt": "2026-07-25T20:54:37.205Z"
     },
     {
       "id": "goal-mry8o2lg-797b80b6",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 2
+  "revision": 3
 }

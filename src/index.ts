@@ -1,4 +1,5 @@
 export * from "./configuration.js";
+export * from "./domain/artifacts.js";
 export * from "./domain/dag.js";
 export * from "./domain/plan-translation.js";
 export * from "./domain/run.js";
@@ -17,6 +18,7 @@ export * from "./review/prompts.js";
 export * from "./review/review-policy.js";
 export * from "./review/review-report.js";
 export * from "./security/policy.js";
+export * from "./storage/artifact-store.js";
 export * from "./storage/attempt-log-store.js";
 export * from "./storage/run-store.js";
 export * from "./storage/storage-migration.js";
