@@ -1516,6 +1516,11 @@ describe("Orchestrator vertical slice", () => {
 		expect(workers.calls[1]).toMatchObject({ operation: "prompt" });
 		const prompt = (workers.calls[1]?.value as { prompt?: string })?.prompt;
 		expect(prompt).toContain("ENFORCED AUTHORITY");
+		expect(prompt).toContain("REPOSITORY SNAPSHOT");
+		expect(prompt).toContain(
+			`isolated snapshot of commit ${launch?.attempt.baseCommit}`,
+		);
+		expect(prompt).toContain(result.run.integrationBranch);
 		expect(prompt).toContain("<untrusted_task_json>");
 		expect(prompt).toContain(
 			"Host filesystem, network, and credentials may be reachable",
