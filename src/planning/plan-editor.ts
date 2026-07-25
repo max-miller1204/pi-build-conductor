@@ -63,7 +63,7 @@ const ACTIONS = {
 	raw: "Edit full plan JSON",
 	history: "View or restore revision history",
 	continue: "Continue to final approval",
-	cancel: "Cancel build review",
+	cancel: "Cancel plan review",
 } as const;
 
 function taskOptions(plan: TaskPlan): Map<string, string> {

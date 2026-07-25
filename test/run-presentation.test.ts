@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createBuildRun } from "../src/domain/run.js";
+import { createOrchestrationRun } from "../src/domain/run.js";
 import type {
-	BuildRun,
+	OrchestrationRun,
 	TaskPlan,
 	ValidationCheckEvidence,
 } from "../src/domain/types.js";
@@ -63,14 +63,14 @@ function checkEvidence(): ValidationCheckEvidence {
 	};
 }
 
-function populatedRun(): BuildRun {
-	const created = createBuildRun({
+function populatedRun(): OrchestrationRun {
+	const created = createOrchestrationRun({
 		id: "run-inspect",
 		repositoryRoot: "/repo",
 		baseBranch: "main",
 		baseCommit: "base-commit",
 		integrationBranch: "conductor/run-inspect/integration",
-		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+		request: { sourcePath: "/repo/request.md", text: "Build it" },
 		plan,
 		maxConcurrentWorkers: 3,
 		now: "2026-01-01T00:00:00.000Z",
@@ -266,7 +266,7 @@ describe("run inspection presentation", () => {
 		expect(() => resolveRunAttempt(run, "unknown")).toThrow(
 			"Unknown attempt ID: unknown",
 		);
-		const ambiguous: BuildRun = {
+		const ambiguous: OrchestrationRun = {
 			...run,
 			reviewAttempts: [
 				{

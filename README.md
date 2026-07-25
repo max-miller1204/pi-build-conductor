@@ -4,20 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Pi package](https://img.shields.io/badge/Pi-package-8a76b5)](https://pi.dev)
 
-`pi-build-conductor` turns a build handoff into an isolated, dependency-aware multi-agent implementation run for [Pi](https://pi.dev).
+`pi-build-conductor` turns a change request into an isolated, dependency-aware multi-agent orchestration run for [Pi](https://pi.dev).
 It plans the work, asks for explicit approval, coordinates parallel workers, validates every change, integrates accepted commits on a separate branch, runs independent review and repair passes, and produces merge-ready evidence.
 
-The conductor owns the Git history and lifecycle from start to finish.
+The orchestrator owns the Git history and lifecycle from start to finish.
 Workers never merge into the user's branch, worker-created commits are rejected, and no execution side effects begin before the plan is approved.
 
 ## Features
 
-- Builds and edits a validated task DAG from a handoff file.
+- Builds and edits a validated task DAG from a request file.
 - Runs two to four implementation, review, and repair workers concurrently.
 - Gives every worker a dedicated branch and Git worktree.
 - Dispatches tasks deterministically as their dependencies become ready.
 - Restricts each implementation task to explicitly approved repository paths and validation commands.
-- Inspects worker diffs, runs focused checks, and creates conductor-owned commits.
+- Inspects worker diffs, runs focused checks, and creates orchestrator-owned commits.
 - Integrates accepted commits in dependency order on `conductor/<run-id>/integration` without touching the checked-out branch.
 - Runs fresh correctness, security, maintainability, test, and documentation reviews.
 - Automatically repairs critical, high, and high-confidence medium findings, then repeats all reviews.
@@ -67,12 +67,12 @@ npm run build
 npm exec --workspace packages/server -- server serve
 ```
 
-The conductor connects to `$PI_SERVER_DIR/server.sock` when `PI_SERVER_DIR` is set.
+The orchestrator connects to `$PI_SERVER_DIR/server.sock` when `PI_SERVER_DIR` is set.
 Otherwise it uses `${PI_CONFIG_DIR:-$HOME/.pi}/server/server.sock`.
 
 ## Quick start
 
-Create a handoff that describes the outcome, constraints, and acceptance criteria:
+Create a request that describes the outcome, constraints, and acceptance criteria:
 
 ```md
 # Add health checks
@@ -85,10 +85,10 @@ The complete test and lint suite must pass.
 Start Pi in a clean Git worktree with a model selected, then run:
 
 ```text
-/build docs/health-check-handoff.md
+/build docs/health-check-request.md
 ```
 
-The conductor generates a plan unless `docs/health-check-handoff.md.plan.json` exists.
+The orchestrator generates a plan unless `docs/health-check-request.md.plan.json` exists.
 Review the DAG, approved paths, commands, worker limit, validation boundary, and security summary.
 Execution starts only after explicit approval.
 
@@ -101,14 +101,14 @@ When the run completes, inspect its integration branch and evidence:
 The user branch remains at its original commit.
 Merge or cherry-pick the integration branch only after reviewing the result.
 
-## How a build runs
+## How an orchestration run works
 
-1. The conductor verifies that the current Git worktree is clean and reads the handoff.
+1. The orchestrator verifies that the current Git worktree is clean and reads the request.
 2. It loads a plan sidecar or asks the selected Pi model to produce a dependency DAG.
 3. It validates the plan and stores the first immutable revision under the repository's Git common directory.
 4. The interactive editor can change tasks, dependencies, order, paths, commands, title, and worker limit.
 5. A final approval screen shows the exact plan revision and security boundary.
-6. After approval, the conductor creates a separate integration branch and dispatches ready tasks to isolated worktrees.
+6. After approval, the orchestrator creates a separate integration branch and dispatches ready tasks to isolated worktrees.
 7. It monitors worker events, answers blocked UI requests conservatively, enforces timeouts, and records bounded activity journals.
 8. It rejects unexpected Git state, out-of-scope changes, conflicts, worker commits, and checks that mutate worker output.
 9. It creates validated task commits and cherry-picks them onto the integration branch in deterministic dependency order.
@@ -117,14 +117,14 @@ Merge or cherry-pick the integration branch only after reviewing the result.
 12. The approved final commands run in a detached worktree at the exact integration head.
 13. Completion requires passing checks, strict linear integration history, a clean validation worktree, and proof that the user's branch and worktree were untouched.
 
-Before approval, the conductor persists only restart-safe metadata and valid plan revisions.
+Before approval, the orchestrator persists only restart-safe metadata and valid plan revisions.
 It does not create Git refs or worktrees, start workers, or run repository commands.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `/build <handoff-file>` | Create, review, approve, and start a build |
+| `/build <request-file>` | Create, review, approve, and start an orchestration run |
 | `/build-list` | List repository-scoped runs and open the interactive inspector |
 | `/build-show <run-id>` | Show the run summary and merge-ready evidence |
 | `/build-show <run-id> task <task-id>` | Show one task and its attempts |
@@ -147,7 +147,7 @@ Pruning retains the integration branch, source-evidence branches, snapshots, jou
 
 ## Plan sidecar
 
-Add `<handoff-file>.plan.json` to provide a deterministic plan instead of generating one with the model.
+Add `<request-file>.plan.json` to provide a deterministic plan instead of generating one with the model.
 The current plan schema is version 3:
 
 ```json
@@ -214,7 +214,7 @@ Invalid candidates cannot be approved and never enter plan history.
 | `PI_BUILD_VALIDATION_SANDBOX` | `none` | Validation mode: `none` or `nono` |
 | `PI_BUILD_NONO_PATH` | unset | Absolute path to Nono, required only when the sandbox mode is `nono` |
 | `PI_SERVER_DIR` | Pi server config directory | Directory containing `server.sock` |
-| `PI_CONFIG_DIR` | `$HOME/.pi` | Pi configuration root and conductor worktree root |
+| `PI_CONFIG_DIR` | `$HOME/.pi` | Pi configuration root and orchestrator worktree root |
 
 Invalid configuration fails closed.
 The chosen worker UI policy and validation boundary are frozen into each run so retries and recovery cannot silently change them.
@@ -248,7 +248,7 @@ The run allows at most two successful repair and re-review cycles.
 > Implementation and repair workers are unsandboxed Pi processes with host filesystem and network reachability.
 
 The compatible server disables worker extension, skill, prompt-template, and context-file discovery.
-It applies fixed role-based tool allowlists and returns an exact launch-policy attestation that the conductor verifies before accepting a worker.
+It applies fixed role-based tool allowlists and returns an exact launch-policy attestation that the orchestrator verifies before accepting a worker.
 Reviewers cannot use Bash or mutation tools.
 Implementation and repair workers retain Bash and mutation tools because they must change and validate code.
 
@@ -256,11 +256,11 @@ Focused and final commands receive a fresh temporary home, reduced credential-fr
 That reduced environment is not a filesystem or network sandbox.
 
 Set `PI_BUILD_VALIDATION_SANDBOX=nono` and `PI_BUILD_NONO_PATH=/absolute/path/to/nono` to sandbox validation.
-The conductor grants the worktree read-only access, grants a temporary runtime directory, blocks network access, and fails without an unsandboxed fallback if Nono cannot start.
+The orchestrator grants the worktree read-only access, grants a temporary runtime directory, blocks network access, and fails without an unsandboxed fallback if Nono cannot start.
 
-Run the conductor under a dedicated low-privilege account or in a disposable virtual machine for untrusted repositories.
+Run the orchestrator under a dedicated low-privilege account or in a disposable virtual machine for untrusted repositories.
 Remove cloud, package registry, SSH, signing, and deployment credentials from the execution environment.
-Do not put secrets in handoffs, repository files, prompts, worker output, or attempt logs.
+Do not put secrets in requests, repository files, prompts, worker output, or attempt logs.
 
 Read [`SECURITY.md`](SECURITY.md) before approving a run.
 It defines the complete trust model, worker authority, validation boundary, residual risks, and vulnerability reporting process.
@@ -275,7 +275,7 @@ Run state is stored outside the checked-out tree at:
 ```
 
 Worker journals are stored below the same run directory in `output/` and are capped at 5 MiB each.
-Conductor worktrees are stored at:
+Orchestrator worktrees are stored at:
 
 ```text
 ${PI_CONFIG_DIR:-$HOME/.pi}/build-conductor/worktrees/<repository-hash>/

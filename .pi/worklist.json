@@ -189,9 +189,9 @@
       "id": "goal-mry8o2lm-a8c5a52c",
       "title": "Rename and migrate the product surface",
       "description": "Adopt neutral package, command, type, configuration, storage, and documentation naming centered on orchestration, provide /orchestrate as the main interface, and retain temporary /build aliases plus readers for existing run schemas.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.210Z",
-      "updatedAt": "2026-07-24T01:05:43.210Z"
+      "updatedAt": "2026-07-25T20:18:37.396Z"
     },
     {
       "id": "goal-mry8o2lo-4cca8faf",
@@ -257,5 +257,6 @@
       "createdAt": "2026-07-24T18:31:12.552Z",
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
-  ]
+  ],
+  "revision": 1
 }

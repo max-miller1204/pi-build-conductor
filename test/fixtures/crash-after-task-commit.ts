@@ -1,8 +1,8 @@
 import { writeFile } from "node:fs/promises";
-import { BuildConductor } from "../../src/conductor.js";
-import type { BuildRun } from "../../src/domain/types.js";
+import type { OrchestrationRun } from "../../src/domain/types.js";
 import { GitCli, type TaskWorktreeSnapshot } from "../../src/git/git.js";
 import { GitWorktreeManager } from "../../src/git/worktrees.js";
+import { Orchestrator } from "../../src/orchestrator.js";
 import { RunStore } from "../../src/storage/run-store.js";
 import {
 	type FinalValidationInput,
@@ -178,8 +178,10 @@ class WritingWorker implements WorkerBackend {
 class CrashAfterReviewPersistenceStore extends RunStore {
 	override async transaction(
 		runId: string,
-		mutate: (current: BuildRun) => BuildRun | Promise<BuildRun>,
-	): Promise<BuildRun> {
+		mutate: (
+			current: OrchestrationRun,
+		) => OrchestrationRun | Promise<OrchestrationRun>,
+	): Promise<OrchestrationRun> {
 		const run = await super.transaction(runId, mutate);
 		if (
 			crashBoundary === "review-persistence" &&
@@ -203,7 +205,7 @@ class CrashAfterFinalValidation extends LocalFinalValidator {
 
 const git = new CrashAtStateBoundaryGit();
 const repository = await git.inspect(repositoryRoot);
-const conductor = new BuildConductor({
+const orchestrator = new Orchestrator({
 	store: new CrashAfterReviewPersistenceStore(runDirectory),
 	git,
 	worktrees: new GitWorktreeManager(git, worktreeRoot),
@@ -211,10 +213,10 @@ const conductor = new BuildConductor({
 	validator: new LocalTaskValidator(git),
 	finalValidator: new CrashAfterFinalValidation(git),
 });
-const run = await conductor.createRun({
+const run = await orchestrator.createRun({
 	repository,
-	handoffPath: `${repositoryRoot}/handoff.md`,
-	handoffText: "Create the crash recovery fixture.",
+	requestPath: `${repositoryRoot}/request.md`,
+	requestText: "Create the crash recovery fixture.",
 	plan: {
 		version: 3,
 		title: "Crash after task commit",
@@ -237,6 +239,8 @@ const run = await conductor.createRun({
 		],
 	},
 });
-const launch = await conductor.approveAndLaunch(run, repository);
+const launch = await orchestrator.approveAndLaunch(run, repository);
 await launch.completion;
-throw new Error(`Conductor completed instead of crashing at ${crashBoundary}`);
+throw new Error(
+	`Orchestrator completed instead of crashing at ${crashBoundary}`,
+);

@@ -1,4 +1,3 @@
-export * from "./conductor.js";
 export * from "./domain/dag.js";
 export * from "./domain/run.js";
 export * from "./domain/run-control.js";
@@ -7,6 +6,7 @@ export * from "./domain/types.js";
 export * from "./git/git.js";
 export * from "./git/worktrees.js";
 export * from "./inspection/run-presentation.js";
+export * from "./orchestrator.js";
 export * from "./planning/pi-plan-generator.js";
 export * from "./planning/plan-editor.js";
 export * from "./planning/plan-presentation.js";

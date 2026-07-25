@@ -1,6 +1,6 @@
 import { analyzeTaskPlan, type PlanValidationIssue } from "../domain/dag.js";
 import type {
-	BuildRun,
+	OrchestrationRun,
 	PlanRevision,
 	TaskPlan,
 	ValidationCommand,
@@ -82,7 +82,7 @@ export function diffPlanRevisions(
 	].join("\n");
 }
 
-export function renderApprovalSummary(run: BuildRun): string {
+export function renderApprovalSummary(run: OrchestrationRun): string {
 	const analysis = analyzeTaskPlan(run.plan);
 	const pathCount = new Set(run.plan.tasks.flatMap((task) => task.allowedPaths))
 		.size;
@@ -123,6 +123,6 @@ export function renderApprovalSummary(run: BuildRun): string {
 			: []),
 		"Prompt instructions and post-run diff checks cannot prevent host or external side effects.",
 		"Merge-ready evidence proves recorded Git and validation state, not the absence of external side effects.",
-		"Only conductor metadata has been persisted. No Git refs, worktrees, workers, or validation commands have started.",
+		"Only orchestrator metadata has been persisted. No Git refs, worktrees, workers, or validation commands have started.",
 	].join("\n");
 }

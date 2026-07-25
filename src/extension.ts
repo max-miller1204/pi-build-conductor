@@ -6,19 +6,12 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-	BuildConductor,
-	type LaunchOptions,
-	type LaunchResult,
-	type WorkerLifecycleProgress,
-	type WorkerModelSelection,
-} from "./conductor.js";
 import { validateTaskPlan } from "./domain/dag.js";
 import { retryableRunWork } from "./domain/run-control.js";
 import {
-	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
+	type OrchestrationRun,
 	type TaskPlan,
 } from "./domain/types.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
@@ -31,6 +24,13 @@ import {
 	renderTaskDetails,
 	resolveRunAttempt,
 } from "./inspection/run-presentation.js";
+import {
+	type LaunchOptions,
+	type LaunchResult,
+	Orchestrator,
+	type WorkerLifecycleProgress,
+	type WorkerModelSelection,
+} from "./orchestrator.js";
 import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import {
 	type PlanEditorSnapshot,
@@ -59,9 +59,9 @@ function parsePathArgument(args: string): string {
 }
 
 async function loadSidecarPlan(
-	handoffPath: string,
+	requestPath: string,
 ): Promise<TaskPlan | undefined> {
-	const sidecarPath = `${handoffPath}.plan.json`;
+	const sidecarPath = `${requestPath}.plan.json`;
 	try {
 		return validateTaskPlan(JSON.parse(await readFile(sidecarPath, "utf8")));
 	} catch (error) {
@@ -177,7 +177,7 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const securityPolicy = readSecurityPolicy();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
 	const finalValidationTimeoutMs = configuredFinalValidationTimeoutMs();
-	const conductor = new BuildConductor({
+	const orchestrator = new Orchestrator({
 		store,
 		workers,
 		git,
@@ -196,16 +196,22 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		securityPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
-	return { attemptLogs, conductor, store, workers };
+	return { attemptLogs, orchestrator, store, workers };
 }
 
-function assertRunRepository(run: BuildRun, repository: RepositoryInfo): void {
+function assertRunRepository(
+	run: OrchestrationRun,
+	repository: RepositoryInfo,
+): void {
 	if (run.repositoryRoot !== repository.root) {
 		throw new Error(`Run ${run.id} belongs to a different repository`);
 	}
 }
 
-function assertRunBase(run: BuildRun, repository: RepositoryInfo): void {
+function assertRunBase(
+	run: OrchestrationRun,
+	repository: RepositoryInfo,
+): void {
 	assertRunRepository(run, repository);
 	if (
 		!repository.isClean ||
@@ -424,7 +430,7 @@ async function inspectRunInteractively(
 			return;
 		}
 		const latest = latestWorkerAttempt(run);
-		const choice = await ctx.ui.select(`Build ${run.id}`, [
+		const choice = await ctx.ui.select(`Run ${run.id}`, [
 			"Inspect task",
 			"Inspect attempt",
 			...(latest ? ["Follow latest worker output"] : []),
@@ -515,7 +521,7 @@ async function inspectRunInteractively(
 	}
 }
 
-function editorSnapshot(run: BuildRun): PlanEditorSnapshot {
+function editorSnapshot(run: OrchestrationRun): PlanEditorSnapshot {
 	return {
 		plan: run.plan,
 		maxConcurrentWorkers: run.maxConcurrentWorkers,
@@ -529,7 +535,7 @@ async function reviewAndLaunchRun(
 	git: GitCli,
 	repository: RepositoryInfo,
 	runtime: ReturnType<typeof createRuntime>,
-	initialRun: BuildRun,
+	initialRun: OrchestrationRun,
 ): Promise<void> {
 	let run = initialRun;
 	for (;;) {
@@ -544,7 +550,7 @@ async function reviewAndLaunchRun(
 			{
 				save: async (plan, maxConcurrentWorkers, expectedPlanRevision) =>
 					editorSnapshot(
-						await runtime.conductor.revisePlan(
+						await runtime.orchestrator.revisePlan(
 							run.id,
 							plan,
 							maxConcurrentWorkers,
@@ -553,7 +559,7 @@ async function reviewAndLaunchRun(
 					),
 				restore: async (revisionNumber, expectedPlanRevision) =>
 					editorSnapshot(
-						await runtime.conductor.restorePlanRevision(
+						await runtime.orchestrator.restorePlanRevision(
 							run.id,
 							revisionNumber,
 							expectedPlanRevision,
@@ -572,14 +578,14 @@ async function reviewAndLaunchRun(
 		}
 		if (review.action === "cancel") {
 			const cancel = await ctx.ui.confirm(
-				`Cancel build ${run.id}?`,
+				`Cancel run ${run.id}?`,
 				"The persisted revision history will remain inspectable, but this run cannot be approved or resumed.",
 			);
 			if (!cancel) {
 				continue;
 			}
-			run = await runtime.conductor.cancelRun(run);
-			ctx.ui.notify(`Build ${run.id} cancelled before approval`, "info");
+			run = await runtime.orchestrator.cancelRun(run);
+			ctx.ui.notify(`Run ${run.id} cancelled before approval`, "info");
 			return;
 		}
 		const approved = await ctx.ui.confirm(
@@ -608,7 +614,7 @@ async function reviewAndLaunchRun(
 			);
 		}
 		ctx.ui.setStatus("pi-build-conductor", "launching workers");
-		const result = await runtime.conductor.approveAndLaunch(
+		const result = await runtime.orchestrator.approveAndLaunch(
 			run,
 			freshRepository,
 			selectedWorkerModel(ctx),
@@ -648,7 +654,7 @@ function progressText(progress: WorkerLifecycleProgress): string | undefined {
 	}
 }
 
-function taskStateSummary(run: BuildRun): string {
+function taskStateSummary(run: OrchestrationRun): string {
 	const counts = new Map<string, number>();
 	for (const task of Object.values(run.tasks)) {
 		counts.set(task.state, (counts.get(task.state) ?? 0) + 1);
@@ -669,7 +675,7 @@ function taskStateSummary(run: BuildRun): string {
 		.join(", ");
 }
 
-function workerBlockSummary(run: BuildRun): string {
+function workerBlockSummary(run: OrchestrationRun): string {
 	if (run.blockedWorkers.length === 0) {
 		return "Worker prompts: none";
 	}
@@ -678,7 +684,7 @@ function workerBlockSummary(run: BuildRun): string {
 		.join(", ")}`;
 }
 
-function reviewStateSummary(run: BuildRun): string {
+function reviewStateSummary(run: OrchestrationRun): string {
 	if (run.reviewRounds.length === 0) {
 		return "Reviews: not started";
 	}
@@ -718,7 +724,7 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 					: taskStateSummary(run),
 			);
 			ctx.ui.setWidget(runUiKey(run.id), [
-				`Build ${run.id}`,
+				`Run ${run.id}`,
 				`Run: ${run.state}`,
 				`Tasks: ${taskStateSummary(run)}`,
 				workerBlockSummary(run),
@@ -732,7 +738,7 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 function showCompletion(
 	ctx: ExtensionCommandContext,
 	_result: LaunchResult,
-	run: BuildRun,
+	run: OrchestrationRun,
 	store: RunStore,
 ): void {
 	const workerLines = run.attempts.map((attempt) => {
@@ -787,7 +793,7 @@ function showCompletion(
 		finalValidationWorktreeLine = `Final validation worktree${disposition}: ${finalAttempt.worktreePath}`;
 	}
 	ctx.ui.setWidget(runUiKey(run.id), [
-		`Build ${run.id}`,
+		`Run ${run.id}`,
 		`Run: ${run.state}`,
 		`Plan revision: ${run.approvedPlanRevision ?? run.planRevision}`,
 		`Worker limit: ${run.maxConcurrentWorkers}`,
@@ -814,14 +820,14 @@ function showCompletion(
 	if (run.state === "completed") {
 		ctx.ui.setStatus(runUiKey(run.id), "merge-ready validation passed");
 		ctx.ui.notify(
-			`Build ${run.id} is merge-ready on ${run.integrationBranch} at ${run.integrationHead}`,
+			`Run ${run.id} is merge-ready on ${run.integrationBranch} at ${run.integrationHead}`,
 			"info",
 		);
 		return;
 	}
 	if (run.state === "cancelled") {
-		ctx.ui.setStatus(runUiKey(run.id), "build cancelled");
-		ctx.ui.notify(`Build ${run.id} was cancelled`, "warning");
+		ctx.ui.setStatus(runUiKey(run.id), "run cancelled");
+		ctx.ui.notify(`Run ${run.id} was cancelled`, "warning");
 		return;
 	}
 	const failure = run.attempts.find((attempt) => attempt.state === "failed");
@@ -840,7 +846,7 @@ function showCompletion(
 	const finalValidationFailure = run.finalValidationAttempts.findLast(
 		(attempt) => attempt.state === "failed",
 	);
-	ctx.ui.setStatus(runUiKey(run.id), "build failed");
+	ctx.ui.setStatus(runUiKey(run.id), "run failed");
 	ctx.ui.notify(
 		finalValidationFailure?.error ??
 			integrationFailure?.integrationError ??
@@ -848,7 +854,7 @@ function showCompletion(
 			reviewFailure ??
 			reviewRoundFailure ??
 			failure?.error ??
-			`Build ${run.id} failed`,
+			`Run ${run.id} failed`,
 		"error",
 	);
 }
@@ -866,7 +872,7 @@ function showLaunch(
 	ctx.ui.setStatus("pi-build-conductor", undefined);
 	ctx.ui.setStatus(key, taskStateSummary(result.run));
 	ctx.ui.setWidget(key, [
-		`Build ${result.run.id}`,
+		`Run ${result.run.id}`,
 		`Run: ${result.run.state}`,
 		`Plan revision: ${result.run.approvedPlanRevision ?? result.run.planRevision}`,
 		`Worker limit: ${result.run.maxConcurrentWorkers}`,
@@ -877,22 +883,22 @@ function showLaunch(
 	]);
 	ctx.ui.notify(
 		result.launches.length > 0
-			? `Launched ${result.launches.length} implementation worker(s) for build ${result.run.id}`
-			: `Resuming ${result.run.state} lifecycle for build ${result.run.id}`,
+			? `Launched ${result.launches.length} implementation worker(s) for run ${result.run.id}`
+			: `Resuming ${result.run.state} lifecycle for run ${result.run.id}`,
 		"info",
 	);
 	void result.completion.then(
 		(run) => showCompletion(ctx, result, run, store),
 		(error: unknown) => {
-			ctx.ui.setStatus(key, "build failed");
+			ctx.ui.setStatus(key, "run failed");
 			ctx.ui.notify(errorMessage(error), "error");
 		},
 	);
 }
 
-export default function piBuildConductorExtension(pi: ExtensionAPI) {
+export default function piOrchestratorExtension(pi: ExtensionAPI) {
 	pi.registerCommand("build-list", {
-		description: "List and inspect build runs for this repository",
+		description: "List and inspect orchestration runs for this repository",
 		handler: async (_args, ctx) => {
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
@@ -915,7 +921,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				if (!ctx.hasUI || runs.length === 0) {
 					ctx.ui.notify(
 						runs.length === 0
-							? "No build runs found"
+							? "No orchestration runs found"
 							: `Found ${runs.length} runs`,
 						"info",
 					);
@@ -927,7 +933,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						left.id.localeCompare(right.id),
 				);
 				const selected = await ctx.ui.select(
-					"Build runs",
+					"Orchestration runs",
 					sorted.map(
 						(run) =>
 							`${run.id} | ${run.state} | ${run.plan.title} | ${run.updatedAt}`,
@@ -979,7 +985,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					);
 				}
 				ctx.ui.setWidget(runUiKey(run.id), lines);
-				ctx.ui.notify(`Showing build ${run.id}`, "info");
+				ctx.ui.notify(`Showing run ${run.id}`, "info");
 			} catch (error) {
 				ctx.ui.notify(errorMessage(error), "error");
 			}
@@ -1047,7 +1053,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				}
 				if (ctx.hasUI) {
 					const confirmed = await ctx.ui.confirm(
-						`Retry build ${run.id}?`,
+						`Retry run ${run.id}?`,
 						assessment.phase === "tasks"
 							? `New attempts will be created for failed tasks: ${assessment.failedTaskIds.join(", ")}`
 							: "A new final-validation attempt will run the approved complete suite.",
@@ -1058,7 +1064,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 						return;
 					}
 				}
-				const result = await runtime.conductor.retryAndLaunch(
+				const result = await runtime.orchestrator.retryAndLaunch(
 					run.id,
 					repository,
 					selectedWorkerModel(ctx),
@@ -1073,7 +1079,8 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build-prune", {
-		description: "Prune safe resources retained by a terminal build run",
+		description:
+			"Prune safe resources retained by a terminal orchestration run",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
@@ -1092,16 +1099,16 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				if (
 					ctx.hasUI &&
 					!(await ctx.ui.confirm(
-						`Prune build ${runId}?`,
+						`Prune run ${runId}?`,
 						"Clean terminal worktrees and expendable branches will be removed. Integration and source-evidence branches, dirty worktrees, snapshots, and output logs are retained.",
 					))
 				) {
 					ctx.ui.notify("Prune cancelled", "info");
 					return;
 				}
-				const report = await runtime.conductor.pruneRunResources(runId);
+				const report = await runtime.orchestrator.pruneRunResources(runId);
 				ctx.ui.setWidget(`${runUiKey(runId)}:prune`, [
-					`Pruned build ${runId}`,
+					`Pruned run ${runId}`,
 					`Removed worktrees: ${report.removedWorktrees.length}`,
 					...report.removedWorktrees.map((path) => `- ${path}`),
 					`Removed branches: ${report.removedBranches.length}`,
@@ -1113,7 +1120,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					`Retained unexpected branches: ${report.retainedUnexpectedBranches.length}`,
 					...report.retainedUnexpectedBranches.map((branch) => `- ${branch}`),
 				]);
-				ctx.ui.notify(`Finished pruning build ${runId}`, "info");
+				ctx.ui.notify(`Finished pruning run ${runId}`, "info");
 			} catch (error) {
 				ctx.ui.notify(errorMessage(error), "error");
 			}
@@ -1121,7 +1128,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build", {
-		description: "Plan and launch isolated build workers from a handoff file",
+		description: "Plan and launch isolated workers from a request file",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				throw new Error(
@@ -1130,43 +1137,43 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 			}
 			const pathArgument = parsePathArgument(args);
 			if (!pathArgument) {
-				ctx.ui.notify("Usage: /build <handoff-file>", "error");
+				ctx.ui.notify("Usage: /build <request-file>", "error");
 				return;
 			}
-			const handoffPath = isAbsolute(pathArgument)
+			const requestPath = isAbsolute(pathArgument)
 				? pathArgument
 				: resolve(ctx.cwd, pathArgument);
 			ctx.ui.setStatus("pi-build-conductor", "planning");
 			try {
-				const handoffText = await readFile(handoffPath, "utf8");
-				if (!handoffText.trim()) {
-					throw new Error(`Handoff file is empty: ${handoffPath}`);
+				const requestText = await readFile(requestPath, "utf8");
+				if (!requestText.trim()) {
+					throw new Error(`Request file is empty: ${requestPath}`);
 				}
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
 				if (!repository.isClean) {
 					throw new Error("Commit or stash all changes before starting /build");
 				}
-				let plan = await loadSidecarPlan(handoffPath);
+				let plan = await loadSidecarPlan(requestPath);
 				const planSource = plan ? "sidecar" : "generated";
 				if (!plan) {
 					ctx.ui.notify(
 						"No plan sidecar found. Asking the selected Pi model to create a DAG.",
 						"info",
 					);
-					plan = await generatePlanWithPi(ctx, handoffText);
+					plan = await generatePlanWithPi(ctx, requestText);
 				}
 				const runtime = createRuntime(git, repository);
-				const run = await runtime.conductor.createRun({
+				const run = await runtime.orchestrator.createRun({
 					repository,
-					handoffPath,
-					handoffText,
+					requestPath,
+					requestText,
 					plan,
 					planSource,
 					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
 				ctx.ui.notify(
-					`Persisted build ${run.id} at plan revision 1. Resume interrupted review with /build-resume ${run.id}.`,
+					`Persisted run ${run.id} at plan revision 1. Resume interrupted review with /build-resume ${run.id}.`,
 					"info",
 				);
 				await reviewAndLaunchRun(ctx, git, repository, runtime, run);
@@ -1178,7 +1185,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build-cancel", {
-		description: "Cancel a build run and stop its active workers",
+		description: "Cancel a orchestration run and stop its active workers",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
@@ -1189,14 +1196,14 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
-				const { conductor, store } = createRuntime(git, repository);
+				const { orchestrator, store } = createRuntime(git, repository);
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
 				if (
 					!["completed", "failed", "cancelled"].includes(stored.state) &&
 					ctx.hasUI &&
 					!(await ctx.ui.confirm(
-						`Cancel build ${runId}?`,
+						`Cancel run ${runId}?`,
 						`The run is ${stored.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
 					))
 				) {
@@ -1204,15 +1211,15 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("Cancellation declined", "info");
 					return;
 				}
-				const cancelled = await conductor.cancelRun(stored);
+				const cancelled = await orchestrator.cancelRun(stored);
 				const key = runUiKey(runId);
 				ctx.ui.setStatus("pi-build-conductor", undefined);
-				ctx.ui.setStatus(key, `build ${runId}: ${cancelled.state}`);
+				ctx.ui.setStatus(key, `run ${runId}: ${cancelled.state}`);
 				ctx.ui.setWidget(key, renderRunOverview(cancelled));
 				ctx.ui.notify(
 					cancelled.state === "cancelled"
-						? `Build ${runId} cancelled and workers stopped`
-						: `Build ${runId} was already ${cancelled.state}; no lifecycle work was changed`,
+						? `Run ${runId} cancelled and workers stopped`
+						: `Run ${runId} was already ${cancelled.state}; no lifecycle work was changed`,
 					"info",
 				);
 			} catch (error) {
@@ -1223,7 +1230,8 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("build-resume", {
-		description: "Recover an interrupted build run and launch ready retries",
+		description:
+			"Recover an interrupted orchestration run and launch ready retries",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
@@ -1235,12 +1243,10 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
 				if (!repository.isClean) {
-					throw new Error(
-						"Commit or stash all changes before resuming a build",
-					);
+					throw new Error("Commit or stash all changes before resuming a run");
 				}
 				const runtime = createRuntime(git, repository);
-				const { conductor, store } = runtime;
+				const { orchestrator, store } = runtime;
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
 				if (stored.state === "failed") {
@@ -1261,7 +1267,7 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					await reviewAndLaunchRun(ctx, git, repository, runtime, stored);
 					return;
 				}
-				const recovered = await conductor.recoverRun(runId);
+				const recovered = await orchestrator.recoverRun(runId);
 				const freshRepository = await git.inspect(ctx.cwd);
 				if (
 					!freshRepository.isClean ||
@@ -1277,14 +1283,14 @@ export default function piBuildConductorExtension(pi: ExtensionAPI) {
 					ctx.ui.setStatus(runUiKey(runId), "merge-ready validation passed");
 					ctx.ui.setStatus("pi-build-conductor", undefined);
 					ctx.ui.notify(
-						`Build ${runId} is already merge-ready at ${recovered.integrationHead}`,
+						`Run ${runId} is already merge-ready at ${recovered.integrationHead}`,
 						"info",
 					);
 					return;
 				}
 				assertRunBase(recovered, freshRepository);
 				ctx.ui.setStatus("pi-build-conductor", "launching retries");
-				const result = await conductor.resumeAndLaunch(
+				const result = await orchestrator.resumeAndLaunch(
 					recovered,
 					freshRepository,
 					selectedWorkerModel(ctx),

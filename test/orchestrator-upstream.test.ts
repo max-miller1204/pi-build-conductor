@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
 import type {
 	TaskDefinition,
 	WorkerLaunchPolicy,
 } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { Orchestrator } from "../src/orchestrator.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
@@ -140,7 +140,7 @@ function implementationTask(): TaskDefinition {
 		id: "implementation",
 		title: "Create the upstream result",
 		description:
-			"Create result.txt containing exactly upstream conductor succeeded followed by a newline. Do not modify any other file.",
+			"Create result.txt containing exactly upstream orchestrator succeeded followed by a newline. Do not modify any other file.",
 		dependencies: [],
 		acceptanceCriteria: ["result.txt contains the exact requested text"],
 		allowedPaths: ["result.txt"],
@@ -149,7 +149,7 @@ function implementationTask(): TaskDefinition {
 				command: process.execPath,
 				args: [
 					"-e",
-					"const fs=require('node:fs'); if(fs.readFileSync('result.txt','utf8')!=='upstream conductor succeeded\\n') process.exit(1)",
+					"const fs=require('node:fs'); if(fs.readFileSync('result.txt','utf8')!=='upstream orchestrator succeeded\\n') process.exit(1)",
 				],
 			},
 		],
@@ -165,7 +165,7 @@ afterEach(async () => {
 	);
 });
 
-describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
+describe.runIf(Boolean(socketPath))("real server orchestrator flow", () => {
 	it("takes one real Pi worker from task prompt to merge-ready evidence", async () => {
 		if (!socketPath) {
 			throw new Error("PI_SERVER_SMOKE_SOCKET is required");
@@ -180,7 +180,7 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 			}),
 		);
 		backends.push(workers);
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(join(parent, "runs")),
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -188,28 +188,29 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Exercise the complete conductor lifecycle with real Pi.",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Exercise the complete orchestrator lifecycle with real Pi.",
 			plan: {
 				version: 3,
-				title: "Real upstream conductor flow",
+				title: "Real upstream orchestrator flow",
 				tasks: [implementationTask()],
 				finalValidationCommands: [
 					{
 						command: process.execPath,
 						args: [
 							"-e",
-							"const fs=require('node:fs'); if(fs.readFileSync('result.txt','utf8')!=='upstream conductor succeeded\\n') process.exit(1)",
+							"const fs=require('node:fs'); if(fs.readFileSync('result.txt','utf8')!=='upstream orchestrator succeeded\\n') process.exit(1)",
 						],
 					},
 				],
 			},
 		});
 
-		const completed = await (await conductor.approveAndLaunch(run, repository))
-			.completion;
+		const completed = await (
+			await orchestrator.approveAndLaunch(run, repository)
+		).completion;
 
 		expect(
 			completed.state,
@@ -233,7 +234,7 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 			["show", `${completed.integrationBranch}:result.txt`],
 			{ cwd: repositoryRoot },
 		);
-		expect(integrated.stdout).toBe("upstream conductor succeeded\n");
+		expect(integrated.stdout).toBe("upstream orchestrator succeeded\n");
 		expect(await git.inspect(repositoryRoot)).toMatchObject({
 			currentBranch: "main",
 			head: repository.head,
@@ -256,7 +257,7 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 		);
 		backends.push(workers);
 		const store = new RunStore(join(parent, "runs"));
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -265,10 +266,10 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 			finalValidator: new LocalFinalValidator(git),
 			workerTimeoutMs: 1,
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Exercise a real Pi worker timeout.",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Exercise a real Pi worker timeout.",
 			plan: {
 				version: 3,
 				title: "Real upstream worker timeout",
@@ -279,7 +280,7 @@ describe.runIf(Boolean(socketPath))("real server conductor flow", () => {
 			},
 		});
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const failed = await launch.completion;
 
 		expect(failed.state).toBe("failed");

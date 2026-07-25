@@ -2,17 +2,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type BuildConductorDependencies,
-	BuildConductor as ProductionBuildConductor,
-} from "../src/conductor.js";
 import { approveRun } from "../src/domain/run.js";
-import type { BuildRun, TaskDefinition } from "../src/domain/types.js";
+import type { OrchestrationRun, TaskDefinition } from "../src/domain/types.js";
 import type { RepositoryInfo } from "../src/git/git.js";
 import type {
 	PrepareTaskWorktreeInput,
 	WorktreeManager,
 } from "../src/git/worktrees.js";
+import {
+	type OrchestratorDependencies,
+	Orchestrator as ProductionOrchestrator,
+} from "../src/orchestrator.js";
 import { AttemptLogStore } from "../src/storage/attempt-log-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import type {
@@ -28,10 +28,10 @@ import { reviewResult } from "./helpers/review.js";
 
 const directories: string[] = [];
 
-class BuildConductor extends ProductionBuildConductor {
+class Orchestrator extends ProductionOrchestrator {
 	constructor(
 		dependencies: Omit<
-			BuildConductorDependencies,
+			OrchestratorDependencies,
 			"git" | "validator" | "finalValidator"
 		>,
 	) {
@@ -202,11 +202,11 @@ async function setup(tasks: TaskDefinition[], maxConcurrentWorkers = 2) {
 	const store = new RunStore(directory);
 	const workers = new ControlledWorkers();
 	const worktrees = new IsolatedWorktrees();
-	const conductor = new BuildConductor({ store, workers, worktrees });
-	const run = await conductor.createRun({
+	const orchestrator = new Orchestrator({ store, workers, worktrees });
+	const run = await orchestrator.createRun({
 		repository,
-		handoffPath: "/repo/handoff.md",
-		handoffText: "Build concurrently",
+		requestPath: "/repo/request.md",
+		requestText: "Build concurrently",
 		plan: {
 			version: 3,
 			finalValidationCommands: [
@@ -217,7 +217,7 @@ async function setup(tasks: TaskDefinition[], maxConcurrentWorkers = 2) {
 		},
 		maxConcurrentWorkers,
 	});
-	return { conductor, run, store, workers, worktrees };
+	return { orchestrator, run, store, workers, worktrees };
 }
 
 afterEach(async () => {
@@ -230,20 +230,20 @@ afterEach(async () => {
 
 describe("bounded dependency-aware concurrency", () => {
 	it("fills two slots, refills one slot, and never dispatches a task twice", async () => {
-		const { conductor, run, workers, worktrees } = await setup([
+		const { orchestrator, run, workers, worktrees } = await setup([
 			task("first"),
 			task("second"),
 			task("third"),
 		]);
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		expect(result.launches.map((launch) => launch.task.id)).toEqual([
 			"first",
 			"second",
 		]);
 		expect(workers.startOrder).toEqual(["first", "second"]);
 		await expect(
-			conductor.resumeAndLaunch(result.run, repository),
+			orchestrator.resumeAndLaunch(result.run, repository),
 		).rejects.toThrow(/active lifecycle work/);
 		expect(workers.startOrder).toEqual(["first", "second"]);
 
@@ -264,13 +264,13 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("launches newly unblocked DAG layers in deterministic plan order", async () => {
-		const { conductor, run, workers } = await setup([
+		const { orchestrator, run, workers } = await setup([
 			task("foundation"),
 			task("api", ["foundation"]),
 			task("ui", ["foundation"]),
 			task("release", ["api", "ui"]),
 		]);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		expect(workers.startOrder).toEqual(["foundation"]);
 
 		workers.settle("foundation", { status: "succeeded" });
@@ -288,12 +288,12 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("refills a slot with a dependent while an unrelated worker is still running", async () => {
-		const { conductor, run, workers } = await setup([
+		const { orchestrator, run, workers } = await setup([
 			task("foundation"),
 			task("dependent", ["foundation"]),
 			task("unrelated"),
 		]);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		expect(workers.startOrder).toEqual(["foundation", "unrelated"]);
 
 		workers.settle("foundation", { status: "succeeded" });
@@ -311,11 +311,11 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("supports a four-worker bound with isolated workers and worktrees", async () => {
-		const { conductor, run, workers, worktrees } = await setup(
+		const { orchestrator, run, workers, worktrees } = await setup(
 			[task("one"), task("two"), task("three"), task("four"), task("five")],
 			4,
 		);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		expect(result.launches).toHaveLength(4);
 		expect(
 			new Set(result.launches.map((launch) => launch.attempt.workerId)).size,
@@ -336,12 +336,12 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("stops dispatch after failure while allowing active siblings to settle", async () => {
-		const { conductor, run, store, workers } = await setup([
+		const { orchestrator, run, store, workers } = await setup([
 			task("foundation"),
 			task("independent"),
 			task("dependent", ["foundation"]),
 		]);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		expect(workers.startOrder).toEqual(["foundation", "independent"]);
 
 		workers.settle("foundation", { status: "failed", error: "failed" });
@@ -356,7 +356,7 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("stops a label-owned worker spawned before worker-id persistence", async () => {
-		const { conductor, run, store, workers } = await setup([
+		const { orchestrator, run, store, workers } = await setup([
 			task("implementation"),
 		]);
 		await workers.spawn({
@@ -395,13 +395,13 @@ describe("bounded dependency-aware concurrency", () => {
 			],
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 
 		expect(workers.stopOrder).toEqual(["worker-1"]);
 		expect((await workers.status("worker-2")).status).toBe("online");
 		expect(recovered.attempts[0]).toMatchObject({
 			state: "interrupted",
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		});
 		expect(recovered.tasks.implementation?.state).toBe("ready");
 	});
@@ -426,7 +426,7 @@ describe("bounded dependency-aware concurrency", () => {
 		if (!first || !second) {
 			throw new Error("missing recovery tasks");
 		}
-		const active: BuildRun = {
+		const active: OrchestrationRun = {
 			...approved,
 			tasks: {
 				first: {
@@ -477,7 +477,7 @@ describe("bounded dependency-aware concurrency", () => {
 		};
 		await store.save(active);
 		const logs = new AttemptLogStore(join(store.directory, "output"));
-		const recovering = new BuildConductor({
+		const recovering = new Orchestrator({
 			store,
 			workers,
 			worktrees,
@@ -510,7 +510,7 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("recovers a recorded commit by retrying cleanup without recommitting", async () => {
-		const { conductor, run, store, worktrees } = await setup([
+		const { orchestrator, run, store, worktrees } = await setup([
 			task("committed"),
 		]);
 		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
@@ -550,7 +550,7 @@ describe("bounded dependency-aware concurrency", () => {
 			],
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 
 		expect(recovered.state).toBe("integrating");
 		expect(recovered.tasks.committed?.state).toBe("succeeded");
@@ -562,7 +562,9 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("recovers a commit created just before state persistence", async () => {
-		const { conductor, run, store, worktrees } = await setup([task("crashed")]);
+		const { orchestrator, run, store, worktrees } = await setup([
+			task("crashed"),
+		]);
 		const approved = approveRun(run, "2026-01-01T00:00:00.000Z");
 		const crashedTask = approved.tasks.crashed;
 		if (!crashedTask) {
@@ -599,7 +601,7 @@ describe("bounded dependency-aware concurrency", () => {
 			],
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 
 		expect(recovered.state).toBe("integrating");
 		expect(recovered.attempts[0]).toMatchObject({
@@ -610,7 +612,7 @@ describe("bounded dependency-aware concurrency", () => {
 	});
 
 	it("retries cleanup for a live worker referenced by a terminal attempt", async () => {
-		const { conductor, run, store, workers } = await setup([task("failed")]);
+		const { orchestrator, run, store, workers } = await setup([task("failed")]);
 		await workers.spawn({
 			cwd: "/worktrees/failed",
 			label: `${run.id}:failed`,
@@ -647,26 +649,26 @@ describe("bounded dependency-aware concurrency", () => {
 			],
 		});
 
-		await conductor.recoverRun(run.id);
+		await orchestrator.recoverRun(run.id);
 
 		expect(workers.stopOrder).toEqual(["worker-1"]);
 	});
 
 	it("preserves cancellation across restart without refilling or restopping", async () => {
-		const { conductor, run, store, workers, worktrees } = await setup([
+		const { orchestrator, run, store, workers, worktrees } = await setup([
 			task("first"),
 			task("second"),
 			task("third"),
 		]);
-		const result = await conductor.approveAndLaunch(run, repository);
-		await conductor.cancelRun(result.run);
+		const result = await orchestrator.approveAndLaunch(run, repository);
+		await orchestrator.cancelRun(result.run);
 		const cancelled = await result.completion;
 
 		expect(cancelled.state).toBe("cancelled");
 		expect(workers.startOrder).toEqual(["first", "second"]);
 		expect(workers.stopOrder.sort()).toEqual(["worker-1", "worker-2"]);
 
-		const restarted = new BuildConductor({ store, workers, worktrees });
+		const restarted = new Orchestrator({ store, workers, worktrees });
 		const recovered = await restarted.recoverRun(run.id);
 
 		expect(recovered.state).toBe("cancelled");

@@ -4,8 +4,8 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { validateTaskPlan } from "../domain/dag.js";
 import type { TaskPlan } from "../domain/types.js";
 
-const PLANNING_SYSTEM_PROMPT = `You are the planning stage of a software build conductor.
-Turn the supplied handoff into a small, implementation-ready dependency DAG.
+const PLANNING_SYSTEM_PROMPT = `You are the planning stage of a software orchestrator.
+Turn the supplied request into a small, implementation-ready dependency DAG.
 Return JSON only, with exactly this shape:
 {
   "version": 3,
@@ -55,7 +55,7 @@ export function parseGeneratedPlan(text: string): TaskPlan {
 
 export async function generatePlanWithPi(
 	ctx: ExtensionCommandContext,
-	handoff: string,
+	request: string,
 ): Promise<TaskPlan> {
 	if (!ctx.model) {
 		throw new Error("Select a model before running /build");
@@ -71,7 +71,7 @@ export async function generatePlanWithPi(
 		content: [
 			{
 				type: "text",
-				text: `Create the task DAG for this handoff:\n\n${handoff}`,
+				text: `Create the task DAG for this request:\n\n${request}`,
 			},
 		],
 		timestamp: Date.now(),

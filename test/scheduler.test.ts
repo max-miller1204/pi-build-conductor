@@ -4,7 +4,7 @@ import {
 	reconcileTaskStates,
 } from "../src/domain/scheduler.js";
 import type {
-	BuildRun,
+	OrchestrationRun,
 	TaskDefinition,
 	TaskPlan,
 	TaskState,
@@ -26,7 +26,7 @@ function definition(id: string, dependencies: string[] = []): TaskDefinition {
 function runWith(
 	states: Record<string, TaskState>,
 	maxConcurrentWorkers = 2,
-): BuildRun {
+): OrchestrationRun {
 	const definitions = [
 		definition("base"),
 		definition("api", ["base"]),
@@ -40,7 +40,7 @@ function runWith(
 		tasks: definitions,
 	};
 	return {
-		schemaVersion: 8,
+		schemaVersion: 9,
 		revision: 0,
 		id: "run-1",
 		state: "running",
@@ -48,7 +48,7 @@ function runWith(
 		baseBranch: "main",
 		baseCommit: "abc",
 		integrationBranch: "conductor/run-1/integration",
-		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+		request: { sourcePath: "/repo/request.md", text: "Build it" },
 		securityPolicy: legacySecurityPolicy(),
 		plan,
 		planRevision: 1,

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-	createBuildRun,
+	createOrchestrationRun,
 	restoreRunPlanRevision,
 	reviseRunPlan,
 } from "../src/domain/run.js";
-import type { BuildRun, TaskPlan } from "../src/domain/types.js";
+import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
 import {
 	type PlanEditorPersistence,
 	type PlanEditorSnapshot,
@@ -38,21 +38,21 @@ const plan: TaskPlan = {
 	finalValidationCommands: [{ command: "npm", args: ["run", "check"] }],
 };
 
-function createRun(): BuildRun {
-	return createBuildRun({
+function createRun(): OrchestrationRun {
+	return createOrchestrationRun({
 		id: "run-1",
 		repositoryRoot: "/repo",
 		baseBranch: "main",
 		baseCommit: "abc123",
 		integrationBranch: "conductor/run-1/integration",
-		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+		request: { sourcePath: "/repo/request.md", text: "Build it" },
 		plan,
 		maxConcurrentWorkers: 2,
 		now: "2026-01-01T00:00:00.000Z",
 	});
 }
 
-function snapshot(run: BuildRun): PlanEditorSnapshot {
+function snapshot(run: OrchestrationRun): PlanEditorSnapshot {
 	return {
 		plan: run.plan,
 		maxConcurrentWorkers: run.maxConcurrentWorkers,
@@ -92,9 +92,9 @@ class ScriptedUI implements PlanEditorUI {
 	}
 }
 
-function persistence(initial: BuildRun): {
+function persistence(initial: OrchestrationRun): {
 	adapter: PlanEditorPersistence;
-	current: () => BuildRun;
+	current: () => OrchestrationRun;
 } {
 	let run = initial;
 	return {

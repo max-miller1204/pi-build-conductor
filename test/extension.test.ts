@@ -8,7 +8,7 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { createBuildRun } from "../src/domain/run.js";
+import { createOrchestrationRun } from "../src/domain/run.js";
 import extension from "../src/extension.js";
 import { GitCli } from "../src/git/git.js";
 import { RunStore } from "../src/storage/run-store.js";
@@ -40,13 +40,13 @@ async function repositoryFixture(): Promise<{
 	const store = new RunStore(
 		join(repository.commonDirectory, "pi-build-conductor", "runs"),
 	);
-	const run = createBuildRun({
+	const run = createOrchestrationRun({
 		id: "inspect-run",
 		repositoryRoot: repository.root,
 		baseBranch: repository.currentBranch,
 		baseCommit: repository.head,
 		integrationBranch: "conductor/inspect-run/integration",
-		handoff: { sourcePath: join(root, "handoff.md"), text: "Build it" },
+		request: { sourcePath: join(root, "request.md"), text: "Build it" },
 		plan: {
 			version: 3,
 			title: "Inspection fixture",
@@ -133,6 +133,6 @@ describe("run inspection extension commands", () => {
 		expect(widgets.get("pi-build-conductor:inspect-run")?.join("\n")).toContain(
 			"Run inspect-run: Inspection fixture",
 		);
-		expect(notifications).toContain("Showing build inspect-run");
+		expect(notifications).toContain("Showing run inspect-run");
 	});
 });

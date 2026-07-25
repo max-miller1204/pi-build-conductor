@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBuildRun } from "../src/domain/run.js";
+import { createOrchestrationRun } from "../src/domain/run.js";
 import type { TaskPlan } from "../src/domain/types.js";
 import {
 	formatCommand,
@@ -49,13 +49,13 @@ describe("plan presentation", () => {
 	});
 
 	it("summarizes the exact revision, worker limit, and side-effect boundary", () => {
-		const run = createBuildRun({
+		const run = createOrchestrationRun({
 			id: "run-1",
 			repositoryRoot: "/repo",
 			baseBranch: "main",
 			baseCommit: "abc123",
 			integrationBranch: "conductor/run-1/integration",
-			handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+			request: { sourcePath: "/repo/request.md", text: "Build it" },
 			plan,
 			maxConcurrentWorkers: 3,
 			now: "2026-01-01T00:00:00.000Z",

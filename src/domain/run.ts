@@ -2,9 +2,9 @@ import { legacySecurityPolicy } from "../security/policy.js";
 import { validateTaskPlan } from "./dag.js";
 import { reconcileTaskStates } from "./scheduler.js";
 import {
-	type BuildRun,
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
+	type OrchestrationRun,
 	type PlanRevisionSource,
 	RUN_SCHEMA_VERSION,
 	type RunSecurityPolicy,
@@ -18,7 +18,7 @@ export interface CreateRunInput {
 	baseBranch: string;
 	baseCommit: string;
 	integrationBranch: string;
-	handoff: BuildRun["handoff"];
+	request: OrchestrationRun["request"];
 	securityPolicy?: RunSecurityPolicy;
 	plan: TaskPlan;
 	maxConcurrentWorkers: number;
@@ -63,7 +63,7 @@ function tasksForPlan(plan: TaskPlan): Record<string, RunTask> {
 	);
 }
 
-function assertPlanEditable(run: BuildRun): void {
+function assertPlanEditable(run: OrchestrationRun): void {
 	if (!["planning", "awaiting_approval"].includes(run.state)) {
 		throw new Error(`Cannot revise plan in state ${run.state}`);
 	}
@@ -82,7 +82,9 @@ function assertPlanEditable(run: BuildRun): void {
 	}
 }
 
-export function createBuildRun(input: CreateRunInput): BuildRun {
+export function createOrchestrationRun(
+	input: CreateRunInput,
+): OrchestrationRun {
 	assertWorkerLimit(input.maxConcurrentWorkers);
 	const plan = cloneTaskPlan(validateTaskPlan(input.plan));
 	const planRevision = 1;
@@ -95,7 +97,7 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 		baseBranch: input.baseBranch,
 		baseCommit: input.baseCommit,
 		integrationBranch: input.integrationBranch,
-		handoff: input.handoff,
+		request: input.request,
 		securityPolicy: structuredClone(
 			input.securityPolicy ?? legacySecurityPolicy(),
 		),
@@ -125,9 +127,9 @@ export function createBuildRun(input: CreateRunInput): BuildRun {
 }
 
 export function reviseRunPlan(
-	run: BuildRun,
+	run: OrchestrationRun,
 	input: ReviseRunPlanInput,
-): BuildRun {
+): OrchestrationRun {
 	assertPlanEditable(run);
 	if (run.planRevision !== input.expectedPlanRevision) {
 		throw new Error(
@@ -164,11 +166,11 @@ export function reviseRunPlan(
 }
 
 export function restoreRunPlanRevision(
-	run: BuildRun,
+	run: OrchestrationRun,
 	revisionNumber: number,
 	expectedPlanRevision: number,
 	now: string,
-): BuildRun {
+): OrchestrationRun {
 	assertPlanEditable(run);
 	if (run.planRevision !== expectedPlanRevision) {
 		throw new Error(
@@ -205,10 +207,10 @@ export function restoreRunPlanRevision(
 }
 
 export function approveRun(
-	run: BuildRun,
+	run: OrchestrationRun,
 	now: string,
 	expectedPlanRevision = run.planRevision,
-): BuildRun {
+): OrchestrationRun {
 	if (run.state !== "awaiting_approval") {
 		throw new Error(`Cannot approve run in state ${run.state}`);
 	}
@@ -226,7 +228,10 @@ export function approveRun(
 	};
 }
 
-export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
+export function recoverInterruptedRun(
+	run: OrchestrationRun,
+	now: string,
+): OrchestrationRun {
 	let changed = run.blockedWorkers.length > 0;
 	const attempts = run.attempts.map((attempt) => {
 		if (
@@ -242,7 +247,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			...attempt,
 			state: "interrupted" as const,
 			finishedAt: now,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		};
 	});
 	const reviewAttempts = run.reviewAttempts.map((attempt) => {
@@ -259,7 +264,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			...attempt,
 			state: "interrupted" as const,
 			finishedAt: now,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		};
 	});
 	const repairAttempts = run.repairAttempts.map((attempt) => {
@@ -276,7 +281,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			...attempt,
 			state: "interrupted" as const,
 			finishedAt: now,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		};
 	});
 	const finalValidationAttempts = run.finalValidationAttempts.map((attempt) => {
@@ -288,7 +293,7 @@ export function recoverInterruptedRun(run: BuildRun, now: string): BuildRun {
 			...attempt,
 			state: "interrupted" as const,
 			finishedAt: now,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		};
 	});
 	const tasks = Object.fromEntries(

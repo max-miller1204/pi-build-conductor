@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { Orchestrator } from "../src/orchestrator.js";
 import {
 	REVIEW_REPORT_END,
 	REVIEW_REPORT_START,
@@ -63,12 +63,12 @@ class ReviewFlowWorkers implements WorkerBackend {
 		_options: WorkerExecutionOptions = {},
 	): Promise<WorkerExecution> {
 		const worker = await this.status(workerId);
-		if (prompt.includes("implementation worker for build run")) {
+		if (prompt.includes("implementation worker for orchestration run")) {
 			await mkdir(join(worker.cwd, "src"), { recursive: true });
 			await writeFile(join(worker.cwd, "src", "result.txt"), "implemented\n");
 			return { completion: Promise.resolve({ status: "succeeded" }) };
 		}
-		if (prompt.includes("repair worker for build run")) {
+		if (prompt.includes("repair worker for orchestration run")) {
 			await mkdir(join(worker.cwd, "src"), { recursive: true });
 			await writeFile(join(worker.cwd, "src", "review-fix.txt"), "repaired\n");
 			return { completion: Promise.resolve({ status: "succeeded" }) };
@@ -151,7 +151,7 @@ describe("independent review and repair lifecycle", () => {
 		const repository = await git.inspect(repositoryRoot);
 		const workers = new ReviewFlowWorkers();
 		const store = new RunStore(join(parent, "runs"));
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -159,10 +159,10 @@ describe("independent review and repair lifecycle", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Implement and independently review the feature",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Implement and independently review the feature",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -188,7 +188,7 @@ describe("independent review and repair lifecycle", () => {
 			},
 		});
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		const completed = await result.completion;
 
 		expect(completed.state).toBe("completed");
@@ -252,7 +252,7 @@ describe("independent review and repair lifecycle", () => {
 				})),
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 		expect(recovered.state).toBe("reviewing");
 		expect(recovered.integrationHead).toBe(recoveredIntegratedCommit);
 		expect(recovered.repairAttempts[0]).toMatchObject({
@@ -267,7 +267,7 @@ describe("independent review and repair lifecycle", () => {
 		const git = new GitCli();
 		const repository = await git.inspect(repositoryRoot);
 		const workers = new ReviewFlowWorkers("README.md");
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(join(parent, "runs")),
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -275,10 +275,10 @@ describe("independent review and repair lifecycle", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Keep repairs within approved source paths",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Keep repairs within approved source paths",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -301,7 +301,7 @@ describe("independent review and repair lifecycle", () => {
 			},
 		});
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		const completed = await result.completion;
 
 		expect(completed.state).toBe("failed");

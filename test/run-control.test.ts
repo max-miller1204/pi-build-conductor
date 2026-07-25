@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approveRun, createBuildRun } from "../src/domain/run.js";
+import { approveRun, createOrchestrationRun } from "../src/domain/run.js";
 import {
 	prepareFailedRunRetry,
 	RunRetryError,
@@ -7,7 +7,7 @@ import {
 	retryableRunWork,
 } from "../src/domain/run-control.js";
 import {
-	type BuildRun,
+	type OrchestrationRun,
 	REVIEW_CATEGORIES,
 	type RunTask,
 	type TaskDefinition,
@@ -38,24 +38,24 @@ function createRun(definitions: TaskDefinition[] = [task("implementation")]) {
 		tasks: definitions,
 		finalValidationCommands: [{ command: "npm", args: ["test"] }],
 	};
-	return createBuildRun({
+	return createOrchestrationRun({
 		id: "retry-run",
 		repositoryRoot: "/repo",
 		baseBranch: "main",
 		baseCommit: "base",
 		integrationBranch: "conductor/retry-run/integration",
-		handoff: { sourcePath: "/repo/handoff.md", text: "Implement it" },
+		request: { sourcePath: "/repo/request.md", text: "Implement it" },
 		plan,
 		maxConcurrentWorkers: 2,
 		now: CREATED_AT,
 	});
 }
 
-function approvedRun(definitions?: TaskDefinition[]): BuildRun {
+function approvedRun(definitions?: TaskDefinition[]): OrchestrationRun {
 	return approveRun(createRun(definitions), APPROVED_AT);
 }
 
-function runTask(run: BuildRun, taskId: string): RunTask {
+function runTask(run: OrchestrationRun, taskId: string): RunTask {
 	const found = run.tasks[taskId];
 	if (!found) {
 		throw new Error(`Missing test task ${taskId}`);
@@ -85,7 +85,7 @@ function failedEvidence() {
 	};
 }
 
-function taskFailureRun(): BuildRun {
+function taskFailureRun(): OrchestrationRun {
 	const run = approvedRun([
 		task("retained"),
 		task("failed"),
@@ -145,7 +145,7 @@ function taskFailureRun(): BuildRun {
 	};
 }
 
-function failedFinalValidationRun(): BuildRun {
+function failedFinalValidationRun(): OrchestrationRun {
 	const run = approvedRun();
 	const reviewAttempts = REVIEW_CATEGORIES.map((category) => ({
 		id: `review-${category}`,
@@ -292,7 +292,7 @@ describe("failed run retry control", () => {
 			baseCommit: run.integrationHead,
 			startedAt: APPROVED_AT,
 			finishedAt: APPROVED_AT,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		});
 		runTask(run, "other").attemptIds.push("other-1");
 
@@ -317,7 +317,7 @@ describe("failed run retry control", () => {
 			baseCommit: run.integrationHead,
 			startedAt: APPROVED_AT,
 			finishedAt: APPROVED_AT,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		});
 		runTask(run, "implementation").attemptIds.push("implementation-1");
 
@@ -344,7 +344,7 @@ describe("failed run retry control", () => {
 				baseCommit: run.integrationHead,
 				startedAt: APPROVED_AT,
 				finishedAt: APPROVED_AT,
-				error: "Conductor restarted",
+				error: "Orchestrator restarted",
 			},
 			{ ...failedAttempt, number: 2 },
 		);
@@ -359,7 +359,7 @@ describe("failed run retry control", () => {
 	it.each([
 		{
 			name: "task",
-			addActive(run: BuildRun) {
+			addActive(run: OrchestrationRun) {
 				run.attempts.push({
 					id: "active-task",
 					taskId: "other",
@@ -374,7 +374,7 @@ describe("failed run retry control", () => {
 		},
 		{
 			name: "review",
-			addActive(run: BuildRun) {
+			addActive(run: OrchestrationRun) {
 				run.reviewAttempts.push({
 					id: "active-review",
 					round: 1,
@@ -390,7 +390,7 @@ describe("failed run retry control", () => {
 		},
 		{
 			name: "repair",
-			addActive(run: BuildRun) {
+			addActive(run: OrchestrationRun) {
 				run.repairAttempts.push({
 					id: "active-repair",
 					round: 1,
@@ -406,7 +406,7 @@ describe("failed run retry control", () => {
 		},
 		{
 			name: "final validation",
-			addActive(run: BuildRun) {
+			addActive(run: OrchestrationRun) {
 				run.finalValidationAttempts.push({
 					id: "active-final",
 					number: 1,

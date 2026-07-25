@@ -1,4 +1,4 @@
-export const RUN_SCHEMA_VERSION = 8 as const;
+export const RUN_SCHEMA_VERSION = 9 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
 export const MERGE_READY_EVIDENCE_VERSION = 2 as const;
 export const MIN_CONCURRENT_WORKERS = 2 as const;
@@ -304,7 +304,7 @@ export interface RepairAttempt {
 	evidence?: TaskValidationEvidence;
 }
 
-export interface HandoffRecord {
+export interface RunRequest {
 	sourcePath: string;
 	text: string;
 }
@@ -380,7 +380,7 @@ export interface MergeReadyEvidence {
 	git: GitVerificationEvidence;
 }
 
-export interface BuildRun {
+export interface OrchestrationRun {
 	schemaVersion: typeof RUN_SCHEMA_VERSION;
 	revision: number;
 	id: string;
@@ -389,7 +389,7 @@ export interface BuildRun {
 	baseBranch: string;
 	baseCommit: string;
 	integrationBranch: string;
-	handoff: HandoffRecord;
+	request: RunRequest;
 	securityPolicy: RunSecurityPolicy;
 	plan: TaskPlan;
 	planRevision: number;

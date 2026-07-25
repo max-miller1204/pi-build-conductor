@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { Orchestrator } from "../src/orchestrator.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
@@ -173,13 +173,13 @@ async function runCrashFixture(
 	};
 }
 
-function recoveryConductor(
+function recoveryOrchestrator(
 	store: RunStore,
 	git: GitCli,
 	worktreeRoot: string,
 	workers: WorkerBackend = new RecoveryWorkers(),
-): BuildConductor {
-	return new BuildConductor({
+): Orchestrator {
+	return new Orchestrator({
 		store,
 		git,
 		worktrees: new GitWorktreeManager(git, worktreeRoot),
@@ -218,7 +218,7 @@ describe("process crash recovery", () => {
 		);
 		expect(committedHead).not.toBe(crashedAttempt.baseCommit);
 
-		const recovered = await recoveryConductor(
+		const recovered = await recoveryOrchestrator(
 			store,
 			git,
 			worktreeRoot,
@@ -260,13 +260,13 @@ describe("process crash recovery", () => {
 			throw new Error("Crash fixture did not persist a reviewer");
 		}
 
-		const conductor = recoveryConductor(
+		const orchestrator = recoveryOrchestrator(
 			store,
 			git,
 			worktreeRoot,
 			new ReviewRecoveryWorkers(),
 		);
-		const recovered = await conductor.recoverRun(crashed.id);
+		const recovered = await orchestrator.recoverRun(crashed.id);
 		expect(recovered.state).toBe("reviewing");
 		expect(
 			recovered.reviewAttempts.find(
@@ -281,7 +281,7 @@ describe("process crash recovery", () => {
 
 		const repository = await git.inspect(repositoryRoot);
 		const completed = await (
-			await conductor.resumeAndLaunch(recovered, repository)
+			await orchestrator.resumeAndLaunch(recovered, repository)
 		).completion;
 		const succeededReviews = completed.reviewAttempts.filter(
 			(attempt) => attempt.state === "succeeded",
@@ -328,14 +328,14 @@ describe("process crash recovery", () => {
 		);
 		expect(advancedHead).not.toBe(repair.baseCommit);
 
-		const conductor = recoveryConductor(
+		const orchestrator = recoveryOrchestrator(
 			store,
 			git,
 			worktreeRoot,
 			new ReviewRecoveryWorkers(),
 		);
-		const recovered = await conductor.recoverRun(crashed.id);
-		const recoveredAgain = await conductor.recoverRun(crashed.id);
+		const recovered = await orchestrator.recoverRun(crashed.id);
+		const recoveredAgain = await orchestrator.recoverRun(crashed.id);
 		const recoveredRepair = recovered.repairAttempts[0];
 
 		expect(recovered).toMatchObject({
@@ -368,7 +368,7 @@ describe("process crash recovery", () => {
 
 		const repository = await git.inspect(repositoryRoot);
 		const completed = await (
-			await conductor.resumeAndLaunch(recoveredAgain, repository)
+			await orchestrator.resumeAndLaunch(recoveredAgain, repository)
 		).completion;
 		expect(completed.state).toBe("completed");
 		expect(completed.repairAttempts).toHaveLength(1);
@@ -403,27 +403,27 @@ describe("process crash recovery", () => {
 		});
 		expect(crashed.finalValidationAttempts[0]?.evidence).toBeUndefined();
 		expect(crashed.reviewAttempts).toHaveLength(5);
-		const conductor = recoveryConductor(store, git, worktreeRoot);
+		const orchestrator = recoveryOrchestrator(store, git, worktreeRoot);
 
-		const recovered = await conductor.recoverRun(crashed.id);
+		const recovered = await orchestrator.recoverRun(crashed.id);
 		expect(recovered).toMatchObject({
 			state: "reviewed",
 			finalValidationAttempts: [
 				{
 					state: "interrupted",
-					error: "Conductor restarted",
+					error: "Orchestrator restarted",
 				},
 			],
 		});
 		const repository = await git.inspect(repositoryRoot);
 		const completed = await (
-			await conductor.resumeAndLaunch(recovered, repository)
+			await orchestrator.resumeAndLaunch(recovered, repository)
 		).completion;
 
 		expect(completed.state).toBe("completed");
 		expect(completed.reviewAttempts).toHaveLength(5);
 		expect(completed.finalValidationAttempts).toMatchObject([
-			{ state: "interrupted", error: "Conductor restarted" },
+			{ state: "interrupted", error: "Orchestrator restarted" },
 			{ state: "succeeded", evidence: { passed: true } },
 		]);
 		expect(completed.mergeReadyEvidence).toBeDefined();
@@ -460,9 +460,9 @@ describe("process crash recovery", () => {
 		);
 		expect(advancedHead).not.toBe(crashed.baseCommit);
 
-		const conductor = recoveryConductor(store, git, worktreeRoot);
-		const recovered = await conductor.recoverRun(crashed.id);
-		const recoveredAgain = await conductor.recoverRun(crashed.id);
+		const orchestrator = recoveryOrchestrator(store, git, worktreeRoot);
+		const recovered = await orchestrator.recoverRun(crashed.id);
+		const recoveredAgain = await orchestrator.recoverRun(crashed.id);
 
 		expect(recovered).toMatchObject({
 			state: "integrating",

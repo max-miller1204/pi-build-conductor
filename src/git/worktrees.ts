@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import * as nodePath from "node:path";
-import type { BuildRun } from "../domain/types.js";
+import type { OrchestrationRun } from "../domain/types.js";
 import {
 	type GitClient,
 	integrationScratchDirectoryPrefix,
@@ -86,8 +86,12 @@ export interface WorktreeManager {
 		commit: string,
 	): Promise<string>;
 	removeTaskWorktree(repositoryRoot: string, path: string): Promise<void>;
-	reconcileRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
-	pruneRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
+	reconcileRunResources?(
+		run: OrchestrationRun,
+	): Promise<ResourceReconciliationReport>;
+	pruneRunResources?(
+		run: OrchestrationRun,
+	): Promise<ResourceReconciliationReport>;
 }
 
 export class GitWorktreeManager implements WorktreeManager {
@@ -122,7 +126,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const freshRepository = await this.git.inspect(repository.root);
 		if (!freshRepository.isClean) {
 			throw new Error(
-				"The current worktree must be clean before starting a build run",
+				"The current worktree must be clean before starting a orchestration run",
 			);
 		}
 		if (
@@ -261,7 +265,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const target = resolve(path);
 		if (!isPathInside(root, target)) {
 			throw new Error(
-				`Refusing to remove worktree outside conductor root: ${path}`,
+				`Refusing to remove worktree outside orchestrator root: ${path}`,
 			);
 		}
 		try {
@@ -288,7 +292,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	}
 
 	async pruneRunResources(
-		run: BuildRun,
+		run: OrchestrationRun,
 	): Promise<ResourceReconciliationReport> {
 		if (!["completed", "failed", "cancelled"].includes(run.state)) {
 			throw new Error(`Cannot prune resources for non-terminal run ${run.id}`);
@@ -444,7 +448,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	}
 
 	async reconcileRunResources(
-		run: BuildRun,
+		run: OrchestrationRun,
 	): Promise<ResourceReconciliationReport> {
 		if (
 			!this.git.listWorktrees ||

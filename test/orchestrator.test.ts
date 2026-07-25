@@ -2,11 +2,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type BuildConductorDependencies,
-	blockedWorkerResponse,
-	BuildConductor as ProductionBuildConductor,
-} from "../src/conductor.js";
 import { approveRun } from "../src/domain/run.js";
 import type {
 	BlockedWorkerPolicy,
@@ -19,6 +14,11 @@ import type {
 	PrepareTaskWorktreeInput,
 	WorktreeManager,
 } from "../src/git/worktrees.js";
+import {
+	blockedWorkerResponse,
+	type OrchestratorDependencies,
+	Orchestrator as ProductionOrchestrator,
+} from "../src/orchestrator.js";
 import { AttemptLogStore } from "../src/storage/attempt-log-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import type {
@@ -34,10 +34,10 @@ import { reviewResult } from "./helpers/review.js";
 
 const directories: string[] = [];
 
-class BuildConductor extends ProductionBuildConductor {
+class Orchestrator extends ProductionOrchestrator {
 	constructor(
 		dependencies: Omit<
-			BuildConductorDependencies,
+			OrchestratorDependencies,
 			"git" | "validator" | "finalValidator"
 		>,
 	) {
@@ -342,7 +342,9 @@ class FakeWorktrees implements WorktreeManager {
 
 	async removeTaskWorktree(): Promise<void> {}
 
-	async pruneRunResources(run: import("../src/domain/types.js").BuildRun) {
+	async pruneRunResources(
+		run: import("../src/domain/types.js").OrchestrationRun,
+	) {
 		this.prunedRunId = run.id;
 		return {
 			removedWorktrees: ["/worktree"],
@@ -381,11 +383,11 @@ const repository: RepositoryInfo = {
 	isClean: true,
 };
 
-function createSingleTaskRun(conductor: BuildConductor) {
-	return conductor.createRun({
+function createSingleTaskRun(orchestrator: Orchestrator) {
+	return orchestrator.createRun({
 		repository,
-		handoffPath: "/repo/handoff.md",
-		handoffText: "Implement the feature",
+		requestPath: "/repo/request.md",
+		requestText: "Implement the feature",
 		plan: {
 			version: 3,
 			finalValidationCommands: [
@@ -407,7 +409,7 @@ function createSingleTaskRun(conductor: BuildConductor) {
 	});
 }
 
-describe("BuildConductor vertical slice", () => {
+describe("Orchestrator vertical slice", () => {
 	it("persists worker completion and cleans up the process", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-lifecycle-"),
@@ -415,7 +417,7 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers({ status: "succeeded" });
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
@@ -428,10 +430,10 @@ describe("BuildConductor vertical slice", () => {
 			head: "abc123",
 			isClean: true,
 		};
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: "/repo/handoff.md",
-			handoffText: "Implement the feature",
+			requestPath: "/repo/request.md",
+			requestText: "Implement the feature",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -452,7 +454,7 @@ describe("BuildConductor vertical slice", () => {
 			},
 		});
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		await (result as typeof result & { completion: Promise<unknown> })
 			.completion;
 
@@ -486,7 +488,7 @@ describe("BuildConductor vertical slice", () => {
 			},
 			verifyIntegratedCommit,
 		};
-		const conductor = new ProductionBuildConductor({
+		const orchestrator = new ProductionOrchestrator({
 			store,
 			workers: new FakeWorkers(),
 			worktrees: new FakeWorktrees(),
@@ -494,7 +496,7 @@ describe("BuildConductor vertical slice", () => {
 			git,
 			now: () => "2026-01-01T01:00:00.000Z",
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 		const approved = approveRun(run, "2026-01-01T00:01:00.000Z");
 		const implementation = approved.tasks.implementation;
 		if (!implementation) {
@@ -533,7 +535,7 @@ describe("BuildConductor vertical slice", () => {
 			],
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 
 		expect(recovered.state).toBe("integrating");
 		expect(recovered.integrationHead).toBe(integratedCommit);
@@ -555,14 +557,14 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers: new FakeWorkers({ status: "succeeded" }),
 			worktrees,
 			now: () => "2026-01-01T00:00:00.000Z",
 		});
-		const run = await createSingleTaskRun(conductor);
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const completed = await launch.completion;
 		const completedAttempt = completed.finalValidationAttempts.at(-1);
 		if (!completedAttempt?.evidence) {
@@ -579,7 +581,7 @@ describe("BuildConductor vertical slice", () => {
 						? {
 								...attempt,
 								state: "interrupted" as const,
-								error: "Conductor restarted after validation",
+								error: "Orchestrator restarted after validation",
 							}
 						: attempt,
 			),
@@ -587,7 +589,7 @@ describe("BuildConductor vertical slice", () => {
 		const interrupted = await store.load(run.id);
 		const dependencies = createFakeFinalizationDependencies();
 		const validate = vi.spyOn(dependencies.finalValidator, "validate");
-		const recovering = new ProductionBuildConductor({
+		const recovering = new ProductionOrchestrator({
 			store,
 			workers: new FakeWorkers(),
 			worktrees,
@@ -613,10 +615,10 @@ describe("BuildConductor vertical slice", () => {
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers({ status: "succeeded" });
 		const worktrees = new FailOnceWorktrees();
-		const conductor = new BuildConductor({ store, workers, worktrees });
-		const run = await createSingleTaskRun(conductor);
+		const orchestrator = new Orchestrator({ store, workers, worktrees });
+		const run = await createSingleTaskRun(orchestrator);
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const failed = await launch.completion;
 		expect(failed.state).toBe("failed");
 		expect(failed.attempts[0]).toMatchObject({
@@ -625,7 +627,7 @@ describe("BuildConductor vertical slice", () => {
 			error: "cleanup failed",
 		});
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 		expect(recovered.state).toBe("integrating");
 		expect(recovered.attempts[0]).toMatchObject({
 			state: "succeeded",
@@ -644,15 +646,15 @@ describe("BuildConductor vertical slice", () => {
 			status: "failed",
 			error: "model request failed",
 		});
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 			now: () => "2026-01-01T00:00:00.000Z",
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		const failed = await result.completion;
 
 		expect(failed.state).toBe("failed");
@@ -674,14 +676,14 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new RejectingStartWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const failed = await launch.completion;
 
 		expect(launch.launches).toEqual([]);
@@ -709,17 +711,17 @@ describe("BuildConductor vertical slice", () => {
 			const store = new RunStore(directory);
 			const logs = new AttemptLogStore(join(directory, "output"));
 			const workers = new UiPromptWorkers();
-			const conductor = new BuildConductor({
+			const orchestrator = new Orchestrator({
 				store,
 				workers,
 				worktrees: new FakeWorktrees(),
 				attemptLogs: logs,
 				blockedWorkerPolicy: policy as BlockedWorkerPolicy,
 			});
-			const run = await createSingleTaskRun(conductor);
-			const snapshots: import("../src/domain/types.js").BuildRun[] = [];
+			const run = await createSingleTaskRun(orchestrator);
+			const snapshots: import("../src/domain/types.js").OrchestrationRun[] = [];
 
-			const result = await conductor.approveAndLaunch(
+			const result = await orchestrator.approveAndLaunch(
 				run,
 				repository,
 				undefined,
@@ -761,13 +763,13 @@ describe("BuildConductor vertical slice", () => {
 		},
 	);
 
-	it("uses the persisted UI policy after conductor configuration changes", async () => {
+	it("uses the persisted UI policy after orchestrator configuration changes", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-persisted-ui-policy-"),
 		);
 		directories.push(directory);
 		const store = new RunStore(directory);
-		const creator = new BuildConductor({
+		const creator = new Orchestrator({
 			store,
 			workers: new FakeWorkers(),
 			worktrees: new FakeWorktrees(),
@@ -775,7 +777,7 @@ describe("BuildConductor vertical slice", () => {
 		});
 		const run = await createSingleTaskRun(creator);
 		const workers = new UiPromptWorkers();
-		const resumedConfiguration = new BuildConductor({
+		const resumedConfiguration = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
@@ -799,13 +801,13 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new ConcurrentUiPromptWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await createSingleTaskRun(conductor);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 
 		await vi.waitFor(async () => {
 			expect(
@@ -842,15 +844,15 @@ describe("BuildConductor vertical slice", () => {
 		const store = new RunStore(directory);
 		const logs = new AttemptLogStore(join(directory, "output"));
 		const workers = new UiPromptWorkers(true);
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 			attemptLogs: logs,
 			workerTimeoutMs: 250,
 		});
-		const run = await createSingleTaskRun(conductor);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		await vi.waitFor(async () =>
 			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
 		);
@@ -872,18 +874,18 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new UiPromptWorkers(true);
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await createSingleTaskRun(conductor);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		await vi.waitFor(async () =>
 			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
 		);
 
-		const cancelled = await conductor.cancelRun(await store.load(run.id));
+		const cancelled = await orchestrator.cancelRun(await store.load(run.id));
 		const completed = await result.completion;
 
 		expect(cancelled.blockedWorkers).toEqual([]);
@@ -914,15 +916,15 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 			workerTimeoutMs: 5,
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		const timedOut = await result.completion;
 
 		expect(timedOut.state).toBe("failed");
@@ -941,14 +943,14 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 			workerPollIntervalMs: 5,
 		});
-		const run = await createSingleTaskRun(conductor);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 		workers.worker.status = "error";
 
 		const failed = await result.completion;
@@ -969,15 +971,15 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await createSingleTaskRun(conductor);
-		const result = await conductor.approveAndLaunch(run, repository);
+		const run = await createSingleTaskRun(orchestrator);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 
-		const cancelled = await conductor.cancelRun(result.run);
+		const cancelled = await orchestrator.cancelRun(result.run);
 		const monitored = await result.completion;
 
 		expect(cancelled.state).toBe("cancelled");
@@ -999,7 +1001,7 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const worktrees = new FakeWorktrees();
-		const failing = new BuildConductor({
+		const failing = new Orchestrator({
 			store,
 			workers: new FakeWorkers({ status: "failed", error: "worker failed" }),
 			worktrees,
@@ -1010,7 +1012,7 @@ describe("BuildConductor vertical slice", () => {
 		expect(failed.state).toBe("failed");
 		expect(failed.attempts).toHaveLength(1);
 
-		const retrying = new BuildConductor({
+		const retrying = new Orchestrator({
 			store,
 			workers: new FakeWorkers(),
 			worktrees,
@@ -1038,15 +1040,15 @@ describe("BuildConductor vertical slice", () => {
 			status: "failed",
 			error: "worker failed",
 		});
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 			attemptLogs,
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const failed = await launch.completion;
 		const attempt = failed.attempts[0];
 		if (!attempt) {
@@ -1073,15 +1075,15 @@ describe("BuildConductor vertical slice", () => {
 		const store = new RunStore(directory);
 		const worktrees = new FakeWorktrees();
 		const workers = new FakeWorkers();
-		const conductor = new BuildConductor({ store, workers, worktrees });
-		const run = await createSingleTaskRun(conductor);
+		const orchestrator = new Orchestrator({ store, workers, worktrees });
+		const run = await createSingleTaskRun(orchestrator);
 		await store.transaction(run.id, (current) => ({
 			...current,
 			state: "cancelled",
 			updatedAt: "2026-01-01T00:01:00.000Z",
 		}));
 
-		const report = await conductor.pruneRunResources(run.id);
+		const report = await orchestrator.pruneRunResources(run.id);
 
 		expect(report.removedWorktrees).toEqual(["/worktree"]);
 		expect(worktrees.prunedRunId).toBe(run.id);
@@ -1120,13 +1122,13 @@ describe("BuildConductor vertical slice", () => {
 			validator: finalization.validator,
 			finalValidator: finalization.finalValidator,
 		};
-		const conductor = new ProductionBuildConductor(dependencies);
-		const cancellingConductor = new ProductionBuildConductor(dependencies);
-		const run = await createSingleTaskRun(conductor);
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const orchestrator = new ProductionOrchestrator(dependencies);
+		const cancellingOrchestrator = new ProductionOrchestrator(dependencies);
+		const run = await createSingleTaskRun(orchestrator);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		await commitStarted;
 
-		const cancellation = cancellingConductor.cancelRun(launch.run);
+		const cancellation = cancellingOrchestrator.cancelRun(launch.run);
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect((await store.load(run.id)).state).toBe("running");
 		releaseCommit();
@@ -1144,7 +1146,7 @@ describe("BuildConductor vertical slice", () => {
 		expect(cancelled.tasks.implementation?.integratedCommit).toBeUndefined();
 	});
 
-	it("cancels final validation from a separately constructed conductor", async () => {
+	it("cancels final validation from a separately constructed orchestrator", async () => {
 		const directory = await mkdtemp(
 			join(tmpdir(), "pi-build-conductor-final-cancel-"),
 		);
@@ -1181,10 +1183,10 @@ describe("BuildConductor vertical slice", () => {
 			finalValidator,
 			verifyReviewWorktree: finalization.verifyReviewWorktree,
 		};
-		const conductor = new ProductionBuildConductor(dependencies);
-		const cancellingConductor = new ProductionBuildConductor(dependencies);
-		const run = await createSingleTaskRun(conductor);
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const orchestrator = new ProductionOrchestrator(dependencies);
+		const cancellingOrchestrator = new ProductionOrchestrator(dependencies);
+		const run = await createSingleTaskRun(orchestrator);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		await Promise.race([
 			validationStarted,
 			launch.completion.then((result) => {
@@ -1194,7 +1196,7 @@ describe("BuildConductor vertical slice", () => {
 			}),
 		]);
 
-		const cancelled = await cancellingConductor.cancelRun(launch.run);
+		const cancelled = await cancellingOrchestrator.cancelRun(launch.run);
 		const completed = await launch.completion;
 
 		expect(aborted).toBe(true);
@@ -1219,9 +1221,9 @@ describe("BuildConductor vertical slice", () => {
 			finalValidator: finalization.finalValidator,
 			verifyReviewWorktree: finalization.verifyReviewWorktree,
 		};
-		const conductor = new ProductionBuildConductor(dependencies);
-		const run = await createSingleTaskRun(conductor);
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const orchestrator = new ProductionOrchestrator(dependencies);
+		const run = await createSingleTaskRun(orchestrator);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const completed = await launch.completion;
 		if (completed.state !== "completed") {
 			throw new Error(
@@ -1238,7 +1240,7 @@ describe("BuildConductor vertical slice", () => {
 				throw new Error("Integration branch moved");
 			},
 		} as GitClient;
-		const recovering = new ProductionBuildConductor({
+		const recovering = new ProductionOrchestrator({
 			...dependencies,
 			git: movedGit,
 		});
@@ -1255,20 +1257,20 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const store = new RunStore(directory);
 		const workers = new SlowStartWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await createSingleTaskRun(conductor);
+		const run = await createSingleTaskRun(orchestrator);
 
-		const launch = conductor.approveAndLaunch(run, repository);
+		const launch = orchestrator.approveAndLaunch(run, repository);
 		await vi.waitFor(() => {
 			expect(workers.calls.some((call) => call.operation === "prompt")).toBe(
 				true,
 			);
 		});
-		const cancelled = await conductor.cancelRun(run);
+		const cancelled = await orchestrator.cancelRun(run);
 
 		await expect(launch).rejects.toThrow("Run cancelled");
 		expect(cancelled.state).toBe("cancelled");
@@ -1284,15 +1286,15 @@ describe("BuildConductor vertical slice", () => {
 		);
 		directories.push(directory);
 		const workers = new FakeWorkers();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(directory),
 			workers,
 			worktrees: new FakeWorktrees(),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: "/repo/handoff.md",
-			handoffText: "Implement independent tasks",
+			requestPath: "/repo/request.md",
+			requestText: "Implement independent tasks",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -1332,7 +1334,7 @@ describe("BuildConductor vertical slice", () => {
 			maxConcurrentWorkers: 2,
 		});
 
-		const result = await conductor.approveAndLaunch(run, repository);
+		const result = await orchestrator.approveAndLaunch(run, repository);
 
 		expect(
 			workers.calls.filter((call) => call.operation === "spawn"),
@@ -1341,7 +1343,7 @@ describe("BuildConductor vertical slice", () => {
 			"first",
 			"second",
 		]);
-		await conductor.cancelRun(result.run);
+		await orchestrator.cancelRun(result.run);
 		await result.completion;
 	});
 
@@ -1353,12 +1355,12 @@ describe("BuildConductor vertical slice", () => {
 		const store = new RunStore(directory);
 		const workers = new UnsupportedPolicyWorkers();
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({ store, workers, worktrees });
-		const run = await createSingleTaskRun(conductor);
+		const orchestrator = new Orchestrator({ store, workers, worktrees });
+		const run = await createSingleTaskRun(orchestrator);
 
-		await expect(conductor.approveAndLaunch(run, repository)).rejects.toThrow(
-			/worker launch policy v1 is unsupported/,
-		);
+		await expect(
+			orchestrator.approveAndLaunch(run, repository),
+		).rejects.toThrow(/worker launch policy v1 is unsupported/);
 
 		expect((await store.load(run.id)).state).toBe("awaiting_approval");
 		expect(worktrees.integrationBranch).toBeUndefined();
@@ -1374,13 +1376,13 @@ describe("BuildConductor vertical slice", () => {
 		directories.push(directory);
 		const workers = new FakeWorkers();
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(directory),
 			workers,
 			worktrees,
 		});
-		const original = await createSingleTaskRun(conductor);
-		await conductor.revisePlan(
+		const original = await createSingleTaskRun(orchestrator);
+		await orchestrator.revisePlan(
 			original.id,
 			{ ...original.plan, title: "Revised" },
 			3,
@@ -1388,7 +1390,7 @@ describe("BuildConductor vertical slice", () => {
 		);
 
 		await expect(
-			conductor.approveAndLaunch(original, repository),
+			orchestrator.approveAndLaunch(original, repository),
 		).rejects.toThrow(/Stale plan revision/);
 		expect(worktrees.integrationBranch).toBeUndefined();
 		expect(workers.calls).toEqual([]);
@@ -1403,10 +1405,10 @@ describe("BuildConductor vertical slice", () => {
 		const workers = new FakeWorkers();
 		const list = vi.spyOn(workers, "list");
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({ store, workers, worktrees });
-		const run = await createSingleTaskRun(conductor);
+		const orchestrator = new Orchestrator({ store, workers, worktrees });
+		const run = await createSingleTaskRun(orchestrator);
 
-		const recovered = await conductor.recoverRun(run.id);
+		const recovered = await orchestrator.recoverRun(run.id);
 
 		expect(recovered).toEqual(run);
 		expect(list).not.toHaveBeenCalled();
@@ -1422,15 +1424,15 @@ describe("BuildConductor vertical slice", () => {
 		const workers = new FakeWorkers();
 		const list = vi.spyOn(workers, "list");
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({ store, workers, worktrees });
-		const run = await createSingleTaskRun(conductor);
+		const orchestrator = new Orchestrator({ store, workers, worktrees });
+		const run = await createSingleTaskRun(orchestrator);
 		await writeFile(
 			join(directory, `${run.id}.json`),
 			`${JSON.stringify({ ...run, state: "running" }, null, 2)}\n`,
 			"utf8",
 		);
 
-		await expect(conductor.recoverRun(run.id)).rejects.toThrow(
+		await expect(orchestrator.recoverRun(run.id)).rejects.toThrow(
 			/Failed to load run/,
 		);
 		expect(list).not.toHaveBeenCalled();
@@ -1445,7 +1447,7 @@ describe("BuildConductor vertical slice", () => {
 		const store = new RunStore(directory);
 		const workers = new FakeWorkers();
 		const worktrees = new FakeWorktrees();
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			workers,
 			worktrees,
@@ -1458,10 +1460,10 @@ describe("BuildConductor vertical slice", () => {
 			head: "abc123",
 			isClean: true,
 		};
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: "/repo/handoff.md",
-			handoffText: "Implement the feature",
+			requestPath: "/repo/request.md",
+			requestText: "Implement the feature",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -1482,7 +1484,7 @@ describe("BuildConductor vertical slice", () => {
 			},
 		});
 
-		const result = await conductor.approveAndLaunch(run, repository, {
+		const result = await orchestrator.approveAndLaunch(run, repository, {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
 		});
@@ -1520,7 +1522,7 @@ describe("BuildConductor vertical slice", () => {
 		);
 		expect(prompt).toContain("Do not push, publish, deploy");
 		expect(await store.load(run.id)).toEqual(result.run);
-		await conductor.cancelRun(result.run);
+		await orchestrator.cancelRun(result.run);
 		await result.completion;
 	});
 });

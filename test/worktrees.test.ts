@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { createBuildRun } from "../src/domain/run.js";
+import { createOrchestrationRun } from "../src/domain/run.js";
 import type { TaskPlan } from "../src/domain/types.js";
 import { GitCli, integrationScratchDirectoryPrefix } from "../src/git/git.js";
 import { GitWorktreeManager, isPathInside } from "../src/git/worktrees.js";
@@ -63,13 +63,13 @@ function createRun(repositoryRoot: string, baseCommit: string) {
 			},
 		],
 	};
-	return createBuildRun({
+	return createOrchestrationRun({
 		id: "run-1",
 		repositoryRoot,
 		baseBranch: "main",
 		baseCommit,
 		integrationBranch: "conductor/run-1/integration",
-		handoff: { sourcePath: "handoff.md", text: "Build it" },
+		request: { sourcePath: "request.md", text: "Build it" },
 		plan,
 		maxConcurrentWorkers: 2,
 		now: "2026-01-01T00:00:00.000Z",
@@ -122,7 +122,7 @@ describe("GitWorktreeManager", () => {
 		const repositoryRoot = await createRepository();
 		const git = new GitCli();
 		const repository = await git.inspect(repositoryRoot);
-		const worktreeRoot = join(repositoryRoot, "..", "conductor worktrees Ω");
+		const worktreeRoot = join(repositoryRoot, "..", "orchestrator worktrees Ω");
 		const manager = new GitWorktreeManager(git, worktreeRoot);
 		await manager.prepareIntegrationBranch(repository, "run-1");
 
@@ -140,8 +140,8 @@ describe("GitWorktreeManager", () => {
 			repository.head,
 		);
 
-		expect(taskWorktree.path).toContain("conductor worktrees Ω");
-		expect(finalWorktree).toContain("conductor worktrees Ω");
+		expect(taskWorktree.path).toContain("orchestrator worktrees Ω");
+		expect(finalWorktree).toContain("orchestrator worktrees Ω");
 		expect((await git.inspect(taskWorktree.path)).isClean).toBe(true);
 		await manager.removeTaskWorktree(repositoryRoot, taskWorktree.path);
 		await manager.removeTaskWorktree(repositoryRoot, finalWorktree);
@@ -200,20 +200,20 @@ describe("GitWorktreeManager", () => {
 	});
 
 	it("applies Windows path containment without prefix confusion", () => {
-		const root = "C:\\conductor\\worktrees\\run-1";
+		const root = "C:\\orchestrator\\worktrees\\run-1";
 
 		expect(isPathInside(root, `${root}\\task\\attempt-1`, win32)).toBe(true);
 		expect(isPathInside(root, root, win32)).toBe(false);
 		expect(
-			isPathInside(root, "C:\\conductor\\worktrees\\run-10\\task", win32),
+			isPathInside(root, "C:\\orchestrator\\worktrees\\run-10\\task", win32),
 		).toBe(false);
-		expect(isPathInside(root, "C:\\conductor\\worktrees\\outside", win32)).toBe(
-			false,
-		);
+		expect(
+			isPathInside(root, "C:\\orchestrator\\worktrees\\outside", win32),
+		).toBe(false);
 		expect(isPathInside(root, "D:\\run-1\\task", win32)).toBe(false);
 	});
 
-	it("rejects removal at or outside the conductor worktree root", async () => {
+	it("rejects removal at or outside the orchestrator worktree root", async () => {
 		const repositoryRoot = await createRepository();
 		const git = new GitCli();
 		const worktreeRoot = join(repositoryRoot, "..", "worktrees");
@@ -221,16 +221,16 @@ describe("GitWorktreeManager", () => {
 
 		await expect(
 			manager.removeTaskWorktree(repositoryRoot, worktreeRoot),
-		).rejects.toThrow(/outside conductor root/);
+		).rejects.toThrow(/outside orchestrator root/);
 		await expect(
 			manager.removeTaskWorktree(
 				repositoryRoot,
 				join(worktreeRoot, "..", "worktrees-other", "run-1"),
 			),
-		).rejects.toThrow(/outside conductor root/);
+		).rejects.toThrow(/outside orchestrator root/);
 		await expect(
 			manager.removeTaskWorktree(repositoryRoot, repositoryRoot),
-		).rejects.toThrow(/outside conductor root/);
+		).rejects.toThrow(/outside orchestrator root/);
 	});
 
 	it("adopts an exact existing allocation after an interrupted create", async () => {

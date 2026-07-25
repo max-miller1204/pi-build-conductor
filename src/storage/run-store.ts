@@ -6,12 +6,12 @@ import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
-	type BuildRun,
 	type FinalValidationAttemptState,
 	isActiveAttemptState,
 	MAX_CONCURRENT_WORKERS,
 	MERGE_READY_EVIDENCE_VERSION,
 	MIN_CONCURRENT_WORKERS,
+	type OrchestrationRun,
 	REVIEW_CATEGORIES,
 	type ReviewCategory,
 	type ReviewConfidence,
@@ -31,7 +31,7 @@ import {
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 export type StoredRunEntry =
-	| { kind: "run"; run: BuildRun }
+	| { kind: "run"; run: OrchestrationRun }
 	| { kind: "unreadable"; runId: string; error: string };
 const RUN_STATES: ReadonlySet<RunState> = new Set([
 	"planning",
@@ -124,18 +124,18 @@ function migrateLegacyRun(
 ): Record<string, unknown> {
 	let migrated = value;
 	if (value.schemaVersion === 7) {
-		migrated = { ...value, schemaVersion: RUN_SCHEMA_VERSION };
+		migrated = { ...value, schemaVersion: 8 };
 	} else if (value.schemaVersion === 6) {
 		migrated = {
 			...value,
-			schemaVersion: RUN_SCHEMA_VERSION,
+			schemaVersion: 8,
 			blockedWorkers: [],
 		};
 	} else if (value.schemaVersion === 4 || value.schemaVersion === 5) {
 		const approved = value.approvedAt !== undefined;
 		migrated = {
 			...value,
-			schemaVersion: RUN_SCHEMA_VERSION,
+			schemaVersion: 8,
 			revision: value.schemaVersion === 4 ? 0 : value.revision,
 			planRevision: 1,
 			planRevisions: [
@@ -151,22 +151,30 @@ function migrateLegacyRun(
 			...(approved ? { approvedPlanRevision: 1 } : {}),
 		};
 	}
-	if (migrated === value) {
-		return value;
+	if (migrated !== value) {
+		const securityPolicy = legacySecurityPolicy();
+		const mergeReadyEvidence = isRecord(migrated.mergeReadyEvidence)
+			? {
+					...migrated.mergeReadyEvidence,
+					version: MERGE_READY_EVIDENCE_VERSION,
+					securityPolicy,
+				}
+			: migrated.mergeReadyEvidence;
+		migrated = {
+			...migrated,
+			securityPolicy,
+			...(mergeReadyEvidence === undefined ? {} : { mergeReadyEvidence }),
+		};
 	}
-	const securityPolicy = legacySecurityPolicy();
-	const mergeReadyEvidence = isRecord(migrated.mergeReadyEvidence)
-		? {
-				...migrated.mergeReadyEvidence,
-				version: MERGE_READY_EVIDENCE_VERSION,
-				securityPolicy,
-			}
-		: migrated.mergeReadyEvidence;
-	return {
-		...migrated,
-		securityPolicy,
-		...(mergeReadyEvidence === undefined ? {} : { mergeReadyEvidence }),
-	};
+	if (migrated.schemaVersion === 8) {
+		const { handoff, ...rest } = migrated;
+		migrated = {
+			...rest,
+			schemaVersion: RUN_SCHEMA_VERSION,
+			...(handoff === undefined ? {} : { request: handoff }),
+		};
+	}
+	return migrated;
 }
 
 function validateEvidence(value: unknown, path: string): void {
@@ -245,7 +253,7 @@ function validateEvidence(value: unknown, path: string): void {
 	}
 }
 
-export function validateStoredRun(value: unknown): BuildRun {
+export function validateStoredRun(value: unknown): OrchestrationRun {
 	if (!isRecord(value)) {
 		throw new Error("run must be an object");
 	}
@@ -1358,12 +1366,12 @@ export function validateStoredRun(value: unknown): BuildRun {
 			throw new Error("Unapproved run cannot contain execution side effects");
 		}
 	}
-	if (!isRecord(value.handoff)) {
-		throw new Error("run.handoff must be an object");
+	if (!isRecord(value.request)) {
+		throw new Error("run.request must be an object");
 	}
-	assertString(value.handoff.sourcePath, "run.handoff.sourcePath");
-	assertString(value.handoff.text, "run.handoff.text");
-	return value as unknown as BuildRun;
+	assertString(value.request.sourcePath, "run.request.sourcePath");
+	assertString(value.request.text, "run.request.text");
+	return value as unknown as OrchestrationRun;
 }
 
 const LOCK_STALE_MS = 5_000;
@@ -1380,8 +1388,8 @@ function parseJson(text: string, context: string): unknown {
 }
 
 function assertPlanHistoryTransition(
-	current: BuildRun,
-	proposed: BuildRun,
+	current: OrchestrationRun,
+	proposed: OrchestrationRun,
 ): void {
 	if (
 		JSON.stringify(proposed.securityPolicy) !==
@@ -1430,7 +1438,7 @@ export class RunStore {
 		);
 	}
 
-	private async writeAtomic(run: BuildRun): Promise<void> {
+	private async writeAtomic(run: OrchestrationRun): Promise<void> {
 		const validated = validateStoredRun(run);
 		await mkdir(this.directory, { recursive: true });
 		const destination = this.pathFor(validated.id);
@@ -1458,7 +1466,7 @@ export class RunStore {
 		}
 	}
 
-	private async readValidated(runId: string): Promise<BuildRun> {
+	private async readValidated(runId: string): Promise<OrchestrationRun> {
 		const path = this.pathFor(runId);
 		return validateStoredRun(parseJson(await readFile(path, "utf8"), path));
 	}
@@ -1508,7 +1516,7 @@ export class RunStore {
 		}
 	}
 
-	async create(run: BuildRun): Promise<BuildRun> {
+	async create(run: OrchestrationRun): Promise<OrchestrationRun> {
 		const validated = validateStoredRun(run);
 		return this.withLock(validated.id, async () => {
 			try {
@@ -1524,10 +1532,10 @@ export class RunStore {
 		});
 	}
 
-	async save(run: BuildRun): Promise<void> {
+	async save(run: OrchestrationRun): Promise<void> {
 		const validated = validateStoredRun(run);
 		await this.withLock(validated.id, async () => {
-			let current: BuildRun | undefined;
+			let current: OrchestrationRun | undefined;
 			try {
 				current = await this.readValidated(validated.id);
 			} catch (error) {
@@ -1554,8 +1562,10 @@ export class RunStore {
 
 	async transaction(
 		runId: string,
-		mutate: (current: BuildRun) => BuildRun | Promise<BuildRun>,
-	): Promise<BuildRun> {
+		mutate: (
+			current: OrchestrationRun,
+		) => OrchestrationRun | Promise<OrchestrationRun>,
+	): Promise<OrchestrationRun> {
 		return this.withLock(runId, async () => {
 			const current = await this.readValidated(runId);
 			const immutableBaseline = structuredClone(current);
@@ -1580,7 +1590,7 @@ export class RunStore {
 		});
 	}
 
-	async load(runId: string): Promise<BuildRun> {
+	async load(runId: string): Promise<OrchestrationRun> {
 		const path = this.pathFor(runId);
 		try {
 			const raw = parseJson(await readFile(path, "utf8"), path);
@@ -1636,7 +1646,7 @@ export class RunStore {
 		);
 	}
 
-	async list(): Promise<BuildRun[]> {
+	async list(): Promise<OrchestrationRun[]> {
 		const entries = await this.scan();
 		const unreadable = entries.find((entry) => entry.kind === "unreadable");
 		if (unreadable) {
@@ -1652,7 +1662,7 @@ export class RunStore {
 	async recover(
 		runId: string,
 		now = new Date().toISOString(),
-	): Promise<BuildRun> {
+	): Promise<OrchestrationRun> {
 		return this.transaction(runId, (run) => recoverInterruptedRun(run, now));
 	}
 }
