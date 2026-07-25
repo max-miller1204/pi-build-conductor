@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { orchestratorConfigurationValue } from "../configuration.js";
 import type {
 	BlockedWorkerPolicy,
 	RunSecurityPolicy,
@@ -21,10 +22,11 @@ function isWorkerAllowlistPolicy(value: unknown): boolean {
 }
 
 function configuredUiPolicy(env: NodeJS.ProcessEnv): BlockedWorkerPolicy {
-	const value = env.PI_BUILD_WORKER_UI_POLICY ?? "decline";
+	const resolved = orchestratorConfigurationValue("WORKER_UI_POLICY", env);
+	const value = resolved?.value ?? "decline";
 	if (value !== "decline" && value !== "cancel") {
 		throw new Error(
-			"PI_BUILD_WORKER_UI_POLICY must be either decline or cancel",
+			`${resolved?.name ?? "PI_ORCHESTRATOR_WORKER_UI_POLICY"} must be either decline or cancel`,
 		);
 	}
 	return value;
@@ -33,9 +35,12 @@ function configuredUiPolicy(env: NodeJS.ProcessEnv): BlockedWorkerPolicy {
 function configuredValidationSandbox(
 	env: NodeJS.ProcessEnv,
 ): ValidationSandboxMode {
-	const value = env.PI_BUILD_VALIDATION_SANDBOX ?? "none";
+	const resolved = orchestratorConfigurationValue("VALIDATION_SANDBOX", env);
+	const value = resolved?.value ?? "none";
 	if (value !== "none" && value !== "nono") {
-		throw new Error("PI_BUILD_VALIDATION_SANDBOX must be either none or nono");
+		throw new Error(
+			`${resolved?.name ?? "PI_ORCHESTRATOR_VALIDATION_SANDBOX"} must be either none or nono`,
+		);
 	}
 	return value;
 }
@@ -44,16 +49,17 @@ export function readSecurityPolicy(
 	env: NodeJS.ProcessEnv = process.env,
 ): RunSecurityPolicy {
 	const sandbox = configuredValidationSandbox(env);
-	const sandboxExecutable = env.PI_BUILD_NONO_PATH;
+	const nonoPath = orchestratorConfigurationValue("NONO_PATH", env);
+	const sandboxExecutable = nonoPath?.value;
 	if (sandbox === "nono") {
 		if (!sandboxExecutable || !isAbsolute(sandboxExecutable)) {
 			throw new Error(
-				"PI_BUILD_NONO_PATH must be an absolute path when PI_BUILD_VALIDATION_SANDBOX=nono",
+				`${nonoPath?.name ?? "PI_ORCHESTRATOR_NONO_PATH"} must be an absolute path when PI_ORCHESTRATOR_VALIDATION_SANDBOX=nono`,
 			);
 		}
 	} else if (sandboxExecutable !== undefined) {
 		throw new Error(
-			"PI_BUILD_NONO_PATH requires PI_BUILD_VALIDATION_SANDBOX=nono",
+			`${nonoPath?.name ?? "PI_ORCHESTRATOR_NONO_PATH"} requires PI_ORCHESTRATOR_VALIDATION_SANDBOX=nono`,
 		);
 	}
 	return {

@@ -228,7 +228,7 @@ describe("run inspection presentation", () => {
 			lines.findIndex((line) => line.includes("run-inspect")),
 		);
 		expect(runs.map((run) => run.id)).toEqual(["run-inspect", "newer"]);
-		expect(lines.at(-1)).toBe("Next: /build-show <run-id>");
+		expect(lines.at(-1)).toBe("Next: /orchestrate-show <run-id>");
 	});
 
 	it("renders run refs, timestamps, task progress, and next action", () => {
@@ -241,7 +241,7 @@ describe("run inspection presentation", () => {
 		expect(output).toContain("core [failed]");
 		expect(output).toContain("Blocked workers: 1");
 		expect(output).toContain("repair-a / worker-repair waiting on input");
-		expect(output).toContain("Next: /build-follow run-inspect repair-a");
+		expect(output).toContain("Next: /orchestrate-follow run-inspect repair-a");
 		expect(output).not.toContain("\u001b");
 	});
 
@@ -251,7 +251,7 @@ describe("run inspection presentation", () => {
 		expect(output).toContain("Allowed paths: src/core.ts");
 		expect(output).toContain("- npm test -- core");
 		expect(output).toContain("worker worker-task");
-		expect(output).toContain("Next: /build-retry run-inspect core");
+		expect(output).toContain("Next: /orchestrate-retry run-inspect core");
 		expect(() => renderTaskDetails(populatedRun(), "unknown")).toThrow(
 			"Unknown task ID: unknown",
 		);

@@ -284,6 +284,45 @@ describe("GitWorktreeManager", () => {
 		expect(await git.branchExists(repositoryRoot, orphan.branch)).toBe(false);
 	});
 
+	it("recovers and reconciles worktrees under the legacy pre-migration root", async () => {
+		const repositoryRoot = await createRepository();
+		const git = new GitCli();
+		const repository = await git.inspect(repositoryRoot);
+		const legacyRoot = join(repositoryRoot, "..", "legacy-worktrees");
+		const legacyManager = new GitWorktreeManager(git, legacyRoot);
+		await legacyManager.prepareIntegrationBranch(repository, "run-1");
+		const orphan = await legacyManager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "orphan",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+		const legacyRemovable = await legacyManager.prepareTaskWorktree({
+			repository,
+			runId: "run-1",
+			taskId: "implementation",
+			attemptNumber: 1,
+			startPoint: repository.head,
+		});
+
+		const manager = new GitWorktreeManager(
+			git,
+			join(repositoryRoot, "..", "worktrees"),
+			legacyRoot,
+		);
+		await manager.removeTaskWorktree(repositoryRoot, legacyRemovable.path);
+		await expect(lstat(legacyRemovable.path)).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+
+		const report = await manager.reconcileRunResources(
+			createRun(repositoryRoot, repository.head),
+		);
+		expect(report.removedWorktrees).toEqual([orphan.path]);
+		await expect(lstat(orphan.path)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
 	it("removes integration scratch worktrees left by a crash", async () => {
 		const repositoryRoot = await createRepository();
 		const git = new GitCli();

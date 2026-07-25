@@ -85,7 +85,7 @@ The complete test and lint suite must pass.
 Start Pi in a clean Git worktree with a model selected, then run:
 
 ```text
-/build docs/health-check-request.md
+/orchestrate docs/health-check-request.md
 ```
 
 The orchestrator generates a plan unless `docs/health-check-request.md.plan.json` exists.
@@ -95,7 +95,7 @@ Execution starts only after explicit approval.
 When the run completes, inspect its integration branch and evidence:
 
 ```text
-/build-show <run-id>
+/orchestrate-show <run-id>
 ```
 
 The user branch remains at its original commit.
@@ -124,18 +124,19 @@ It does not create Git refs or worktrees, start workers, or run repository comma
 
 | Command | Purpose |
 | --- | --- |
-| `/build <request-file>` | Create, review, approve, and start an orchestration run |
-| `/build-list` | List repository-scoped runs and open the interactive inspector |
-| `/build-show <run-id>` | Show the run summary and merge-ready evidence |
-| `/build-show <run-id> task <task-id>` | Show one task and its attempts |
-| `/build-show <run-id> attempt <attempt-id>` | Show one attempt, its Git state, checks, and bounded output tail |
-| `/build-follow <run-id> [attempt-id]` | Replay or follow a worker activity journal |
-| `/build-resume <run-id>` | Reconcile and continue an interrupted run |
-| `/build-retry <run-id> [task-id]` | Retry safe failed task work or failed final validation |
-| `/build-cancel <run-id>` | Stop active work and retain inspectable state |
-| `/build-prune <run-id>` | Remove only proven-clean disposable resources from a terminal run |
+| `/orchestrate <request-file>` | Create, review, approve, and start an orchestration run |
+| `/orchestrate-list` | List repository-scoped runs and open the interactive inspector |
+| `/orchestrate-show <run-id>` | Show the run summary and merge-ready evidence |
+| `/orchestrate-show <run-id> task <task-id>` | Show one task and its attempts |
+| `/orchestrate-show <run-id> attempt <attempt-id>` | Show one attempt, its Git state, checks, and bounded output tail |
+| `/orchestrate-follow <run-id> [attempt-id]` | Replay or follow a worker activity journal |
+| `/orchestrate-resume <run-id>` | Reconcile and continue an interrupted run |
+| `/orchestrate-retry <run-id> [task-id]` | Retry safe failed task work or failed final validation |
+| `/orchestrate-cancel <run-id>` | Stop active work and retain inspectable state |
+| `/orchestrate-prune <run-id>` | Remove only proven-clean disposable resources from a terminal run |
 
-Use `/build-resume`, not `/build-retry`, after a process or daemon interruption.
+Every command is also available under its legacy `/build*` name as a temporary alias.
+Use `/orchestrate-resume`, not `/orchestrate-retry`, after a process or daemon interruption.
 Resume first reconciles server workers, attempts, commits, branches, and worktrees.
 
 Task-phase retry creates new attempts for all failed tasks in the retry set and their blocked descendants while preserving history.
@@ -206,16 +207,17 @@ Invalid candidates cannot be approved and never enter plan history.
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `PI_BUILD_MAX_CONCURRENT_WORKERS` | `2` | Initial worker limit, from 2 through 4; the approved plan can change it |
-| `PI_BUILD_WORKER_TIMEOUT_MS` | `3600000` | Timeout for one worker execution |
-| `PI_BUILD_VALIDATION_TIMEOUT_MS` | `600000` | Timeout for each focused task or repair command |
-| `PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS` | `1800000` | Timeout for each final validation command |
-| `PI_BUILD_WORKER_UI_POLICY` | `decline` | `decline` rejects confirmations and cancels other dialogs; `cancel` cancels all supported dialogs |
-| `PI_BUILD_VALIDATION_SANDBOX` | `none` | Validation mode: `none` or `nono` |
-| `PI_BUILD_NONO_PATH` | unset | Absolute path to Nono, required only when the sandbox mode is `nono` |
+| `PI_ORCHESTRATOR_MAX_CONCURRENT_WORKERS` | `2` | Initial worker limit, from 2 through 4; the approved plan can change it |
+| `PI_ORCHESTRATOR_WORKER_TIMEOUT_MS` | `3600000` | Timeout for one worker execution |
+| `PI_ORCHESTRATOR_VALIDATION_TIMEOUT_MS` | `600000` | Timeout for each focused task or repair command |
+| `PI_ORCHESTRATOR_FINAL_VALIDATION_TIMEOUT_MS` | `1800000` | Timeout for each final validation command |
+| `PI_ORCHESTRATOR_WORKER_UI_POLICY` | `decline` | `decline` rejects confirmations and cancels other dialogs; `cancel` cancels all supported dialogs |
+| `PI_ORCHESTRATOR_VALIDATION_SANDBOX` | `none` | Validation mode: `none` or `nono` |
+| `PI_ORCHESTRATOR_NONO_PATH` | unset | Absolute path to Nono, required only when the sandbox mode is `nono` |
 | `PI_SERVER_DIR` | Pi server config directory | Directory containing `server.sock` |
 | `PI_CONFIG_DIR` | `$HOME/.pi` | Pi configuration root and orchestrator worktree root |
 
+Every `PI_ORCHESTRATOR_*` setting also accepts its legacy `PI_BUILD_*` name as a temporary alias, and conflicting values fail closed.
 Invalid configuration fails closed.
 The chosen worker UI policy and validation boundary are frozen into each run so retries and recovery cannot silently change them.
 
@@ -255,7 +257,7 @@ Implementation and repair workers retain Bash and mutation tools because they mu
 Focused and final commands receive a fresh temporary home, reduced credential-free environment, disabled Git credential prompting, bounded output, and process-group termination.
 That reduced environment is not a filesystem or network sandbox.
 
-Set `PI_BUILD_VALIDATION_SANDBOX=nono` and `PI_BUILD_NONO_PATH=/absolute/path/to/nono` to sandbox validation.
+Set `PI_ORCHESTRATOR_VALIDATION_SANDBOX=nono` and `PI_ORCHESTRATOR_NONO_PATH=/absolute/path/to/nono` to sandbox validation.
 The orchestrator grants the worktree read-only access, grants a temporary runtime directory, blocks network access, and fails without an unsandboxed fallback if Nono cannot start.
 
 Run the orchestrator under a dedicated low-privilege account or in a disposable virtual machine for untrusted repositories.
@@ -271,15 +273,18 @@ Merge-ready evidence proves recorded Git and validation facts, not the absence o
 Run state is stored outside the checked-out tree at:
 
 ```text
-<git-common-dir>/pi-build-conductor/runs/<run-id>.json
+<git-common-dir>/pi-orchestrator/runs/<run-id>.json
 ```
 
 Worker journals are stored below the same run directory in `output/` and are capped at 5 MiB each.
+A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new location automatically the first time a command touches run storage.
 Orchestrator worktrees are stored at:
 
 ```text
-${PI_CONFIG_DIR:-$HOME/.pi}/build-conductor/worktrees/<repository-hash>/
+${PI_CONFIG_DIR:-$HOME/.pi}/orchestrator/worktrees/<repository-hash>/
 ```
+
+Worktrees created before the rename stay under `${PI_CONFIG_DIR:-$HOME/.pi}/build-conductor/worktrees/` and remain fully recoverable and prunable there, because moving an existing Git worktree would break its metadata.
 
 A run uses namespaced branches below `conductor/<run-id>/`.
 The integration branch is retained as the merge candidate.

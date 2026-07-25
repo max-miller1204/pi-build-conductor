@@ -1,3 +1,4 @@
+export * from "./configuration.js";
 export * from "./domain/dag.js";
 export * from "./domain/run.js";
 export * from "./domain/run-control.js";
@@ -16,6 +17,7 @@ export * from "./review/review-report.js";
 export * from "./security/policy.js";
 export * from "./storage/attempt-log-store.js";
 export * from "./storage/run-store.js";
+export * from "./storage/storage-migration.js";
 export * from "./validation/command-runner.js";
 export * from "./validation/final-validator.js";
 export * from "./validation/task-validator.js";

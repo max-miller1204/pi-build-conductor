@@ -195,7 +195,7 @@ export function reviewStateSummary(run: OrchestrationRun): string {
 
 function nextRunAction(run: OrchestrationRun): string {
 	if (run.state === "completed" || run.state === "cancelled") {
-		return `/build-prune ${safeInline(run.id)}`;
+		return `/orchestrate-prune ${safeInline(run.id)}`;
 	}
 	if (
 		run.state === "running" ||
@@ -204,16 +204,19 @@ function nextRunAction(run: OrchestrationRun): string {
 	) {
 		const followable = latestFollowableWorkerAttempt(run);
 		if (followable) {
-			return `/build-follow ${safeInline(run.id)} ${safeInline(followable.attempt.id)}`;
+			return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(followable.attempt.id)}`;
 		}
-		return `/build-cancel ${safeInline(run.id)}`;
+		return `/orchestrate-cancel ${safeInline(run.id)}`;
 	}
-	return `/build-resume ${safeInline(run.id)}`;
+	return `/orchestrate-resume ${safeInline(run.id)}`;
 }
 
 export function renderRunList(runs: readonly OrchestrationRun[]): string[] {
 	if (runs.length === 0) {
-		return ["No orchestration runs found.", "Next: /build <request-file>"];
+		return [
+			"No orchestration runs found.",
+			"Next: /orchestrate <request-file>",
+		];
 	}
 	const sorted = [...runs].sort(
 		(left, right) =>
@@ -226,7 +229,7 @@ export function renderRunList(runs: readonly OrchestrationRun[]): string[] {
 			(run) =>
 				`${display(run.updatedAt)} | ${safeInline(run.id)} | ${run.state} | ${taskStateSummary(run)} | ${safeInline(run.plan.title)}`,
 		),
-		"Next: /build-show <run-id>",
+		"Next: /orchestrate-show <run-id>",
 	];
 }
 
@@ -375,19 +378,19 @@ function nextTaskAction(
 	latest: TaskAttempt | undefined,
 ): string {
 	if (latest && isFollowableWorkerAttempt({ kind: "task", attempt: latest })) {
-		return `/build-follow ${safeInline(run.id)} ${safeInline(latest.id)}`;
+		return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(latest.id)}`;
 	}
 	if (
 		task.state === "failed" ||
 		latest?.state === "failed" ||
 		latest?.state === "interrupted"
 	) {
-		return `/build-retry ${safeInline(run.id)} ${safeInline(taskId)}`;
+		return `/orchestrate-retry ${safeInline(run.id)} ${safeInline(taskId)}`;
 	}
 	if (latest) {
-		return `/build-attempt ${safeInline(run.id)} ${safeInline(latest.id)}`;
+		return `/orchestrate-show ${safeInline(run.id)} attempt ${safeInline(latest.id)}`;
 	}
-	return `/build-show ${safeInline(run.id)}`;
+	return `/orchestrate-show ${safeInline(run.id)}`;
 }
 
 export function renderTaskDetails(
@@ -579,7 +582,7 @@ export function renderAttemptDetails(
 	}
 	let next: string;
 	if (isFollowableWorkerAttempt(resolution)) {
-		next = `/build-follow ${safeInline(run.id)} ${safeInline(attempt.id)}`;
+		next = `/orchestrate-follow ${safeInline(run.id)} ${safeInline(attempt.id)}`;
 	} else if (
 		attempt.state === "failed" ||
 		attempt.state === "interrupted" ||
@@ -587,10 +590,10 @@ export function renderAttemptDetails(
 	) {
 		next =
 			resolution.kind === "task"
-				? `/build-retry ${safeInline(run.id)} ${safeInline(resolution.attempt.taskId)}`
-				: `/build-resume ${safeInline(run.id)}`;
+				? `/orchestrate-retry ${safeInline(run.id)} ${safeInline(resolution.attempt.taskId)}`
+				: `/orchestrate-resume ${safeInline(run.id)}`;
 	} else {
-		next = `/build-show ${safeInline(run.id)}`;
+		next = `/orchestrate-show ${safeInline(run.id)}`;
 	}
 	return [
 		...common,

@@ -45,6 +45,26 @@ describe("run security policy", () => {
 		assertRunSecurityPolicy(policy);
 	});
 
+	it("reads neutral PI_ORCHESTRATOR names and rejects conflicting aliases", () => {
+		const policy = readSecurityPolicy({
+			PI_ORCHESTRATOR_VALIDATION_SANDBOX: "nono",
+			PI_ORCHESTRATOR_NONO_PATH: "/usr/local/bin/nono",
+			PI_ORCHESTRATOR_WORKER_UI_POLICY: "cancel",
+		});
+		expect(policy.validation).toMatchObject({
+			sandbox: "nono",
+			network: "blocked",
+			sandboxExecutable: "/usr/local/bin/nono",
+		});
+		expect(policy.workers.uiPolicy).toBe("cancel");
+		expect(() =>
+			readSecurityPolicy({
+				PI_ORCHESTRATOR_VALIDATION_SANDBOX: "nono",
+				PI_BUILD_VALIDATION_SANDBOX: "none",
+			}),
+		).toThrow(/both set with different values/);
+	});
+
 	it("rejects unknown, relative, and contradictory sandbox configuration", () => {
 		expect(() =>
 			readSecurityPolicy({ PI_BUILD_VALIDATION_SANDBOX: "container" }),

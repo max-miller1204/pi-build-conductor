@@ -6,6 +6,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { orchestratorConfigurationValue } from "./configuration.js";
 import { validateTaskPlan } from "./domain/dag.js";
 import { retryableRunWork } from "./domain/run-control.js";
 import {
@@ -43,6 +44,10 @@ import {
 	AttemptLogStore,
 } from "./storage/attempt-log-store.js";
 import { RunStore } from "./storage/run-store.js";
+import {
+	migrateLegacyOrchestratorStorage,
+	STORAGE_DIRECTORY_NAME,
+} from "./storage/storage-migration.js";
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
 import { OfficialServerBackend } from "./workers/server-backend.js";
@@ -78,17 +83,31 @@ function configurationDirectory(): string {
 	return process.env.PI_CONFIG_DIR ?? join(homedir(), ".pi");
 }
 
-function worktreeRoot(repositoryRoot: string): string {
+function worktreeRoots(repositoryRoot: string): {
+	root: string;
+	legacyRoot: string;
+} {
 	const repositoryKey = createHash("sha256")
 		.update(repositoryRoot)
 		.digest("hex")
 		.slice(0, 16);
-	return join(
-		configurationDirectory(),
-		"build-conductor",
-		"worktrees",
-		repositoryKey,
-	);
+	return {
+		root: join(
+			configurationDirectory(),
+			"orchestrator",
+			"worktrees",
+			repositoryKey,
+		),
+		// Existing Git worktrees cannot be renamed without breaking their
+		// metadata, so runs started before the storage migration keep their
+		// original location for recovery and cleanup.
+		legacyRoot: join(
+			configurationDirectory(),
+			"build-conductor",
+			"worktrees",
+			repositoryKey,
+		),
+	};
 }
 
 function errorMessage(error: unknown): string {
@@ -107,70 +126,57 @@ function selectedWorkerModel(
 		: undefined;
 }
 
-function configuredWorkerTimeoutMs(): number | undefined {
-	const value = process.env.PI_BUILD_WORKER_TIMEOUT_MS;
-	if (value === undefined) {
+function configuredTimeoutMs(suffix: string): number | undefined {
+	const resolved = orchestratorConfigurationValue(suffix);
+	if (resolved === undefined) {
 		return undefined;
 	}
-	const timeout = Number(value);
+	const timeout = Number(resolved.value);
 	if (!Number.isFinite(timeout) || timeout <= 0) {
-		throw new Error("PI_BUILD_WORKER_TIMEOUT_MS must be a positive number");
+		throw new Error(`${resolved.name} must be a positive number`);
 	}
 	return timeout;
+}
+
+function configuredWorkerTimeoutMs(): number | undefined {
+	return configuredTimeoutMs("WORKER_TIMEOUT_MS");
 }
 
 function configuredValidationTimeoutMs(): number | undefined {
-	const value = process.env.PI_BUILD_VALIDATION_TIMEOUT_MS;
-	if (value === undefined) {
-		return undefined;
-	}
-	const timeout = Number(value);
-	if (!Number.isFinite(timeout) || timeout <= 0) {
-		throw new Error("PI_BUILD_VALIDATION_TIMEOUT_MS must be a positive number");
-	}
-	return timeout;
+	return configuredTimeoutMs("VALIDATION_TIMEOUT_MS");
 }
 
 function configuredFinalValidationTimeoutMs(): number | undefined {
-	const value = process.env.PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS;
-	if (value === undefined) {
-		return undefined;
-	}
-	const timeout = Number(value);
-	if (!Number.isFinite(timeout) || timeout <= 0) {
-		throw new Error(
-			"PI_BUILD_FINAL_VALIDATION_TIMEOUT_MS must be a positive number",
-		);
-	}
-	return timeout;
+	return configuredTimeoutMs("FINAL_VALIDATION_TIMEOUT_MS");
 }
 
 function configuredMaxConcurrentWorkers(): number {
-	const value = process.env.PI_BUILD_MAX_CONCURRENT_WORKERS;
-	if (value === undefined) {
+	const resolved = orchestratorConfigurationValue("MAX_CONCURRENT_WORKERS");
+	if (resolved === undefined) {
 		return MIN_CONCURRENT_WORKERS;
 	}
-	const maximum = Number(value);
+	const maximum = Number(resolved.value);
 	if (
 		!Number.isInteger(maximum) ||
 		maximum < MIN_CONCURRENT_WORKERS ||
 		maximum > MAX_CONCURRENT_WORKERS
 	) {
 		throw new Error(
-			`PI_BUILD_MAX_CONCURRENT_WORKERS must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
+			`${resolved.name} must be an integer from ${MIN_CONCURRENT_WORKERS} to ${MAX_CONCURRENT_WORKERS}`,
 		);
 	}
 	return maximum;
 }
 
-function createStore(repository: RepositoryInfo): RunStore {
+async function createStore(repository: RepositoryInfo): Promise<RunStore> {
+	await migrateLegacyOrchestratorStorage(repository.commonDirectory);
 	return new RunStore(
-		join(repository.commonDirectory, "pi-build-conductor", "runs"),
+		join(repository.commonDirectory, STORAGE_DIRECTORY_NAME, "runs"),
 	);
 }
 
-function createRuntime(git: GitCli, repository: RepositoryInfo) {
-	const store = createStore(repository);
+async function createRuntime(git: GitCli, repository: RepositoryInfo) {
+	const store = await createStore(repository);
 	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
 	const workers = new OfficialServerBackend();
 	const workerTimeoutMs = configuredWorkerTimeoutMs();
@@ -191,7 +197,11 @@ function createRuntime(git: GitCli, repository: RepositoryInfo) {
 				? {}
 				: { commandTimeoutMs: finalValidationTimeoutMs }),
 		}),
-		worktrees: new GitWorktreeManager(git, worktreeRoot(repository.root)),
+		worktrees: new GitWorktreeManager(
+			git,
+			worktreeRoots(repository.root).root,
+			worktreeRoots(repository.root).legacyRoot,
+		),
 		attemptLogs,
 		securityPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
@@ -509,12 +519,12 @@ async function inspectRunInteractively(
 		}
 		const command =
 			choice === "Prepare retry command"
-				? `/build-retry ${run.id}`
+				? `/orchestrate-retry ${run.id}`
 				: choice === "Prepare cancel command"
-					? `/build-cancel ${run.id}`
+					? `/orchestrate-cancel ${run.id}`
 					: choice === "Prepare prune command"
-						? `/build-prune ${run.id}`
-						: `/build-resume ${run.id}`;
+						? `/orchestrate-prune ${run.id}`
+						: `/orchestrate-resume ${run.id}`;
 		ctx.ui.setEditorText(command);
 		ctx.ui.notify(`Prepared ${command}`, "info");
 		return;
@@ -534,7 +544,7 @@ async function reviewAndLaunchRun(
 	ctx: ExtensionCommandContext,
 	git: GitCli,
 	repository: RepositoryInfo,
-	runtime: ReturnType<typeof createRuntime>,
+	runtime: Awaited<ReturnType<typeof createRuntime>>,
 	initialRun: OrchestrationRun,
 ): Promise<void> {
 	let run = initialRun;
@@ -571,7 +581,7 @@ async function reviewAndLaunchRun(
 		run = await runtime.store.load(run.id);
 		if (review.action === "exit") {
 			ctx.ui.notify(
-				`Exited plan review. Resume revision ${run.planRevision} with /build-resume ${run.id}.`,
+				`Exited plan review. Resume revision ${run.planRevision} with /orchestrate-resume ${run.id}.`,
 				"info",
 			);
 			return;
@@ -599,7 +609,7 @@ async function reviewAndLaunchRun(
 			);
 			continue;
 		}
-		ctx.ui.setStatus("pi-build-conductor", "checking server");
+		ctx.ui.setStatus("pi-orchestrator", "checking server");
 		// pi-lens-ignore: await-in-loop
 		await runtime.workers.list();
 		const freshRepository = await git.inspect(ctx.cwd);
@@ -613,7 +623,7 @@ async function reviewAndLaunchRun(
 				"Repository changed during plan review. The persisted run remains awaiting approval; restore the recorded clean base and resume it.",
 			);
 		}
-		ctx.ui.setStatus("pi-build-conductor", "launching workers");
+		ctx.ui.setStatus("pi-orchestrator", "launching workers");
 		const result = await runtime.orchestrator.approveAndLaunch(
 			run,
 			freshRepository,
@@ -626,7 +636,7 @@ async function reviewAndLaunchRun(
 }
 
 function runUiKey(runId: string): string {
-	return `pi-build-conductor:${runId}`;
+	return `pi-orchestrator:${runId}`;
 }
 
 function progressText(progress: WorkerLifecycleProgress): string | undefined {
@@ -869,7 +879,7 @@ function showLaunch(
 		({ task, attempt }) =>
 			`${task.id}: ${attempt.workerId ?? "starting"} in ${attempt.worktreePath}`,
 	);
-	ctx.ui.setStatus("pi-build-conductor", undefined);
+	ctx.ui.setStatus("pi-orchestrator", undefined);
 	ctx.ui.setStatus(key, taskStateSummary(result.run));
 	ctx.ui.setWidget(key, [
 		`Run ${result.run.id}`,
@@ -897,12 +907,25 @@ function showLaunch(
 }
 
 export default function piOrchestratorExtension(pi: ExtensionAPI) {
-	pi.registerCommand("build-list", {
+	const registerWithLegacyAlias = (
+		name: string,
+		legacyName: string,
+		options: Parameters<ExtensionAPI["registerCommand"]>[1] & {
+			description: string;
+		},
+	): void => {
+		pi.registerCommand(name, options);
+		pi.registerCommand(legacyName, {
+			...options,
+			description: `${options.description} (temporary alias of /${name})`,
+		});
+	};
+	registerWithLegacyAlias("orchestrate-list", "build-list", {
 		description: "List and inspect orchestration runs for this repository",
 		handler: async (_args, ctx) => {
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = createStore(repository);
+				const store = await createStore(repository);
 				const entries = await store.scan();
 				const runs = entries.flatMap((entry) =>
 					entry.kind === "run" && entry.run.repositoryRoot === repository.root
@@ -914,7 +937,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 						? [`Unreadable ${entry.runId}: ${entry.error}`]
 						: [],
 				);
-				ctx.ui.setWidget("pi-build-conductor:runs", [
+				ctx.ui.setWidget("pi-orchestrator:runs", [
 					...renderRunList(runs),
 					...unreadable,
 				]);
@@ -956,20 +979,20 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("build-show", {
+	registerWithLegacyAlias("orchestrate-show", "build-show", {
 		description: "Show run, task, or attempt details",
 		handler: async (args, ctx) => {
 			const [runId, subject, subjectId, ...extra] = args.trim().split(/\s+/);
 			if (!runId || extra.length > 0 || (subject && !subjectId)) {
 				ctx.ui.notify(
-					"Usage: /build-show <run-id> [task <task-id> | attempt <attempt-id>]",
+					"Usage: /orchestrate-show <run-id> [task <task-id> | attempt <attempt-id>]",
 					"error",
 				);
 				return;
 			}
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = createStore(repository);
+				const store = await createStore(repository);
 				const run = await store.load(runId);
 				assertRunRepository(run, repository);
 				let lines: string[];
@@ -992,17 +1015,20 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("build-follow", {
+	registerWithLegacyAlias("orchestrate-follow", "build-follow", {
 		description: "Replay and follow captured worker output",
 		handler: async (args, ctx) => {
 			const [runId, requestedAttemptId, ...extra] = args.trim().split(/\s+/);
 			if (!runId || extra.length > 0) {
-				ctx.ui.notify("Usage: /build-follow <run-id> [attempt-id]", "error");
+				ctx.ui.notify(
+					"Usage: /orchestrate-follow <run-id> [attempt-id]",
+					"error",
+				);
 				return;
 			}
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = createStore(repository);
+				const store = await createStore(repository);
 				const run = await store.load(runId);
 				assertRunRepository(run, repository);
 				const attemptId =
@@ -1023,19 +1049,19 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("build-retry", {
+	registerWithLegacyAlias("orchestrate-retry", "build-retry", {
 		description: "Retry safe failed work while preserving attempt history",
 		handler: async (args, ctx) => {
 			const [runId, requestedTaskId, ...extra] = args.trim().split(/\s+/);
 			if (!runId || extra.length > 0) {
-				ctx.ui.notify("Usage: /build-retry <run-id> [task-id]", "error");
+				ctx.ui.notify("Usage: /orchestrate-retry <run-id> [task-id]", "error");
 				return;
 			}
-			ctx.ui.setStatus("pi-build-conductor", "preparing retry");
+			ctx.ui.setStatus("pi-orchestrator", "preparing retry");
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
-				const runtime = createRuntime(git, repository);
+				const runtime = await createRuntime(git, repository);
 				const run = await runtime.store.load(runId);
 				assertRunBase(run, repository);
 				const assessment = retryableRunWork(run);
@@ -1059,7 +1085,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 							: "A new final-validation attempt will run the approved complete suite.",
 					);
 					if (!confirmed) {
-						ctx.ui.setStatus("pi-build-conductor", undefined);
+						ctx.ui.setStatus("pi-orchestrator", undefined);
 						ctx.ui.notify("Retry cancelled", "info");
 						return;
 					}
@@ -1072,25 +1098,25 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				);
 				showLaunch(ctx, result, runtime.store);
 			} catch (error) {
-				ctx.ui.setStatus("pi-build-conductor", "retry failed");
+				ctx.ui.setStatus("pi-orchestrator", "retry failed");
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},
 	});
 
-	pi.registerCommand("build-prune", {
+	registerWithLegacyAlias("orchestrate-prune", "build-prune", {
 		description:
 			"Prune safe resources retained by a terminal orchestration run",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
-				ctx.ui.notify("Usage: /build-prune <run-id>", "error");
+				ctx.ui.notify("Usage: /orchestrate-prune <run-id>", "error");
 				return;
 			}
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
-				const runtime = createRuntime(git, repository);
+				const runtime = await createRuntime(git, repository);
 				const run = await runtime.store.load(runId);
 				assertRunRepository(run, repository);
 				if (!["completed", "failed", "cancelled"].includes(run.state)) {
@@ -1127,23 +1153,23 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("build", {
+	registerWithLegacyAlias("orchestrate", "build", {
 		description: "Plan and launch isolated workers from a request file",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				throw new Error(
-					"/build requires an interactive UI for explicit plan approval",
+					"/orchestrate requires an interactive UI for explicit plan approval",
 				);
 			}
 			const pathArgument = parsePathArgument(args);
 			if (!pathArgument) {
-				ctx.ui.notify("Usage: /build <request-file>", "error");
+				ctx.ui.notify("Usage: /orchestrate <request-file>", "error");
 				return;
 			}
 			const requestPath = isAbsolute(pathArgument)
 				? pathArgument
 				: resolve(ctx.cwd, pathArgument);
-			ctx.ui.setStatus("pi-build-conductor", "planning");
+			ctx.ui.setStatus("pi-orchestrator", "planning");
 			try {
 				const requestText = await readFile(requestPath, "utf8");
 				if (!requestText.trim()) {
@@ -1152,7 +1178,9 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
 				if (!repository.isClean) {
-					throw new Error("Commit or stash all changes before starting /build");
+					throw new Error(
+						"Commit or stash all changes before starting /orchestrate",
+					);
 				}
 				let plan = await loadSidecarPlan(requestPath);
 				const planSource = plan ? "sidecar" : "generated";
@@ -1163,7 +1191,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					);
 					plan = await generatePlanWithPi(ctx, requestText);
 				}
-				const runtime = createRuntime(git, repository);
+				const runtime = await createRuntime(git, repository);
 				const run = await runtime.orchestrator.createRun({
 					repository,
 					requestPath,
@@ -1173,30 +1201,30 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
 				ctx.ui.notify(
-					`Persisted run ${run.id} at plan revision 1. Resume interrupted review with /build-resume ${run.id}.`,
+					`Persisted run ${run.id} at plan revision 1. Resume interrupted review with /orchestrate-resume ${run.id}.`,
 					"info",
 				);
 				await reviewAndLaunchRun(ctx, git, repository, runtime, run);
 			} catch (error) {
-				ctx.ui.setStatus("pi-build-conductor", "failed");
+				ctx.ui.setStatus("pi-orchestrator", "failed");
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},
 	});
 
-	pi.registerCommand("build-cancel", {
+	registerWithLegacyAlias("orchestrate-cancel", "build-cancel", {
 		description: "Cancel a orchestration run and stop its active workers",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
-				ctx.ui.notify("Usage: /build-cancel <run-id>", "error");
+				ctx.ui.notify("Usage: /orchestrate-cancel <run-id>", "error");
 				return;
 			}
-			ctx.ui.setStatus("pi-build-conductor", "cancelling run");
+			ctx.ui.setStatus("pi-orchestrator", "cancelling run");
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
-				const { orchestrator, store } = createRuntime(git, repository);
+				const { orchestrator, store } = await createRuntime(git, repository);
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
 				if (
@@ -1207,13 +1235,13 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 						`The run is ${stored.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
 					))
 				) {
-					ctx.ui.setStatus("pi-build-conductor", undefined);
+					ctx.ui.setStatus("pi-orchestrator", undefined);
 					ctx.ui.notify("Cancellation declined", "info");
 					return;
 				}
 				const cancelled = await orchestrator.cancelRun(stored);
 				const key = runUiKey(runId);
-				ctx.ui.setStatus("pi-build-conductor", undefined);
+				ctx.ui.setStatus("pi-orchestrator", undefined);
 				ctx.ui.setStatus(key, `run ${runId}: ${cancelled.state}`);
 				ctx.ui.setWidget(key, renderRunOverview(cancelled));
 				ctx.ui.notify(
@@ -1223,35 +1251,35 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					"info",
 				);
 			} catch (error) {
-				ctx.ui.setStatus("pi-build-conductor", "cancellation failed");
+				ctx.ui.setStatus("pi-orchestrator", "cancellation failed");
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},
 	});
 
-	pi.registerCommand("build-resume", {
+	registerWithLegacyAlias("orchestrate-resume", "build-resume", {
 		description:
 			"Recover an interrupted orchestration run and launch ready retries",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {
-				ctx.ui.notify("Usage: /build-resume <run-id>", "error");
+				ctx.ui.notify("Usage: /orchestrate-resume <run-id>", "error");
 				return;
 			}
-			ctx.ui.setStatus("pi-build-conductor", "recovering run");
+			ctx.ui.setStatus("pi-orchestrator", "recovering run");
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
 				if (!repository.isClean) {
 					throw new Error("Commit or stash all changes before resuming a run");
 				}
-				const runtime = createRuntime(git, repository);
+				const runtime = await createRuntime(git, repository);
 				const { orchestrator, store } = runtime;
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
 				if (stored.state === "failed") {
 					throw new Error(
-						`Run ${runId} failed; inspect it with /build-show ${runId} and retry safe failed work with /build-retry ${runId}`,
+						`Run ${runId} failed; inspect it with /orchestrate-show ${runId} and retry safe failed work with /orchestrate-retry ${runId}`,
 					);
 				}
 				if (stored.state === "cancelled") {
@@ -1281,7 +1309,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				}
 				if (recovered.state === "completed") {
 					ctx.ui.setStatus(runUiKey(runId), "merge-ready validation passed");
-					ctx.ui.setStatus("pi-build-conductor", undefined);
+					ctx.ui.setStatus("pi-orchestrator", undefined);
 					ctx.ui.notify(
 						`Run ${runId} is already merge-ready at ${recovered.integrationHead}`,
 						"info",
@@ -1289,7 +1317,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					return;
 				}
 				assertRunBase(recovered, freshRepository);
-				ctx.ui.setStatus("pi-build-conductor", "launching retries");
+				ctx.ui.setStatus("pi-orchestrator", "launching retries");
 				const result = await orchestrator.resumeAndLaunch(
 					recovered,
 					freshRepository,
@@ -1298,7 +1326,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				);
 				showLaunch(ctx, result, store);
 			} catch (error) {
-				ctx.ui.setStatus("pi-build-conductor", "failed");
+				ctx.ui.setStatus("pi-orchestrator", "failed");
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},

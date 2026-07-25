@@ -383,7 +383,7 @@ export class Orchestrator {
 		}
 		this.securityPolicy =
 			dependencies.securityPolicy ??
-			readSecurityPolicy({ PI_BUILD_WORKER_UI_POLICY: uiPolicy });
+			readSecurityPolicy({ PI_ORCHESTRATOR_WORKER_UI_POLICY: uiPolicy });
 		if (!Number.isFinite(this.workerTimeoutMs) || this.workerTimeoutMs <= 0) {
 			throw new Error("workerTimeoutMs must be a positive finite number");
 		}
