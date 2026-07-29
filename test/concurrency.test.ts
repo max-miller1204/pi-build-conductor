@@ -156,6 +156,10 @@ class IsolatedWorktrees implements WorktreeManager {
 		};
 	}
 
+	async prepareReadOnlyWorktree(): Promise<string> {
+		throw new Error("read-only worktrees are unused in concurrency tests");
+	}
+
 	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
 		return `/final/${runId}/${attemptNumber}`;
 	}

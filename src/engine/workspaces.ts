@@ -98,6 +98,8 @@ export class DetachedWorkspaceProvider implements WorkspaceProvider {
  * Provides an isolated Git worktree. Read-only and mutable steps use the same
  * isolation: a step is prevented from changing the repository by its tool
  * allowlist and validated boundary, never by sharing the user's worktree.
+ * Only mutable steps receive a branch, because only they may ever commit;
+ * read-only steps run detached so a finished run leaves no branch behind.
  */
 export class WorktreeWorkspaceProvider implements WorkspaceProvider {
 	constructor(
@@ -106,13 +108,22 @@ export class WorktreeWorkspaceProvider implements WorkspaceProvider {
 	) {}
 
 	async acquire(request: WorkspaceRequest): Promise<Workspace> {
-		const allocation = await this.worktrees.prepareTaskWorktree({
+		const input = {
 			repository: request.repository,
 			runId: request.runId,
 			taskId: request.stepId,
 			attemptNumber: request.attemptNumber,
 			startPoint: request.startPoint,
-		});
+		};
+		if (this.requirement === "read-only") {
+			const path = await this.worktrees.prepareReadOnlyWorktree(input);
+			return {
+				requirement: this.requirement,
+				path,
+				baseCommit: request.startPoint,
+			};
+		}
+		const allocation = await this.worktrees.prepareTaskWorktree(input);
 		return {
 			requirement: this.requirement,
 			path: allocation.path,

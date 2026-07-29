@@ -136,15 +136,20 @@ export function parsePlanningDocument(output: string): PlanningDocument {
 	} catch (error) {
 		throw parseError("the marker body is not valid JSON", error);
 	}
-	if (!isRecord(parsed)) {
+	return validatePlanningDocument(parsed);
+}
+
+/** Validates one already-parsed plan document value, as stored in artifacts. */
+export function validatePlanningDocument(value: unknown): PlanningDocument {
+	if (!isRecord(value)) {
 		throw parseError("the document must be a JSON object");
 	}
-	if (parsed.version !== PLANNING_DOCUMENT_VERSION) {
+	if (value.version !== PLANNING_DOCUMENT_VERSION) {
 		throw parseError(`version must be ${PLANNING_DOCUMENT_VERSION}`);
 	}
-	const plan = validateTaskPlan(parsed.plan);
+	const plan = validateTaskPlan(value.plan);
 	const taskIds = new Set(plan.tasks.map((task) => task.id));
-	const observations = validateObservations(parsed.observations, taskIds);
+	const observations = validateObservations(value.observations, taskIds);
 	return { version: PLANNING_DOCUMENT_VERSION, plan, observations };
 }
 

@@ -228,6 +228,9 @@ describe("workspace requirements", () => {
 					path: "/wt/api",
 				};
 			},
+			async prepareReadOnlyWorktree(): Promise<string> {
+				throw new Error("mutable steps never use read-only worktrees");
+			},
 			finalValidationWorktreePath(): string {
 				throw new Error("unused");
 			},
@@ -265,6 +268,47 @@ describe("workspace requirements", () => {
 			baseCommit: "head-1",
 		});
 		expect(removed).toEqual(["/wt/api"]);
+	});
+
+	it("gives read-only steps a detached, branchless worktree", async () => {
+		const prepared: PrepareTaskWorktreeInput[] = [];
+		const worktrees: WorktreeManager = {
+			async prepareIntegrationBranch(): Promise<string> {
+				throw new Error("unused");
+			},
+			async prepareTaskWorktree(): Promise<WorktreeAllocation> {
+				throw new Error("read-only steps never receive a branch worktree");
+			},
+			async prepareReadOnlyWorktree(
+				input: PrepareTaskWorktreeInput,
+			): Promise<string> {
+				prepared.push(input);
+				return "/wt/review";
+			},
+			finalValidationWorktreePath(): string {
+				throw new Error("unused");
+			},
+			async prepareFinalValidationWorktree(): Promise<string> {
+				throw new Error("unused");
+			},
+			async removeTaskWorktree(): Promise<void> {},
+		};
+		const provider = new WorktreeWorkspaceProvider(worktrees, "read-only");
+
+		const workspace = await provider.acquire({
+			repository,
+			runId: "run-1",
+			stepId: "review-security",
+			attemptNumber: 1,
+			startPoint: "head-1",
+		});
+
+		expect(prepared).toHaveLength(1);
+		expect(workspace).toEqual({
+			requirement: "read-only",
+			path: "/wt/review",
+			baseCommit: "head-1",
+		});
 	});
 });
 

@@ -19,7 +19,7 @@ import type {
 	StepHandlerContext,
 	StepOutcome,
 } from "../handlers.js";
-import { assertSupportedOutputs } from "./outputs.js";
+import { assertSupportedOutputs, assertUnchangedWorkspace } from "./outputs.js";
 import { buildStepWorkerPrompt } from "./prompt.js";
 import type { StepWorkerRunner } from "./worker-runner.js";
 
@@ -32,7 +32,7 @@ export const CHANGE_STEP_OUTPUTS = {
 export interface ValidatedChangeOptions {
 	worker: StepWorkerRunner;
 	validator: TaskValidator;
-	git: Pick<GitClient, "commitTaskWork">;
+	git: Pick<GitClient, "commitTaskWork" | "status">;
 	securityPolicy: RunSecurityPolicy;
 }
 
@@ -140,13 +140,6 @@ export async function runValidatedChange(
 	worker: { role: WorkerRole; prompt: string },
 ): Promise<StepOutcome> {
 	const branch = context.workspace.branch;
-	if (!branch) {
-		return {
-			status: "failed",
-			error: `Change step ${step.id} needs a branch-backed workspace`,
-			retryable: false,
-		};
-	}
 	const result = await options.worker.run({
 		runId: context.runId,
 		stepId: step.id,
@@ -161,6 +154,32 @@ export async function runValidatedChange(
 		return result.status === "cancelled"
 			? { status: "cancelled", error: result.error }
 			: { status: "failed", error: result.error };
+	}
+	if (!branch) {
+		// A step whose narrowed profile lacks mutate-repository runs in a
+		// detached read-only workspace. Enforce the boundary it accepted:
+		// any observed mutation is a permanent breach, and a clean workspace
+		// still cannot deliver the commit a change step must produce.
+		try {
+			await assertUnchangedWorkspace(
+				options.git,
+				context.capabilityProfile,
+				context.workspace,
+			);
+		} catch (error) {
+			return {
+				status: "failed",
+				error: error instanceof Error ? error.message : String(error),
+				...(error instanceof CapabilityViolationError
+					? { retryable: false }
+					: {}),
+			};
+		}
+		return {
+			status: "failed",
+			error: `Change step ${step.id} holds no mutate-repository authority, so it cannot produce a committable change`,
+			retryable: false,
+		};
 	}
 	let evidence: TaskValidationEvidence;
 	let snapshot: Awaited<ReturnType<TaskValidator["validate"]>>["snapshot"];

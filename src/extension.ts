@@ -15,6 +15,7 @@ import {
 	type OrchestrationRun,
 	type TaskPlan,
 } from "./domain/types.js";
+import { StepWorkerRunner } from "./engine/steps/worker-runner.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitRepositoryReader } from "./git/repository-reader.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
@@ -45,9 +46,11 @@ import {
 import {
 	PlanningWorker,
 	renderPlanningObservations,
+	validatePlanningDocument,
 } from "./planning/planning-worker.js";
 import { discoverRepositoryProfile } from "./planning/repository-discovery.js";
 import { readSecurityPolicy, securityPolicyLines } from "./security/policy.js";
+import { ArtifactStore } from "./storage/artifact-store.js";
 import {
 	type AttemptLogEntry,
 	AttemptLogStore,
@@ -60,6 +63,24 @@ import {
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
 import { OfficialServerBackend } from "./workers/server-backend.js";
+import {
+	buildInvestigateWorkflowPlan,
+	INVESTIGATE_REPORT_OUTPUT,
+	investigateStepHandlers,
+	investigationQuestionsFromRequest,
+	SYNTHESIS_STEP_ID,
+} from "./workflows/investigate.js";
+import {
+	buildPlanOnlyWorkflowPlan,
+	PLAN_ONLY_PLAN_OUTPUT,
+	PLAN_ONLY_STEP_ID,
+	planOnlyStepHandlers,
+} from "./workflows/plan-only.js";
+import {
+	describeFailedSteps,
+	newWorkflowRunId,
+	runReadOnlyWorkflow,
+} from "./workflows/runner.js";
 
 function parsePathArgument(args: string): string {
 	const trimmed = args.trim();
@@ -216,6 +237,38 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	return { attemptLogs, orchestrator, securityPolicy, store, workers };
+}
+
+async function readRequestFile(
+	cwd: string,
+	pathArgument: string,
+): Promise<string> {
+	const requestPath = isAbsolute(pathArgument)
+		? pathArgument
+		: resolve(cwd, pathArgument);
+	const requestText = await readFile(requestPath, "utf8");
+	if (!requestText.trim()) {
+		throw new Error(`Request file is empty: ${requestPath}`);
+	}
+	return requestText;
+}
+
+/** The dependencies an engine-backed read-only workflow command needs. */
+async function readOnlyWorkflowRuntime(
+	git: GitCli,
+	repository: RepositoryInfo,
+) {
+	await migrateLegacyOrchestratorStorage(repository.commonDirectory);
+	const roots = worktreeRoots(repository.root);
+	return {
+		git,
+		workers: new OfficialServerBackend(),
+		securityPolicy: readSecurityPolicy(),
+		worktrees: new GitWorktreeManager(git, roots.root, roots.legacyRoot),
+		artifacts: new ArtifactStore(
+			join(repository.commonDirectory, STORAGE_DIRECTORY_NAME, "artifacts"),
+		),
+	};
 }
 
 function assertRunRepository(
@@ -1266,6 +1319,150 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					"info",
 				);
 				await reviewAndLaunchRun(ctx, git, repository, runtime, run);
+			} catch (error) {
+				ctx.ui.setStatus("pi-orchestrator", "failed");
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	registerWithLegacyAlias("orchestrate-plan", "build-plan", {
+		description:
+			"Propose an evidence-backed plan from a request file without executing it",
+		handler: async (args, ctx) => {
+			const pathArgument = parsePathArgument(args);
+			if (!pathArgument) {
+				ctx.ui.notify("Usage: /orchestrate-plan <request-file>", "error");
+				return;
+			}
+			ctx.ui.setStatus("pi-orchestrator", "plan-only workflow");
+			try {
+				const requestText = await readRequestFile(ctx.cwd, pathArgument);
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				const workflow = await readOnlyWorkflowRuntime(git, repository);
+				const model = selectedWorkerModel(ctx);
+				const runId = newWorkflowRunId("plan");
+				const state = await runReadOnlyWorkflow(workflow, {
+					runId,
+					repository,
+					plan: buildPlanOnlyWorkflowPlan(requestText),
+					handlers: planOnlyStepHandlers({
+						worker: new PlanningWorker({
+							workers: workflow.workers,
+							securityPolicy: workflow.securityPolicy,
+							...(model
+								? { provider: model.provider, model: model.model }
+								: {}),
+						}),
+						git,
+						requestText,
+					}),
+				});
+				ctx.ui.setStatus("pi-orchestrator", undefined);
+				if (state.state !== "completed") {
+					ctx.ui.setWidget(runUiKey(runId), [
+						`Plan-only run ${runId}: ${state.state}`,
+						...describeFailedSteps(state),
+					]);
+					ctx.ui.notify(`Plan-only run ${runId} ${state.state}`, "error");
+					return;
+				}
+				const artifact = await workflow.artifacts.latest(
+					runId,
+					PLAN_ONLY_STEP_ID,
+					PLAN_ONLY_PLAN_OUTPUT,
+				);
+				if (!artifact) {
+					throw new Error("The plan-only run stored no plan document");
+				}
+				const document = validatePlanningDocument(JSON.parse(artifact.payload));
+				ctx.ui.setWidget(runUiKey(runId), [
+					`Proposed plan: ${document.plan.title}`,
+					...document.plan.tasks.map(
+						(task) =>
+							`- ${task.id}: ${task.title} (paths: ${task.allowedPaths.join(", ")})`,
+					),
+					...renderPlanningObservations(document.observations),
+					`Stored as artifact ${artifact.id}`,
+				]);
+				ctx.ui.notify(
+					`Proposed plan "${document.plan.title}" with ${document.plan.tasks.length} tasks (artifact ${artifact.id})`,
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.setStatus("pi-orchestrator", "failed");
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	registerWithLegacyAlias("orchestrate-investigate", "build-investigate", {
+		description:
+			"Answer a request file read-only through investigation and synthesis workers",
+		handler: async (args, ctx) => {
+			const pathArgument = parsePathArgument(args);
+			if (!pathArgument) {
+				ctx.ui.notify(
+					"Usage: /orchestrate-investigate <request-file>",
+					"error",
+				);
+				return;
+			}
+			ctx.ui.setStatus("pi-orchestrator", "investigate workflow");
+			try {
+				const requestText = await readRequestFile(ctx.cwd, pathArgument);
+				const questions = investigationQuestionsFromRequest(requestText);
+				if (questions.length === 0) {
+					throw new Error("The request file contains nothing to investigate");
+				}
+				const git = new GitCli();
+				const repository = await git.inspect(ctx.cwd);
+				const workflow = await readOnlyWorkflowRuntime(git, repository);
+				const model = selectedWorkerModel(ctx);
+				const runId = newWorkflowRunId("investigate");
+				const state = await runReadOnlyWorkflow(workflow, {
+					runId,
+					repository,
+					plan: buildInvestigateWorkflowPlan({ requestText, questions }),
+					handlers: investigateStepHandlers({
+						worker: new StepWorkerRunner({
+							workers: workflow.workers,
+							securityPolicy: workflow.securityPolicy,
+							...(model
+								? { provider: model.provider, model: model.model }
+								: {}),
+						}),
+						git,
+						securityPolicy: workflow.securityPolicy,
+						requestText,
+					}),
+				});
+				ctx.ui.setStatus("pi-orchestrator", undefined);
+				if (state.state !== "completed") {
+					ctx.ui.setWidget(runUiKey(runId), [
+						`Investigate run ${runId}: ${state.state}`,
+						...describeFailedSteps(state),
+					]);
+					ctx.ui.notify(`Investigate run ${runId} ${state.state}`, "error");
+					return;
+				}
+				const report = await workflow.artifacts.latest(
+					runId,
+					SYNTHESIS_STEP_ID,
+					INVESTIGATE_REPORT_OUTPUT,
+				);
+				if (!report) {
+					throw new Error("The investigate run stored no synthesis report");
+				}
+				ctx.ui.setWidget(runUiKey(runId), [
+					`Investigated ${questions.length} ${questions.length === 1 ? "question" : "questions"}:`,
+					...questions.map((question) => `- ${question}`),
+					"",
+					report.payload.slice(0, 4_000),
+					`Stored as artifact ${report.id}`,
+				]);
+				ctx.ui.notify(`Investigation complete (artifact ${report.id})`, "info");
 			} catch (error) {
 				ctx.ui.setStatus("pi-orchestrator", "failed");
 				ctx.ui.notify(errorMessage(error), "error");

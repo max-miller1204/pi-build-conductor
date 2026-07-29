@@ -78,6 +78,8 @@ export interface WorktreeManager {
 	prepareTaskWorktree(
 		input: PrepareTaskWorktreeInput,
 	): Promise<WorktreeAllocation>;
+	/** A detached, branchless worktree for a step that never commits. */
+	prepareReadOnlyWorktree(input: PrepareTaskWorktreeInput): Promise<string>;
 	finalValidationWorktreePath(runId: string, attemptNumber: number): string;
 	prepareFinalValidationWorktree(
 		repository: RepositoryInfo,
@@ -240,6 +242,36 @@ export class GitWorktreeManager implements WorktreeManager {
 			expectedHead,
 		);
 		return { branch, path };
+	}
+
+	async prepareReadOnlyWorktree(
+		input: PrepareTaskWorktreeInput,
+	): Promise<string> {
+		const path = join(
+			this.worktreeRoot,
+			input.runId,
+			input.taskId,
+			`attempt-${input.attemptNumber}`,
+		);
+		const expectedHead = this.git.resolveCommit
+			? await this.git.resolveCommit(input.repository.root, input.startPoint)
+			: input.startPoint;
+		try {
+			await lstat(path);
+			await this.git.verifyDetachedWorktree(path, expectedHead);
+			return path;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+		}
+		await mkdir(dirname(path), { recursive: true });
+		await this.git.addDetachedWorktree(
+			input.repository.root,
+			path,
+			expectedHead,
+		);
+		return path;
 	}
 
 	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
