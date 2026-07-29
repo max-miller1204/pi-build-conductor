@@ -13,6 +13,8 @@ import {
 	topologicalIds,
 } from "./dag.js";
 import {
+	CAPABILITY_PROFILE_NAMES,
+	type CapabilityProfileName,
 	STEP_CAPABILITIES,
 	type StepCapability,
 	type ValidationCommand,
@@ -52,11 +54,32 @@ interface StepDefinitionCommon {
 	dependencies: string[];
 	inputs?: StepInputReference[];
 	outputs?: string[];
+	/**
+	 * The behaviour archetype inside the step kind. It selects both the frozen
+	 * authority profile and the handler, so an independent review and an
+	 * ordinary investigation stay distinguishable without a new step kind.
+	 */
+	profile?: CapabilityProfileName;
 	capabilities?: StepCapability[];
 	pathLocks?: string[];
 	resourceLocks?: string[];
 	timeoutMs?: number;
 	retry?: StepRetryPolicy;
+}
+
+/** The profiles each step kind may declare; the first is its default. */
+export const STEP_KIND_PROFILES: Record<
+	StepKind,
+	readonly CapabilityProfileName[]
+> = {
+	investigation: ["investigation", "review"],
+	change: ["change", "repair"],
+	command: ["command"],
+	approval: ["approval"],
+};
+
+export function stepProfileName(step: StepDefinition): CapabilityProfileName {
+	return step.profile ?? step.kind;
 }
 
 // The maximum authority each step kind may declare; undeclared capabilities
@@ -214,6 +237,21 @@ function readDeclarations(
 			"duplicate_output",
 			issues,
 		);
+	}
+	if (value.profile !== undefined) {
+		if (
+			typeof value.profile !== "string" ||
+			!(CAPABILITY_PROFILE_NAMES as readonly string[]).includes(value.profile)
+		) {
+			addIssue(
+				issues,
+				"unknown_profile",
+				`${path}.profile`,
+				`${path}.profile must be one of ${CAPABILITY_PROFILE_NAMES.join(", ")}`,
+			);
+		} else {
+			declarations.profile = value.profile as CapabilityProfileName;
+		}
 	}
 	if (value.capabilities !== undefined) {
 		const capabilities = readStringArray(
@@ -398,6 +436,17 @@ function readStep(
 				`${path}.kind must be one of ${STEP_KINDS.join(", ")}`,
 			);
 			return { ...common, kind: "investigation", questions: [] };
+	}
+	if (
+		common.profile !== undefined &&
+		!STEP_KIND_PROFILES[step.kind].includes(common.profile)
+	) {
+		addIssue(
+			issues,
+			"profile_not_allowed",
+			`${path}.profile`,
+			`${path}.profile ${common.profile} is not available to ${step.kind} steps (allowed: ${STEP_KIND_PROFILES[step.kind].join(", ")})`,
+		);
 	}
 	if (common.capabilities) {
 		const allowed = new Set<string>(KIND_CAPABILITIES[step.kind]);

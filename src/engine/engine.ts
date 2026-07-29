@@ -637,9 +637,6 @@ export class WorkflowEngine {
 	): Promise<WorkflowRunState> {
 		return this.notify(
 			await this.dependencies.store.transaction(runId, (current) => {
-				if (current.events.some((event) => event.kind === "run_settled")) {
-					return current;
-				}
 				let next = reconcileWorkflowSteps(current);
 				const events: WorkflowEventBody[] = [];
 				// A cancelled run ends everything it had not finished, including

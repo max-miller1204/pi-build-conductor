@@ -5,6 +5,7 @@ import type {
 	TaskAttempt,
 	TaskDefinition,
 	TaskValidationEvidence,
+	WorkerRole,
 } from "../../domain/types.js";
 import type { GitClient } from "../../git/git.js";
 import { CapabilityViolationError } from "../../security/capabilities.js";
@@ -28,11 +29,14 @@ export const CHANGE_STEP_OUTPUTS = {
 	commit: "commit",
 } as const;
 
-export interface ChangeStepHandlerOptions {
+export interface ValidatedChangeOptions {
 	worker: StepWorkerRunner;
 	validator: TaskValidator;
 	git: Pick<GitClient, "commitTaskWork">;
 	securityPolicy: RunSecurityPolicy;
+}
+
+export interface ChangeStepHandlerOptions extends ValidatedChangeOptions {
 	requestText?: string;
 }
 
@@ -124,11 +128,95 @@ function artifactsFor(
 }
 
 /**
- * Executes one approved repository change: an implementation worker inside the
- * step's isolated worktree, then the focused validation the run approved, then
- * one orchestrator-owned commit. The worker never commits, and no diff that
- * fails validation ever reaches the integration branch.
+ * Runs one worker-driven repository change to a committed result: the worker
+ * inside the step's isolated worktree, then the focused validation the run
+ * approved, then one orchestrator-owned commit. The worker never commits, and
+ * no diff that fails validation ever reaches the integration branch.
  */
+export async function runValidatedChange(
+	options: ValidatedChangeOptions,
+	context: StepHandlerContext,
+	step: ChangeStepDefinition,
+	worker: { role: WorkerRole; prompt: string },
+): Promise<StepOutcome> {
+	const branch = context.workspace.branch;
+	if (!branch) {
+		return {
+			status: "failed",
+			error: `Change step ${step.id} needs a branch-backed workspace`,
+			retryable: false,
+		};
+	}
+	const result = await options.worker.run({
+		runId: context.runId,
+		stepId: step.id,
+		attemptId: context.attempt.id,
+		role: worker.role,
+		profile: context.capabilityProfile,
+		cwd: context.workspace.path,
+		prompt: worker.prompt,
+		signal: context.signal,
+	});
+	if (result.status !== "succeeded") {
+		return result.status === "cancelled"
+			? { status: "cancelled", error: result.error }
+			: { status: "failed", error: result.error };
+	}
+	let evidence: TaskValidationEvidence;
+	let snapshot: Awaited<ReturnType<TaskValidator["validate"]>>["snapshot"];
+	try {
+		const validation = await options.validator.validate({
+			task: taskDefinitionOf(step),
+			attempt: taskAttemptOf(context, branch),
+			securityPolicy: stepValidationPolicy(
+				options.securityPolicy,
+				context.capabilityProfile,
+			),
+			signal: context.signal,
+		});
+		evidence = validation.evidence;
+		snapshot = validation.snapshot;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		// A worker that exceeded its approved authority is a boundary breach,
+		// not a flaky attempt: never spend a retry re-running it.
+		const breach =
+			error instanceof CapabilityViolationError ||
+			(error instanceof TaskValidationError &&
+				error.cause instanceof CapabilityViolationError);
+		return {
+			status: "failed",
+			error: message,
+			...(breach ? { retryable: false } : {}),
+		};
+	}
+	try {
+		const commit = await options.git.commitTaskWork(
+			context.workspace.path,
+			snapshot,
+			commitMessage(step),
+		);
+		return {
+			status: "succeeded",
+			summary: `Committed ${evidence.changedFiles.length} changed file(s) as ${commit}`,
+			commit,
+			artifacts: artifactsFor(
+				step,
+				evidence,
+				commit,
+				branch,
+				context.workspace.baseCommit,
+			),
+		};
+	} catch (error) {
+		return {
+			status: "failed",
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+/** Executes one approved repository change through an implementation worker. */
 export class ChangeStepHandler implements StepHandler {
 	readonly kind = "change" as const;
 
@@ -152,21 +240,8 @@ export class ChangeStepHandler implements StepHandler {
 				retryable: false,
 			};
 		}
-		const branch = context.workspace.branch;
-		if (!branch) {
-			return {
-				status: "failed",
-				error: `Change step ${step.id} needs a branch-backed workspace`,
-				retryable: false,
-			};
-		}
-		const result = await this.options.worker.run({
-			runId: context.runId,
-			stepId: step.id,
-			attemptId: context.attempt.id,
+		return runValidatedChange(this.options, context, step, {
 			role: "implementation",
-			profile: context.capabilityProfile,
-			cwd: context.workspace.path,
 			prompt: buildStepWorkerPrompt({
 				runId: context.runId,
 				step,
@@ -177,64 +252,6 @@ export class ChangeStepHandler implements StepHandler {
 					? {}
 					: { requestText: this.options.requestText }),
 			}),
-			signal: context.signal,
 		});
-		if (result.status !== "succeeded") {
-			return result.status === "cancelled"
-				? { status: "cancelled", error: result.error }
-				: { status: "failed", error: result.error };
-		}
-		let evidence: TaskValidationEvidence;
-		let snapshot: Awaited<ReturnType<TaskValidator["validate"]>>["snapshot"];
-		try {
-			const validation = await this.options.validator.validate({
-				task: taskDefinitionOf(step),
-				attempt: taskAttemptOf(context, branch),
-				securityPolicy: stepValidationPolicy(
-					this.options.securityPolicy,
-					context.capabilityProfile,
-				),
-				signal: context.signal,
-			});
-			evidence = validation.evidence;
-			snapshot = validation.snapshot;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			// A worker that exceeded its approved authority is a boundary breach,
-			// not a flaky attempt: never spend a retry re-running it.
-			const breach =
-				error instanceof CapabilityViolationError ||
-				(error instanceof TaskValidationError &&
-					error.cause instanceof CapabilityViolationError);
-			return {
-				status: "failed",
-				error: message,
-				...(breach ? { retryable: false } : {}),
-			};
-		}
-		try {
-			const commit = await this.options.git.commitTaskWork(
-				context.workspace.path,
-				snapshot,
-				commitMessage(step),
-			);
-			return {
-				status: "succeeded",
-				summary: `Committed ${evidence.changedFiles.length} changed file(s) as ${commit}`,
-				commit,
-				artifacts: artifactsFor(
-					step,
-					evidence,
-					commit,
-					branch,
-					context.workspace.baseCommit,
-				),
-			};
-		} catch (error) {
-			return {
-				status: "failed",
-				error: error instanceof Error ? error.message : String(error),
-			};
-		}
 	}
 }

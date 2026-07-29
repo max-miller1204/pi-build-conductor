@@ -11,7 +11,7 @@ import {
 	REVIEW_REPORT_VERSION,
 } from "./review-report.js";
 
-const CATEGORY_GUIDANCE: Record<ReviewCategory, string> = {
+export const CATEGORY_GUIDANCE: Record<ReviewCategory, string> = {
 	correctness:
 		"Look for incorrect behavior, missing edge cases, invalid assumptions, races, and error-handling defects.",
 	security:

@@ -1,6 +1,13 @@
 import type { StepExecutionContext } from "../domain/step-context.js";
-import type { StepDefinition, StepKind } from "../domain/steps.js";
-import type { CapabilityProfile } from "../domain/types.js";
+import {
+	type StepDefinition,
+	type StepKind,
+	stepProfileName,
+} from "../domain/steps.js";
+import type {
+	CapabilityProfile,
+	CapabilityProfileName,
+} from "../domain/types.js";
 import type { RepositoryInfo } from "../git/git.js";
 import type { StepArtifactDraft } from "./artifact-routing.js";
 import type { WorkflowStepAttempt } from "./workflow-state.js";
@@ -49,44 +56,54 @@ export type StepOutcome =
  */
 export interface StepHandler {
 	readonly kind: StepKind;
+	/** Defaults to the kind's own profile when a handler serves the default. */
+	readonly profile?: CapabilityProfileName;
 	execute(context: StepHandlerContext): Promise<StepOutcome>;
 }
 
+export function stepHandlerProfile(
+	handler: StepHandler,
+): CapabilityProfileName {
+	return handler.profile ?? handler.kind;
+}
+
 export class UnsupportedStepKindError extends Error {
-	constructor(readonly kind: StepKind) {
-		super(`No step handler is registered for ${kind} steps`);
+	constructor(readonly profile: CapabilityProfileName) {
+		super(`No step handler is registered for ${profile} steps`);
 		this.name = "UnsupportedStepKindError";
 	}
 }
 
 /**
- * Resolves step kinds to handlers, failing closed: a workflow containing a
- * kind this engine cannot execute never starts that step.
+ * Resolves step profiles to handlers, failing closed: a workflow containing a
+ * profile this engine cannot execute never starts that step.
  */
 export class StepHandlerRegistry {
-	private readonly handlers = new Map<StepKind, StepHandler>();
+	private readonly handlers = new Map<CapabilityProfileName, StepHandler>();
 
 	constructor(handlers: readonly StepHandler[] = []) {
 		for (const handler of handlers) {
-			if (this.handlers.has(handler.kind)) {
-				throw new Error(`Duplicate step handler for kind ${handler.kind}`);
+			const profile = stepHandlerProfile(handler);
+			if (this.handlers.has(profile)) {
+				throw new Error(`Duplicate step handler for kind ${profile}`);
 			}
-			this.handlers.set(handler.kind, handler);
+			this.handlers.set(profile, handler);
 		}
 	}
 
-	kinds(): StepKind[] {
+	kinds(): CapabilityProfileName[] {
 		return [...this.handlers.keys()];
 	}
 
-	has(kind: StepKind): boolean {
-		return this.handlers.has(kind);
+	has(profile: CapabilityProfileName): boolean {
+		return this.handlers.has(profile);
 	}
 
 	handlerFor(step: StepDefinition): StepHandler {
-		const handler = this.handlers.get(step.kind);
+		const profile = stepProfileName(step);
+		const handler = this.handlers.get(profile);
 		if (!handler) {
-			throw new UnsupportedStepKindError(step.kind);
+			throw new UnsupportedStepKindError(profile);
 		}
 		return handler;
 	}

@@ -1,6 +1,7 @@
 import {
 	STEP_KIND_CAPABILITY_MAXIMA,
 	type StepDefinition,
+	stepProfileName,
 } from "../domain/steps.js";
 import {
 	CAPABILITY_PROFILE_NAMES,
@@ -123,10 +124,9 @@ export function stepCapabilityProfile(
 	profiles: RunCapabilityProfiles,
 	step: StepDefinition,
 ): CapabilityProfile {
-	const declared = step.capabilities ?? [
-		...STEP_KIND_CAPABILITY_MAXIMA[step.kind],
-	];
-	return narrowCapabilityProfile(profiles[step.kind], declared);
+	const name = stepProfileName(step);
+	const declared = step.capabilities ?? [...CAPABILITY_PROFILE_MAXIMA[name]];
+	return narrowCapabilityProfile(profiles[name], declared);
 }
 
 /**
