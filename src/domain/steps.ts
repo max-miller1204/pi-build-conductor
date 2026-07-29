@@ -10,6 +10,7 @@ import {
 	readSafeRepositoryPaths,
 	readStringArray,
 	readValidationCommands,
+	topologicalIds,
 } from "./dag.js";
 import {
 	STEP_CAPABILITIES,
@@ -587,6 +588,10 @@ export function validateWorkflowPlanResult(
 		},
 		issues: [],
 	};
+}
+
+export function topologicalStepIds(plan: WorkflowPlan): string[] {
+	return topologicalIds(plan.steps);
 }
 
 export function validateWorkflowPlan(value: unknown): WorkflowPlan {

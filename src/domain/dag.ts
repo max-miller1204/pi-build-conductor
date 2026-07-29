@@ -476,45 +476,40 @@ export function validateTaskPlan(value: unknown): TaskPlan {
 	return result.plan;
 }
 
-export function analyzeTaskPlan(plan: TaskPlan): TaskPlanAnalysis {
-	const validated = validateTaskPlan(plan);
-	const taskOrder = new Map(
-		validated.tasks.map((task, index) => [task.id, index]),
+/**
+ * Deterministic topological order over any dependency-declaring nodes, with
+ * declaration order breaking ties so equivalent plans always schedule alike.
+ */
+export function topologicalIds(
+	nodes: readonly { id: string; dependencies: string[] }[],
+): string[] {
+	const declarationOrder = new Map(
+		nodes.map((node, index) => [node.id, index]),
 	);
 	const dependents = new Map<string, string[]>();
 	const remainingDependencies = new Map<string, number>();
-	const layersByTask = new Map<string, number>();
-	const edges: TaskPlanEdge[] = [];
-	for (const task of validated.tasks) {
-		remainingDependencies.set(task.id, task.dependencies.length);
-		for (const dependency of task.dependencies) {
+	for (const node of nodes) {
+		remainingDependencies.set(node.id, node.dependencies.length);
+		for (const dependency of node.dependencies) {
 			const current = dependents.get(dependency) ?? [];
-			current.push(task.id);
+			current.push(node.id);
 			dependents.set(dependency, current);
-			edges.push({ from: dependency, to: task.id });
 		}
 	}
-	const ready = validated.tasks.flatMap((task) =>
-		task.dependencies.length === 0 ? [task.id] : [],
+	const ready = nodes.flatMap((node) =>
+		node.dependencies.length === 0 ? [node.id] : [],
 	);
-	const topologicalOrder: string[] = [];
+	const sorted: string[] = [];
 	while (ready.length > 0) {
 		ready.sort(
-			(left, right) => (taskOrder.get(left) ?? 0) - (taskOrder.get(right) ?? 0),
+			(left, right) =>
+				(declarationOrder.get(left) ?? 0) - (declarationOrder.get(right) ?? 0),
 		);
 		const id = ready.shift();
 		if (!id) {
 			break;
 		}
-		topologicalOrder.push(id);
-		const task = validated.tasks[taskOrder.get(id) ?? -1];
-		const layer =
-			task?.dependencies.reduce(
-				(maximum, dependency) =>
-					Math.max(maximum, (layersByTask.get(dependency) ?? 0) + 1),
-				0,
-			) ?? 0;
-		layersByTask.set(id, layer);
+		sorted.push(id);
 		for (const dependent of dependents.get(id) ?? []) {
 			const remaining = (remainingDependencies.get(dependent) ?? 0) - 1;
 			remainingDependencies.set(dependent, remaining);
@@ -522,6 +517,36 @@ export function analyzeTaskPlan(plan: TaskPlan): TaskPlanAnalysis {
 				ready.push(dependent);
 			}
 		}
+	}
+	return sorted;
+}
+
+export function analyzeTaskPlan(plan: TaskPlan): TaskPlanAnalysis {
+	const validated = validateTaskPlan(plan);
+	const dependenciesByTask = new Map(
+		validated.tasks.map((task) => [task.id, task.dependencies]),
+	);
+	const dependents = new Map<string, string[]>();
+	const layersByTask = new Map<string, number>();
+	const edges: TaskPlanEdge[] = [];
+	for (const task of validated.tasks) {
+		for (const dependency of task.dependencies) {
+			const current = dependents.get(dependency) ?? [];
+			current.push(task.id);
+			dependents.set(dependency, current);
+			edges.push({ from: dependency, to: task.id });
+		}
+	}
+	const topologicalOrder = topologicalIds(validated.tasks);
+	for (const id of topologicalOrder) {
+		layersByTask.set(
+			id,
+			(dependenciesByTask.get(id) ?? []).reduce(
+				(maximum, dependency) =>
+					Math.max(maximum, (layersByTask.get(dependency) ?? 0) + 1),
+				0,
+			),
+		);
 	}
 	const layers: string[][] = [];
 	for (const id of topologicalOrder) {
