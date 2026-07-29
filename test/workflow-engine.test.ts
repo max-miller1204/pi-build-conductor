@@ -1,124 +1,25 @@
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type StepDefinition,
-	validateWorkflowPlan,
-	type WorkflowPlan,
-} from "../src/domain/steps.js";
-import { WorkflowEngine } from "../src/engine/engine.js";
-import { StepExecutor } from "../src/engine/executor.js";
-import {
-	type StepHandler,
-	type StepHandlerContext,
-	StepHandlerRegistry,
-	type StepOutcome,
+import type { StepDefinition } from "../src/domain/steps.js";
+import type { WorkflowEvent } from "../src/engine/events.js";
+import type {
+	StepHandler,
+	StepHandlerContext,
+	StepOutcome,
 } from "../src/engine/handlers.js";
-import { GitStepIntegrator } from "../src/engine/integration.js";
-import { InMemoryWorkflowStateStore } from "../src/engine/state-store.js";
-import {
-	createWorkflowRunState,
-	type WorkflowRunState,
-} from "../src/engine/workflow-state.js";
-import {
-	defaultWorkspaceProviders,
-	type WorkspaceRequirement,
-} from "../src/engine/workspaces.js";
+import type { WorkspaceRequirement } from "../src/engine/workspaces.js";
 import { GitCli } from "../src/git/git.js";
-import { GitWorktreeManager } from "../src/git/worktrees.js";
-import { defaultCapabilityProfiles } from "../src/security/capabilities.js";
-
-const execute = promisify(execFile);
-const directories: string[] = [];
-
-interface Harness {
-	parent: string;
-	repositoryRoot: string;
-	worktreeRoot: string;
-}
-
-async function createRepository(): Promise<Harness> {
-	const parent = await mkdtemp(join(tmpdir(), "pi-orchestrator-engine-"));
-	directories.push(parent);
-	const repositoryRoot = join(parent, "repository");
-	await execute("git", ["init", "-b", "main", repositoryRoot]);
-	await execute("git", ["config", "user.name", "Test"], {
-		cwd: repositoryRoot,
-	});
-	await execute("git", ["config", "user.email", "test@example.com"], {
-		cwd: repositoryRoot,
-	});
-	await mkdir(join(repositoryRoot, "src"), { recursive: true });
-	await writeFile(join(repositoryRoot, "src", "index.ts"), "export {};\n");
-	await execute("git", ["add", "."], { cwd: repositoryRoot });
-	await execute("git", ["commit", "-m", "Initial"], { cwd: repositoryRoot });
-	return { parent, repositoryRoot, worktreeRoot: join(parent, "worktrees") };
-}
-
-function investigation(
-	id: string,
-	dependencies: string[] = [],
-): Record<string, unknown> {
-	return {
-		kind: "investigation",
-		id,
-		title: id,
-		description: `Investigate ${id}`,
-		dependencies,
-		questions: [`What does ${id} need?`],
-	};
-}
-
-function change(
-	id: string,
-	dependencies: string[],
-	allowedPaths: string[],
-): Record<string, unknown> {
-	return {
-		kind: "change",
-		id,
-		title: id,
-		description: `Implement ${id}`,
-		dependencies,
-		acceptanceCriteria: [`${id} exists`],
-		allowedPaths,
-		validationCommands: [{ command: process.execPath, args: ["-e", ""] }],
-	};
-}
-
-function command(id: string, dependencies: string[]): Record<string, unknown> {
-	return {
-		kind: "command",
-		id,
-		title: id,
-		description: `Run ${id}`,
-		dependencies,
-		command: { command: process.execPath, args: ["-e", "process.exit(0)"] },
-	};
-}
-
-function approval(id: string, dependencies: string[]): Record<string, unknown> {
-	return {
-		kind: "approval",
-		id,
-		title: id,
-		description: `Approve ${id}`,
-		dependencies,
-		prompt: `Approve ${id}?`,
-	};
-}
-
-function planOf(steps: Record<string, unknown>[]): WorkflowPlan {
-	return validateWorkflowPlan({
-		version: 4,
-		title: "Deliver the widget",
-		steps,
-		finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
-	});
-}
+import {
+	approvalStep,
+	changeStep,
+	commandStep,
+	createWorkflowHarness,
+	execute,
+	investigationStep,
+	removeWorkflowHarnessDirectories,
+	workflowPlanOf,
+} from "./helpers/workflow.js";
 
 class RecordingHandler implements StepHandler {
 	readonly observed: {
@@ -192,58 +93,11 @@ async function writeAndCommit(
 	);
 }
 
-interface EngineHarness {
-	engine: WorkflowEngine;
-	store: InMemoryWorkflowStateStore;
-	initial: WorkflowRunState;
-	repositoryRoot: string;
-	worktreeRoot: string;
+function eventKinds(events: WorkflowEvent[]): string[] {
+	return events.map((event) => event.kind);
 }
 
-async function createEngine(
-	plan: WorkflowPlan,
-	handlers: StepHandler[],
-	options: { maxConcurrentWorkers?: number } = {},
-): Promise<EngineHarness> {
-	const { repositoryRoot, worktreeRoot } = await createRepository();
-	const git = new GitCli();
-	const worktrees = new GitWorktreeManager(git, worktreeRoot);
-	const repository = await git.inspect(repositoryRoot);
-	const runId = "run-engine-1";
-	const integrationBranch = await worktrees.prepareIntegrationBranch(
-		repository,
-		runId,
-	);
-	const initial = createWorkflowRunState({
-		id: runId,
-		plan,
-		repositoryRoot,
-		baseBranch: repository.currentBranch,
-		baseCommit: repository.head,
-		integrationBranch,
-		integrationHead: repository.head,
-		capabilityProfiles: defaultCapabilityProfiles(),
-		maxConcurrentWorkers: options.maxConcurrentWorkers ?? 2,
-		createdAt: "2026-07-29T00:00:00.000Z",
-	});
-	const store = new InMemoryWorkflowStateStore(initial);
-	const engine = new WorkflowEngine({
-		store,
-		repository,
-		executor: new StepExecutor({
-			workspaces: defaultWorkspaceProviders(worktrees),
-			handlers: new StepHandlerRegistry(handlers),
-		}),
-		integrator: new GitStepIntegrator(git),
-	});
-	return { engine, store, initial, repositoryRoot, worktreeRoot };
-}
-
-afterEach(async () => {
-	for (const directory of directories.splice(0)) {
-		await rm(directory, { recursive: true, force: true });
-	}
-});
+afterEach(removeWorkflowHarnessDirectories);
 
 describe("workflow engine", () => {
 	it("executes a mixed workflow against real Git worktrees", async () => {
@@ -274,14 +128,14 @@ describe("workflow engine", () => {
 			status: "succeeded",
 			summary: "approved",
 		}));
-		const plan = planOf([
-			investigation("survey"),
-			change("api", ["survey"], ["src/api/"]),
-			change("ui", ["survey"], ["src/ui/"]),
-			command("audit", ["api", "ui"]),
-			approval("ship", ["audit"]),
+		const plan = workflowPlanOf([
+			investigationStep("survey"),
+			changeStep("api", ["survey"], ["src/api/"]),
+			changeStep("ui", ["survey"], ["src/ui/"]),
+			commandStep("audit", ["api", "ui"]),
+			approvalStep("ship", ["audit"]),
 		]);
-		const harness = await createEngine(plan, [
+		const harness = await createWorkflowHarness(plan, [
 			investigations,
 			changes,
 			commands,
@@ -354,6 +208,53 @@ describe("workflow engine", () => {
 		).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
+	it("records one ordered timeline of everything the run did", async () => {
+		const handlers = [
+			new RecordingHandler("investigation", async () => ({
+				status: "succeeded",
+				summary: "surveyed",
+			})),
+			new RecordingHandler("change", async (context) => ({
+				status: "succeeded",
+				commit: await writeAndCommit(
+					context,
+					join("src", context.step.id, "index.ts"),
+				),
+			})),
+		];
+		const plan = workflowPlanOf([
+			investigationStep("survey"),
+			changeStep("api", ["survey"], ["src/api/"]),
+		]);
+		const harness = await createWorkflowHarness(plan, handlers);
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("completed");
+		expect(eventKinds(harness.events)).toEqual([
+			"step_launched",
+			"step_succeeded",
+			"step_launched",
+			"step_succeeded",
+			"step_integrated",
+			"run_settled",
+		]);
+		expect(harness.events.map((event) => event.sequence)).toEqual([
+			1, 2, 3, 4, 5, 6,
+		]);
+		expect(finished.events).toEqual(harness.events);
+		expect(finished.droppedEvents).toBe(0);
+		expect(harness.events.at(-2)).toMatchObject({
+			kind: "step_integrated",
+			stepId: "api",
+			integrationHead: finished.integrationHead,
+		});
+		expect(harness.events.at(-1)).toMatchObject({
+			kind: "run_settled",
+			state: "completed",
+		});
+	});
+
 	it("never runs steps whose path locks overlap at the same time", async () => {
 		let active = 0;
 		let maximumActive = 0;
@@ -368,16 +269,54 @@ describe("workflow engine", () => {
 			active -= 1;
 			return { status: "succeeded", commit };
 		});
-		const plan = planOf([
-			change("wide", [], ["src/"]),
-			change("narrow", [], ["src/narrow/"]),
+		const plan = workflowPlanOf([
+			changeStep("wide", [], ["src/"]),
+			changeStep("narrow", [], ["src/narrow/"]),
 		]);
-		const harness = await createEngine(plan, [changes]);
+		const harness = await createWorkflowHarness(plan, [changes]);
 
 		const finished = await harness.engine.run(harness.initial.id);
 
 		expect(finished.state).toBe("completed");
 		expect(maximumActive).toBe(1);
+	});
+
+	it("serializes steps that hold the same named resource lock", async () => {
+		// The barrier proves the unlocked step really did run alongside a locked
+		// one, so the counter below is measuring exclusion and not idleness.
+		const barrier = new ConcurrencyBarrier(2);
+		let holdingDatabase = 0;
+		let maximumHoldingDatabase = 0;
+		const commands = new RecordingHandler("command", async (context) => {
+			if (context.step.id !== "seed") {
+				await barrier.arrive();
+			}
+			if (context.step.id === "lint") {
+				return { status: "succeeded" };
+			}
+			holdingDatabase += 1;
+			maximumHoldingDatabase = Math.max(
+				maximumHoldingDatabase,
+				holdingDatabase,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			holdingDatabase -= 1;
+			return { status: "succeeded" };
+		});
+		const plan = workflowPlanOf([
+			commandStep("migrate", [], { resourceLocks: ["database"] }),
+			commandStep("seed", [], { resourceLocks: ["database"] }),
+			commandStep("lint", []),
+		]);
+		const harness = await createWorkflowHarness(plan, [commands], {
+			maxConcurrentWorkers: 3,
+		});
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("completed");
+		expect(maximumHoldingDatabase).toBe(1);
+		expect(commands.observed).toHaveLength(3);
 	});
 
 	it("blocks dependents and fails the run when a step fails", async () => {
@@ -392,11 +331,11 @@ describe("workflow engine", () => {
 						),
 					},
 		);
-		const plan = planOf([
-			change("api", [], ["src/api/"]),
-			change("ui", ["api"], ["src/ui/"]),
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"]),
+			changeStep("ui", ["api"], ["src/ui/"]),
 		]);
-		const harness = await createEngine(plan, [changes]);
+		const harness = await createWorkflowHarness(plan, [changes]);
 
 		const finished = await harness.engine.run(harness.initial.id);
 
@@ -405,11 +344,113 @@ describe("workflow engine", () => {
 		expect(finished.steps.api?.error).toBe("compilation failed");
 		expect(finished.steps.ui?.state).toBe("blocked");
 		expect(changes.observed.map((entry) => entry.stepId)).toEqual(["api"]);
+		expect(harness.events).toContainEqual(
+			expect.objectContaining({
+				kind: "step_failed",
+				stepId: "api",
+				failureClass: "terminal",
+			}),
+		);
+		expect(harness.events).toContainEqual(
+			expect.objectContaining({
+				kind: "step_blocked",
+				stepId: "ui",
+				blockedBy: ["api"],
+			}),
+		);
+	});
+
+	it("retries a failed step within its declared budget", async () => {
+		let attempts = 0;
+		const changes = new RecordingHandler("change", async (context) => {
+			attempts += 1;
+			if (attempts === 1) {
+				return { status: "failed", error: "flaky worker" };
+			}
+			return {
+				status: "succeeded",
+				commit: await writeAndCommit(
+					context,
+					join("src", context.step.id, "index.ts"),
+				),
+			};
+		});
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], { retry: { maxAttempts: 2 } }),
+		]);
+		const harness = await createWorkflowHarness(plan, [changes]);
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("completed");
+		expect(finished.steps.api?.state).toBe("succeeded");
+		expect(finished.steps.api?.error).toBeUndefined();
+		expect(finished.attempts.map((attempt) => attempt.state)).toEqual([
+			"failed",
+			"succeeded",
+		]);
+		expect(harness.events).toContainEqual(
+			expect.objectContaining({
+				kind: "step_failed",
+				stepId: "api",
+				failureClass: "retryable",
+			}),
+		);
+		expect(harness.events).toContainEqual(
+			expect.objectContaining({
+				kind: "step_retry_scheduled",
+				stepId: "api",
+				nextAttemptNumber: 2,
+			}),
+		);
+	});
+
+	it("stops retrying a failure the handler reports as permanent", async () => {
+		let attempts = 0;
+		const changes = new RecordingHandler("change", async () => {
+			attempts += 1;
+			return {
+				status: "failed",
+				error: "the diff left the approved paths",
+				retryable: false,
+			};
+		});
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], { retry: { maxAttempts: 3 } }),
+		]);
+		const harness = await createWorkflowHarness(plan, [changes]);
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("failed");
+		expect(attempts).toBe(1);
+		expect(finished.steps.api?.error).toBe("the diff left the approved paths");
+	});
+
+	it("exhausts the retry budget before failing the run", async () => {
+		let attempts = 0;
+		const changes = new RecordingHandler("change", async () => {
+			attempts += 1;
+			return { status: "failed", error: "still broken" };
+		});
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], { retry: { maxAttempts: 3 } }),
+		]);
+		const harness = await createWorkflowHarness(plan, [changes]);
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("failed");
+		expect(attempts).toBe(3);
+		expect(finished.attempts).toHaveLength(3);
+		expect(
+			harness.events.filter((event) => event.kind === "step_retry_scheduled"),
+		).toHaveLength(2);
 	});
 
 	it("fails closed when no handler is registered for a step kind", async () => {
-		const plan = planOf([investigation("survey")]);
-		const harness = await createEngine(plan, []);
+		const plan = workflowPlanOf([investigationStep("survey")]);
+		const harness = await createWorkflowHarness(plan, []);
 
 		const finished = await harness.engine.run(harness.initial.id);
 
@@ -429,8 +470,10 @@ describe("workflow engine", () => {
 			});
 			return { status: "succeeded" };
 		});
-		const plan = planOf([{ ...investigation("survey"), timeoutMs: 30 }]);
-		const harness = await createEngine(plan, [handler]);
+		const plan = workflowPlanOf([
+			investigationStep("survey", [], { timeoutMs: 30 }),
+		]);
+		const harness = await createWorkflowHarness(plan, [handler]);
 
 		const finished = await harness.engine.run(harness.initial.id);
 
@@ -457,8 +500,11 @@ describe("workflow engine", () => {
 			});
 			return { status: "cancelled", error: "cancelled" };
 		});
-		const plan = planOf([investigation("survey"), investigation("next")]);
-		const harness = await createEngine(plan, [handler], {
+		const plan = workflowPlanOf([
+			investigationStep("survey"),
+			investigationStep("next"),
+		]);
+		const harness = await createWorkflowHarness(plan, [handler], {
 			maxConcurrentWorkers: 1,
 		});
 
@@ -468,6 +514,79 @@ describe("workflow engine", () => {
 
 		expect(finished.state).toBe("cancelled");
 		expect(finished.steps.survey?.state).toBe("cancelled");
+		expect(finished.steps.next?.state).toBe("cancelled");
 		expect(handler.observed).toHaveLength(1);
+	});
+
+	it("cancels an executing run through the engine", async () => {
+		let started: (() => void) | undefined;
+		const startedOnce = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const handler = new RecordingHandler("investigation", async (context) => {
+			started?.();
+			await new Promise<void>((resolve) => {
+				if (context.signal.aborted) {
+					resolve();
+					return;
+				}
+				context.signal.addEventListener("abort", () => {
+					resolve();
+				});
+			});
+			return { status: "cancelled", error: "stopped by the user" };
+		});
+		const plan = workflowPlanOf([
+			investigationStep("survey"),
+			investigationStep("later", ["survey"]),
+		]);
+		const harness = await createWorkflowHarness(plan, [handler], {
+			maxConcurrentWorkers: 1,
+		});
+
+		const running = harness.engine.run(harness.initial.id);
+		await startedOnce;
+		await harness.engine.cancel(harness.initial.id, "stopped by the user");
+		const finished = await running;
+
+		expect(finished.state).toBe("cancelled");
+		expect(finished.steps.survey?.state).toBe("cancelled");
+		expect(finished.steps.later?.state).toBe("cancelled");
+		expect(harness.events).toContainEqual(
+			expect.objectContaining({
+				kind: "run_cancellation_requested",
+				reason: "stopped by the user",
+			}),
+		);
+		expect(harness.events.at(-1)).toMatchObject({
+			kind: "run_settled",
+			state: "cancelled",
+		});
+	});
+
+	it("cancels a run that nobody is executing", async () => {
+		const plan = workflowPlanOf([investigationStep("survey")]);
+		const harness = await createWorkflowHarness(plan, []);
+
+		const cancelled = await harness.engine.cancel(harness.initial.id);
+
+		expect(cancelled.state).toBe("cancelled");
+		expect(cancelled.steps.survey?.state).toBe("cancelled");
+	});
+
+	it("refuses to execute one run twice at the same time", async () => {
+		const handler = new RecordingHandler("investigation", async () => {
+			await new Promise((resolve) => setTimeout(resolve, 40));
+			return { status: "succeeded" };
+		});
+		const plan = workflowPlanOf([investigationStep("survey")]);
+		const harness = await createWorkflowHarness(plan, [handler]);
+
+		const running = harness.engine.run(harness.initial.id);
+
+		await expect(harness.engine.run(harness.initial.id)).rejects.toThrow(
+			/already executing/,
+		);
+		expect((await running).state).toBe("completed");
 	});
 });

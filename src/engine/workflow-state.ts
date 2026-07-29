@@ -1,5 +1,6 @@
 import type { StepDefinition, WorkflowPlan } from "../domain/steps.js";
 import type { AttemptState, RunCapabilityProfiles } from "../domain/types.js";
+import type { WorkflowEvent } from "./events.js";
 import type { WorkspaceRequirement } from "./workspaces.js";
 
 /**
@@ -50,6 +51,8 @@ export interface WorkflowStepAttempt {
 	summary?: string;
 	error?: string;
 	commit?: string;
+	/** The artifacts this attempt published for the step's declared outputs. */
+	artifactIds?: string[];
 	/**
 	 * A workspace that could not be released after a successful step. The
 	 * workspace of an unsuccessful step is deliberately retained as evidence.
@@ -82,6 +85,12 @@ export interface WorkflowRunState {
 	capabilityProfiles: RunCapabilityProfiles;
 	steps: Record<string, WorkflowStepRecord>;
 	attempts: WorkflowStepAttempt[];
+	/** The retained tail of the ordered run timeline. */
+	events: WorkflowEvent[];
+	/** The highest event sequence ever assigned, including dropped events. */
+	eventSequence: number;
+	/** How many timeline entries fell out of the retained window. */
+	droppedEvents: number;
 	maxConcurrentWorkers: number;
 	/** Why the run stopped, when the reason is not a single step's failure. */
 	error?: string;
@@ -132,6 +141,9 @@ export function createWorkflowRunState(
 		capabilityProfiles: input.capabilityProfiles,
 		steps,
 		attempts: [],
+		events: [],
+		eventSequence: 0,
+		droppedEvents: 0,
 		maxConcurrentWorkers: input.maxConcurrentWorkers,
 		createdAt,
 		updatedAt: createdAt,

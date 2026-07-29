@@ -2,6 +2,7 @@ import type { StepExecutionContext } from "../domain/step-context.js";
 import type { StepDefinition, StepKind } from "../domain/steps.js";
 import type { CapabilityProfile } from "../domain/types.js";
 import type { RepositoryInfo } from "../git/git.js";
+import type { StepArtifactDraft } from "./artifact-routing.js";
 import type { WorkflowStepAttempt } from "./workflow-state.js";
 import type { Workspace } from "./workspaces.js";
 
@@ -27,8 +28,19 @@ export type StepOutcome =
 			summary?: string;
 			/** The step branch commit an integrating step produced. */
 			commit?: string;
+			/** One artifact per output the step declared. */
+			artifacts?: StepArtifactDraft[];
 	  }
-	| { status: "failed"; error: string }
+	| {
+			status: "failed";
+			error: string;
+			/**
+			 * Whether running the step again could succeed. Handlers set this
+			 * when they know: a rejected diff is permanent, a lost worker is not.
+			 * Undeclared failures stay retryable within the step's retry budget.
+			 */
+			retryable?: boolean;
+	  }
 	| { status: "cancelled"; error: string };
 
 /**

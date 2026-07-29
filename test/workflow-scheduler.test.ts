@@ -222,6 +222,25 @@ describe("workflow scheduler", () => {
 		expect(launchableStepIds(runWith(plan, 4))).toEqual(["api"]);
 	});
 
+	it("never launches steps that hold the same named resource lock", () => {
+		const plan = planOf([
+			change("migrate", [], ["db/migrations/"], {
+				resourceLocks: ["database"],
+			}),
+			change("seed", [], ["db/seeds/"], { resourceLocks: ["database"] }),
+			change("docs", [], ["docs/"], { resourceLocks: ["site"] }),
+		]);
+
+		expect(launchableStepIds(runWith(plan, 4))).toEqual(["migrate", "docs"]);
+
+		const running: WorkflowRunState = {
+			...withStep(runWith(plan, 4), "seed", { state: "running" }),
+			attempts: [activeAttempt("seed")],
+		};
+
+		expect(launchableStepIds(running)).toEqual(["docs"]);
+	});
+
 	it("blocks every dependent of a failed step transitively", () => {
 		const plan = planOf([
 			change("api", [], ["src/api/"]),

@@ -12,6 +12,7 @@ import {
 	type StepOutcome,
 	UnsupportedStepKindError,
 } from "../src/engine/handlers.js";
+import { classifyStepFailure } from "../src/engine/retry.js";
 import type { WorkflowStepAttempt } from "../src/engine/workflow-state.js";
 import {
 	DetachedWorkspaceProvider,
@@ -509,6 +510,34 @@ describe("step executor", () => {
 		expect(result.timedOut).toBe(false);
 	});
 
+	it("passes produced artifacts through to the outcome", async () => {
+		const provider = new RecordingProvider("read-only");
+		const executor = executorWith(provider, [
+			handlerOf("investigation", async () => ({
+				status: "succeeded",
+				artifacts: [
+					{
+						output: "findings",
+						kind: "findings",
+						title: "Findings",
+						payload: { format: "json", value: { count: 1 } },
+					},
+				],
+			})),
+		]);
+		const preparedStep = await prepared(executor, investigation());
+
+		const result = await executor.execute({
+			prepared: preparedStep,
+			attempt: attemptOf(preparedStep.workspace),
+			execution,
+		});
+
+		expect(
+			result.outcome.status === "succeeded" ? result.outcome.artifacts : [],
+		).toHaveLength(1);
+	});
+
 	it("rejects a non-positive default timeout", () => {
 		expect(
 			() =>
@@ -518,5 +547,82 @@ describe("step executor", () => {
 					defaultTimeoutMs: 0,
 				}),
 		).toThrow(/defaultTimeoutMs/);
+	});
+});
+
+describe("step failure classification", () => {
+	it("never retries a cancelled step", () => {
+		expect(
+			classifyStepFailure({
+				outcome: { status: "cancelled", error: "run cancelled" },
+				timedOut: false,
+				attemptNumber: 1,
+				maxAttempts: 3,
+			}),
+		).toEqual({
+			failureClass: "terminal",
+			reason: "the step was cancelled",
+		});
+	});
+
+	it("never retries a failure the handler declared permanent", () => {
+		expect(
+			classifyStepFailure({
+				outcome: { status: "failed", error: "rejected diff", retryable: false },
+				timedOut: false,
+				attemptNumber: 1,
+				maxAttempts: 3,
+			}).failureClass,
+		).toBe("terminal");
+	});
+
+	it("retries while the declared budget lasts", () => {
+		expect(
+			classifyStepFailure({
+				outcome: { status: "failed", error: "lost worker" },
+				timedOut: false,
+				attemptNumber: 1,
+				maxAttempts: 2,
+			}).failureClass,
+		).toBe("retryable");
+		expect(
+			classifyStepFailure({
+				outcome: { status: "failed", error: "lost worker" },
+				timedOut: false,
+				attemptNumber: 2,
+				maxAttempts: 2,
+			}),
+		).toEqual({
+			failureClass: "terminal",
+			reason: "the retry budget of 2 attempts is exhausted",
+		});
+	});
+
+	it("treats the default single-attempt budget as terminal", () => {
+		expect(
+			classifyStepFailure({
+				outcome: { status: "failed", error: "lost worker" },
+				timedOut: false,
+				attemptNumber: 1,
+				maxAttempts: 1,
+			}),
+		).toEqual({
+			failureClass: "terminal",
+			reason: "the retry budget of 1 attempt is exhausted",
+		});
+	});
+
+	it("retries a timeout and says so", () => {
+		expect(
+			classifyStepFailure({
+				outcome: { status: "failed", error: "Step survey timed out" },
+				timedOut: true,
+				attemptNumber: 1,
+				maxAttempts: 3,
+			}),
+		).toEqual({
+			failureClass: "retryable",
+			reason: "the step timed out with 2 attempt(s) remaining",
+		});
 	});
 });

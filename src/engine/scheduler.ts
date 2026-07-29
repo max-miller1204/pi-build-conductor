@@ -1,6 +1,7 @@
 import {
 	type StepDefinition,
 	stepPathLocks,
+	stepResourceLocks,
 	topologicalStepIds,
 } from "../domain/steps.js";
 import { isActiveAttemptState } from "../domain/types.js";
@@ -91,13 +92,37 @@ export function pathLocksConflict(left: string, right: string): boolean {
 	);
 }
 
+/** Every lock one running step holds, both repository paths and named resources. */
+interface HeldLocks {
+	paths: string[];
+	resources: Set<string>;
+}
+
+function heldLocksOf(records: readonly WorkflowStepRecord[]): HeldLocks {
+	return {
+		paths: records.flatMap((record) => stepPathLocks(record.definition)),
+		resources: new Set(
+			records.flatMap((record) => stepResourceLocks(record.definition)),
+		),
+	};
+}
+
 function conflictsWithHeldLocks(
 	step: StepDefinition,
-	held: readonly string[],
+	held: HeldLocks,
 ): boolean {
-	return stepPathLocks(step).some((lock) =>
-		held.some((heldLock) => pathLocksConflict(lock, heldLock)),
+	return (
+		stepPathLocks(step).some((lock) =>
+			held.paths.some((heldLock) => pathLocksConflict(lock, heldLock)),
+		) || stepResourceLocks(step).some((lock) => held.resources.has(lock))
 	);
+}
+
+function holdLocks(held: HeldLocks, step: StepDefinition): void {
+	held.paths.push(...stepPathLocks(step));
+	for (const lock of stepResourceLocks(step)) {
+		held.resources.add(lock);
+	}
 }
 
 /**
@@ -133,9 +158,11 @@ export function launchableStepIds(state: WorkflowRunState): string[] {
 		0,
 		reconciled.maxConcurrentWorkers - occupiedSlots,
 	);
-	const heldPathLocks = Object.values(reconciled.steps)
-		.filter((record) => record.state === "running")
-		.flatMap((record) => stepPathLocks(record.definition));
+	const held = heldLocksOf(
+		Object.values(reconciled.steps).filter(
+			(record) => record.state === "running",
+		),
+	);
 	const launchable: string[] = [];
 	for (const stepId of topologicalStepIds(reconciled.plan)) {
 		const record = reconciled.steps[stepId];
@@ -146,7 +173,7 @@ export function launchableStepIds(state: WorkflowRunState): string[] {
 		) {
 			continue;
 		}
-		if (conflictsWithHeldLocks(record.definition, heldPathLocks)) {
+		if (conflictsWithHeldLocks(record.definition, held)) {
 			continue;
 		}
 		const needsSlot = consumesSlot(stepId);
@@ -154,7 +181,7 @@ export function launchableStepIds(state: WorkflowRunState): string[] {
 			continue;
 		}
 		launchable.push(stepId);
-		heldPathLocks.push(...stepPathLocks(record.definition));
+		holdLocks(held, record.definition);
 		if (needsSlot) {
 			availableSlots -= 1;
 		}
