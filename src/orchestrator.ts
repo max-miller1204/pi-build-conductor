@@ -37,7 +37,6 @@ import {
 	type TaskPlan,
 	type WorkerRole,
 	type WorkerUiRequest,
-	type WorkerUiResponse,
 } from "./domain/types.js";
 import type { GitClient, RepositoryInfo } from "./git/git.js";
 import type {
@@ -51,7 +50,11 @@ import {
 	parseReviewReport,
 } from "./review/review-report.js";
 import { describeCapabilityProfile } from "./security/capabilities.js";
-import { readSecurityPolicy, workerLaunchPolicy } from "./security/policy.js";
+import {
+	blockedWorkerResponse,
+	readSecurityPolicy,
+	workerLaunchPolicy,
+} from "./security/policy.js";
 import type { AttemptLogStore } from "./storage/attempt-log-store.js";
 import type { RunStore } from "./storage/run-store.js";
 import {
@@ -164,16 +167,6 @@ interface WorkerUiContext {
 	attemptId: string;
 	workerId: string;
 	options: LaunchOptions;
-}
-
-export function blockedWorkerResponse(
-	policy: BlockedWorkerPolicy,
-	request: WorkerUiRequest,
-): WorkerUiResponse {
-	if (policy === "decline" && request.method === "confirm") {
-		return { kind: "confirmation", confirmed: false };
-	}
-	return { kind: "cancelled" };
 }
 
 function withoutBlockedAttempt(

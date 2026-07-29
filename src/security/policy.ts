@@ -2,11 +2,14 @@ import { isAbsolute } from "node:path";
 import { orchestratorConfigurationValue } from "../configuration.js";
 import type {
 	BlockedWorkerPolicy,
+	CapabilityProfile,
 	CapabilityProfileName,
 	RunSecurityPolicy,
 	ValidationSandboxMode,
 	WorkerLaunchPolicy,
 	WorkerRole,
+	WorkerUiRequest,
+	WorkerUiResponse,
 } from "../domain/types.js";
 import {
 	assertCapabilityProfiles,
@@ -141,6 +144,41 @@ export function workerLaunchPolicy(
 		tools: frozenProfile ? [...frozenProfile.tools] : [...ROLE_TOOLS[role]],
 		resourceDiscovery: "disabled",
 	};
+}
+
+/**
+ * The launch authority of one workflow step: its role policy narrowed to the
+ * tools the step's own capability profile grants. Narrowing is an
+ * intersection, so a step can only ever hold less authority than its role.
+ */
+export function stepWorkerLaunchPolicy(
+	policy: RunSecurityPolicy,
+	role: WorkerRole,
+	profile: CapabilityProfile,
+): WorkerLaunchPolicy | undefined {
+	const rolePolicy = workerLaunchPolicy(policy, role);
+	if (!rolePolicy) {
+		return undefined;
+	}
+	const granted = new Set(profile.tools);
+	return {
+		...rolePolicy,
+		tools: rolePolicy.tools.filter((tool) => granted.has(tool)),
+	};
+}
+
+/**
+ * The response a blocked worker receives. UI requests can never expand
+ * authority, so the run policy answers them without involving the user.
+ */
+export function blockedWorkerResponse(
+	policy: BlockedWorkerPolicy,
+	request: WorkerUiRequest,
+): WorkerUiResponse {
+	if (policy === "decline" && request.method === "confirm") {
+		return { kind: "confirmation", confirmed: false };
+	}
+	return { kind: "cancelled" };
 }
 
 export function securityPolicyLines(policy: RunSecurityPolicy): string[] {

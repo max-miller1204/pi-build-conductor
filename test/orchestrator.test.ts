@@ -15,10 +15,10 @@ import type {
 	WorktreeManager,
 } from "../src/git/worktrees.js";
 import {
-	blockedWorkerResponse,
 	type OrchestratorDependencies,
 	Orchestrator as ProductionOrchestrator,
 } from "../src/orchestrator.js";
+import { blockedWorkerResponse } from "../src/security/policy.js";
 import { AttemptLogStore } from "../src/storage/attempt-log-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import type {
