@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
 	RepositoryFileEntry,
+	RepositoryFileListing,
 	RepositoryFileReader,
 } from "../git/repository-reader.js";
 
@@ -104,6 +105,8 @@ export interface RepositoryDiscoveryOptions {
 	maxTotalExcerptChars?: number;
 	/** Evidence files larger than this are never read. */
 	maxEvidenceFileBytes?: number;
+	/** A pre-fetched listing of the same commit, to avoid a second scan. */
+	listing?: RepositoryFileListing;
 }
 
 interface ResolvedDiscoveryOptions {
@@ -127,11 +130,15 @@ export const DEFAULT_REPOSITORY_DISCOVERY_OPTIONS: ResolvedDiscoveryOptions = {
 function resolveOptions(
 	options: RepositoryDiscoveryOptions,
 ): ResolvedDiscoveryOptions {
-	const resolved = { ...DEFAULT_REPOSITORY_DISCOVERY_OPTIONS, ...options };
-	for (const [name, value] of Object.entries(resolved)) {
+	const resolved = { ...DEFAULT_REPOSITORY_DISCOVERY_OPTIONS };
+	for (const name of Object.keys(resolved) as Array<
+		keyof ResolvedDiscoveryOptions
+	>) {
+		const value = options[name] ?? resolved[name];
 		if (!Number.isSafeInteger(value) || value < 1) {
 			throw new Error(`${name} must be a positive safe integer`);
 		}
+		resolved[name] = value;
 	}
 	return resolved;
 }
@@ -371,7 +378,7 @@ export async function discoverRepositoryProfile(
 	}
 	const options = resolveOptions(discoveryOptions);
 	const notices: string[] = [];
-	const listing = await reader.listFiles(commit);
+	const listing = discoveryOptions.listing ?? (await reader.listFiles(commit));
 	let skippedEntryCount = listing.skippedEntryCount;
 
 	const safeFiles: RepositoryFileEntry[] = [];

@@ -227,6 +227,7 @@ Plan rules:
 - Every prerequisite must be an explicit dependency because independent ready tasks may execute concurrently.
 - Every allowed path must be a normalized repository-relative file path, or a directory path ending in /, that you verified exists or whose parent directory you verified exists.
 - Use the narrowest practical path scope and focused validation commands.
+- Tasks that no dependency chain orders must not declare overlapping allowed paths, because they may execute concurrently.
 - Prefer the detected validation commands below; justify any other command with an observation citing where the repository defines it.
 ${detected.length > 0 ? detected : "- (no commands were detected; cite where the repository defines any command you choose)"}
 - Choose a complete repository-wide final validation suite sufficient to establish merge readiness.

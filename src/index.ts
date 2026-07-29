@@ -36,6 +36,7 @@ export * from "./inspection/run-presentation.js";
 export * from "./orchestrator.js";
 export * from "./planning/plan-editor.js";
 export * from "./planning/plan-presentation.js";
+export * from "./planning/plan-repository-validation.js";
 export * from "./planning/planning-worker.js";
 export * from "./planning/repository-discovery.js";
 export * from "./review/prompts.js";

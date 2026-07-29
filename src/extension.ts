@@ -39,6 +39,10 @@ import {
 } from "./planning/plan-editor.js";
 import { renderApprovalSummary } from "./planning/plan-presentation.js";
 import {
+	renderPlanRepositoryIssues,
+	validatePlanAgainstRepository,
+} from "./planning/plan-repository-validation.js";
+import {
 	PlanningWorker,
 	renderPlanningObservations,
 } from "./planning/planning-worker.js";
@@ -1190,15 +1194,18 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				let plan = await loadSidecarPlan(requestPath);
 				const planSource = plan ? "sidecar" : "generated";
 				const runtime = await createRuntime(git, repository);
+				const reader = new GitRepositoryReader(repository.root);
+				const listing = await reader.listFiles(repository.head);
+				const profile = await discoverRepositoryProfile(
+					reader,
+					repository.head,
+					{ listing },
+				);
 				let planningEvidence: string[] = [];
 				if (!plan) {
 					ctx.ui.notify(
 						"No plan sidecar found. Launching the read-only planning worker to inspect the repository.",
 						"info",
-					);
-					const profile = await discoverRepositoryProfile(
-						new GitRepositoryReader(repository.root),
-						repository.head,
 					);
 					const model = selectedWorkerModel(ctx);
 					const planner = new PlanningWorker({
@@ -1213,6 +1220,32 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					});
 					plan = document.plan;
 					planningEvidence = renderPlanningObservations(document.observations);
+				}
+				const repositoryValidation = validatePlanAgainstRepository(plan, {
+					paths: listing.files.map((file) => file.path),
+					detectedCommands: profile.detectedCommands,
+				});
+				if (!repositoryValidation.ok) {
+					const errors = repositoryValidation.issues.filter(
+						(issue) => issue.severity === "error",
+					);
+					throw new Error(
+						`The ${planSource} plan conflicts with the repository at commit ${repository.head}:\n${renderPlanRepositoryIssues(errors).join("\n")}`,
+					);
+				}
+				const warnings = repositoryValidation.issues.filter(
+					(issue) => issue.severity === "warning",
+				);
+				if (warnings.length > 0) {
+					planningEvidence = [
+						...planningEvidence,
+						"Repository validation warnings:",
+						...renderPlanRepositoryIssues(warnings),
+					];
+					ctx.ui.notify(
+						`Plan accepted with ${warnings.length} repository validation ${warnings.length === 1 ? "warning" : "warnings"}`,
+						"warning",
+					);
 				}
 				const run = await runtime.orchestrator.createRun({
 					repository,
