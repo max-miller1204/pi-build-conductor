@@ -133,9 +133,9 @@
       "id": "goal-mry8o2je-47b3d0e5",
       "title": "Add repository-aware planning",
       "description": "Give a read-only planning agent access to repository structure, instructions, manifests, conventions, relevant source files, and detected validation commands before it proposes an evidence-backed task DAG for approval.",
-      "status": "active",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.130Z",
-      "updatedAt": "2026-07-29T19:15:20.861Z"
+      "updatedAt": "2026-07-29T19:37:01.774Z"
     },
     {
       "id": "goal-mry8o2km-9e209bd0",
@@ -165,9 +165,9 @@
       "id": "goal-mry8o2lj-6361b2b1",
       "title": "Provide built-in orchestration workflows",
       "description": "Recast the current strict build lifecycle as a change workflow and add investigate and plan-only workflows while preserving approval, isolation, review, repair, validation, recovery, and evidence guarantees where applicable.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.207Z",
-      "updatedAt": "2026-07-24T16:49:33.563Z"
+      "updatedAt": "2026-07-29T19:37:02.248Z"
     },
     {
       "id": "goal-mry8o2lk-50778d73",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 6
+  "revision": 8
 }

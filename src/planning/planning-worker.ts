@@ -253,6 +253,8 @@ export interface PlanningRequest {
 	requestText: string;
 	profile: RepositoryProfile;
 	signal?: AbortSignal;
+	/** Real run identifiers when planning executes as a workflow step. */
+	identity?: { runId: string; stepId: string; attemptId: string };
 }
 
 /**
@@ -281,9 +283,9 @@ export class PlanningWorker {
 
 	async plan(request: PlanningRequest): Promise<PlanningDocument> {
 		const outcome = await this.runner.run({
-			runId: "planning",
-			stepId: "plan",
-			attemptId: "planning-1",
+			runId: request.identity?.runId ?? "planning",
+			stepId: request.identity?.stepId ?? "plan",
+			attemptId: request.identity?.attemptId ?? "planning-1",
 			role: "review",
 			profile: capabilityProfileFor(["read-repository"]),
 			cwd: request.repositoryRoot,
