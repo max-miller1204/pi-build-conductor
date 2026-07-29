@@ -54,5 +54,6 @@ export * from "./validation/final-validator.js";
 export * from "./validation/task-validator.js";
 export * from "./workers/backend.js";
 export * from "./workers/server-backend.js";
+export * from "./workflows/change.js";
 export * from "./workflows/investigate.js";
 export * from "./workflows/plan-only.js";
