@@ -16,6 +16,7 @@ import {
 	type TaskPlan,
 } from "./domain/types.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
+import { GitRepositoryReader } from "./git/repository-reader.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
 import {
 	latestWorkerAttempt,
@@ -32,12 +33,16 @@ import {
 	type WorkerLifecycleProgress,
 	type WorkerModelSelection,
 } from "./orchestrator.js";
-import { generatePlanWithPi } from "./planning/pi-plan-generator.js";
 import {
 	type PlanEditorSnapshot,
 	reviewPlanInteractively,
 } from "./planning/plan-editor.js";
 import { renderApprovalSummary } from "./planning/plan-presentation.js";
+import {
+	PlanningWorker,
+	renderPlanningObservations,
+} from "./planning/planning-worker.js";
+import { discoverRepositoryProfile } from "./planning/repository-discovery.js";
 import { readSecurityPolicy, securityPolicyLines } from "./security/policy.js";
 import {
 	type AttemptLogEntry,
@@ -206,7 +211,7 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		securityPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
-	return { attemptLogs, orchestrator, store, workers };
+	return { attemptLogs, orchestrator, securityPolicy, store, workers };
 }
 
 function assertRunRepository(
@@ -1184,14 +1189,31 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				}
 				let plan = await loadSidecarPlan(requestPath);
 				const planSource = plan ? "sidecar" : "generated";
+				const runtime = await createRuntime(git, repository);
+				let planningEvidence: string[] = [];
 				if (!plan) {
 					ctx.ui.notify(
-						"No plan sidecar found. Asking the selected Pi model to create a DAG.",
+						"No plan sidecar found. Launching the read-only planning worker to inspect the repository.",
 						"info",
 					);
-					plan = await generatePlanWithPi(ctx, requestText);
+					const profile = await discoverRepositoryProfile(
+						new GitRepositoryReader(repository.root),
+						repository.head,
+					);
+					const model = selectedWorkerModel(ctx);
+					const planner = new PlanningWorker({
+						workers: runtime.workers,
+						securityPolicy: runtime.securityPolicy,
+						...(model ? { provider: model.provider, model: model.model } : {}),
+					});
+					const document = await planner.plan({
+						repositoryRoot: repository.root,
+						requestText,
+						profile,
+					});
+					plan = document.plan;
+					planningEvidence = renderPlanningObservations(document.observations);
 				}
-				const runtime = await createRuntime(git, repository);
 				const run = await runtime.orchestrator.createRun({
 					repository,
 					requestPath,
@@ -1200,6 +1222,12 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					planSource,
 					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
+				if (planningEvidence.length > 0) {
+					ctx.ui.setWidget(
+						`${runUiKey(run.id)}:planning-evidence`,
+						planningEvidence,
+					);
+				}
 				ctx.ui.notify(
 					`Persisted run ${run.id} at plan revision 1. Resume interrupted review with /orchestrate-resume ${run.id}.`,
 					"info",
