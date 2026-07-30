@@ -27,7 +27,10 @@ The compatible server commit pinned in `package.json` supports worker launch pol
 The orchestrator checks that support before approval and requires an exact applied-policy attestation after each spawn.
 A missing capability or mismatched attestation fails closed and never falls back to an unrestricted worker.
 
-The compatible server disables project and user extension discovery, skills, prompt templates, and context files for policy-controlled workers.
+The compatible server disables project and user extension discovery, skills, and prompt templates for policy-controlled workers.
+Worker launch policy version 1 does not suppress Pi's `SYSTEM.md` or `APPEND_SYSTEM.md` context files; those files remain discoverable even when `resourceDiscovery` is `disabled`.
+Worker processes also do not inherit the session's `--models` scope.
+The extension therefore launches each worker with the active session model or, when none is active, the first scoped model; an empty scope leaves model selection to the worker default.
 New runs freeze the complete capability-profile set at creation.
 Each workflow step selects an allowed profile and may only narrow its capabilities further.
 The compatible server enforces the exact derived tool allowlist:

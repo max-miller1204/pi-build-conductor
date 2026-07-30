@@ -32,11 +32,11 @@
 		]
 	},
 	"conductorCompatibility": {
-		"testedPiVersion": "0.81.1",
-		"upstreamPiTag": "v0.81.1",
-		"upstreamPiCommit": "20be4b18d4c57487f8993d2762bace129f0cf7c6",
+		"testedPiVersion": "0.83.0",
+		"upstreamPiTag": "v0.83.0",
+		"upstreamPiCommit": "845d6ff1f6643aba440341cce877ce1c43ebbc39",
 		"serverRepository": "max-miller1204/pi",
-		"serverCommit": "c08917e1163c4742ecb7065c099ec57cf5b6c3e5",
+		"serverCommit": "b713633149eae9f14bac029af4938b6476d8202d",
 		"workerLaunchPolicyVersion": 1
 	},
 	"publishConfig": {
@@ -44,6 +44,7 @@
 		"registry": "https://registry.npmjs.org/"
 	},
 	"scripts": {
+		"audit:high": "node scripts/audit-dependencies.mjs",
 		"check": "npm run format:check && npm run docs:check && npm run version:check && npm run typecheck && npm test",
 		"docs:check": "markdownlint-cli2 README.md SECURITY.md RELEASING.md",
 		"format": "biome check --write .",
@@ -52,7 +53,7 @@
 		"package:smoke": "node scripts/smoke-package.mjs",
 		"pack:check": "npm pack --dry-run",
 		"prepublishOnly": "npm run release:check",
-		"release:check": "npm run check && npm run package:smoke && npm audit --audit-level=high",
+		"release:check": "npm run check && npm run package:smoke && npm run audit:high",
 		"test": "vitest run",
 		"test:compatibility": "node scripts/run-server-compatibility.mjs",
 		"test:crash-fixture": "vite-node test/fixtures/crash-after-task-commit.ts",
@@ -72,8 +73,8 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
-		"@earendil-works/pi-ai": "0.81.1",
-		"@earendil-works/pi-coding-agent": "0.81.1",
+		"@earendil-works/pi-ai": "0.83.0",
+		"@earendil-works/pi-coding-agent": "0.83.0",
 		"@types/node": "22.19.19",
 		"@types/proper-lockfile": "^4.1.4",
 		"markdownlint-cli2": "0.23.2",
@@ -84,11 +85,5 @@
 	},
 	"dependencies": {
 		"proper-lockfile": "^4.1.2"
-	},
-	"overrides": {
-		"protobufjs": "7.6.5",
-		"@earendil-works/pi-coding-agent": {
-			"brace-expansion": "5.0.8"
-		}
 	}
 }

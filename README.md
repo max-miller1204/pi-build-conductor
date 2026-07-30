@@ -35,8 +35,8 @@ Workers never merge into the user's branch, worker-created commits are rejected,
 | Component | Supported version | Notes |
 | --- | --- | --- |
 | Node.js | 22.19.0 or newer | Enforced by `package.json` |
-| Pi coding agent | 0.81.1 | Pi core packages are declared as `*` peers as required by Pi package conventions, while release tests use this exact version |
-| Pi server | [`c08917e`](https://github.com/max-miller1204/pi/commit/c08917e1163c4742ecb7065c099ec57cf5b6c3e5), based on Pi 0.81.1 | Required for worker launch policy version 1 and ESM RPC entry resolution |
+| Pi coding agent | 0.83.0 | Pi core packages are declared as `*` peers as required by Pi package conventions, while release tests use this exact version |
+| Pi server | [`b713633`](https://github.com/max-miller1204/pi/commit/b713633149eae9f14bac029af4938b6476d8202d), based on Pi 0.83.0 | Required for worker launch policy version 1 and ESM RPC entry resolution |
 | Git | A modern CLI with worktree support | The source repository must have at least one commit |
 | Nono | Optional | Used only when validation sandboxing is enabled |
 
@@ -64,7 +64,7 @@ Build and run the pinned compatible commit:
 ```sh
 git clone https://github.com/max-miller1204/pi.git
 cd pi
-git checkout c08917e1163c4742ecb7065c099ec57cf5b6c3e5
+git checkout b713633149eae9f14bac029af4938b6476d8202d
 npm ci --ignore-scripts
 npm run build
 npm exec --workspace packages/server -- server serve
@@ -259,7 +259,8 @@ The run allows at most two successful repair and re-review cycles.
 > Git worktrees isolate source history, not the operating system.
 > Worker Pi processes are unsandboxed and retain host filesystem and network reachability.
 
-The compatible server disables worker extension, skill, prompt-template, and context-file discovery.
+The compatible server applies the versioned worker discovery restrictions described in
+the [`SECURITY.md` worker-authority section](SECURITY.md#worker-authority).
 The orchestrator freezes capability profiles at run creation, narrows them to each step's declarations, and verifies the resulting server tool-policy attestation before accepting a worker.
 Read-only profiles cannot use Bash or mutation tools, while change and repair profiles retain only the command and mutation tools their approved work requires.
 No capability profile grants deployment, publishing, cloud administration, or remote mutation authority.

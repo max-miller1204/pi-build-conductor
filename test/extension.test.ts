@@ -9,7 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createOrchestrationRun } from "../src/domain/run.js";
-import extension from "../src/extension.js";
+import extension, { selectedWorkerModel } from "../src/extension.js";
 import { GitCli } from "../src/git/git.js";
 import { RunStore } from "../src/storage/run-store.js";
 
@@ -216,5 +216,40 @@ describe("run inspection extension commands", () => {
 		expect(widgets.get("pi-orchestrator:runs")?.join("\n")).toContain(
 			"inspect-run | awaiting_approval",
 		);
+	});
+});
+
+describe("worker model selection", () => {
+	function context(
+		model: { provider: string; id: string } | undefined,
+		scopedModels?: Array<{ model: { provider: string; id: string } }>,
+	): ExtensionCommandContext {
+		return { model, scopedModels } as unknown as ExtensionCommandContext;
+	}
+
+	it("uses the session model when one is selected", () => {
+		expect(
+			selectedWorkerModel(
+				context({ provider: "anthropic", id: "claude-opus-5" }, [
+					{ model: { provider: "openai", id: "gpt-5" } },
+				]),
+			),
+		).toEqual({ provider: "anthropic", model: "claude-opus-5" });
+	});
+
+	it("keeps workers inside the session scope when no session model is selected", () => {
+		expect(
+			selectedWorkerModel(
+				context(undefined, [
+					{ model: { provider: "anthropic", id: "claude-sonnet-5" } },
+					{ model: { provider: "openai", id: "gpt-5" } },
+				]),
+			),
+		).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
+	});
+
+	it("defers to the worker default when the session configures no scope", () => {
+		expect(selectedWorkerModel(context(undefined, []))).toBeUndefined();
+		expect(selectedWorkerModel(context(undefined))).toBeUndefined();
 	});
 });
