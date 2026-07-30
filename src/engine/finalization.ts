@@ -62,14 +62,13 @@ export function integratedCommitEvidence(
 		const attemptIds = new Set(record.attemptIds);
 		const attempt = state.attempts.findLast(
 			(candidate) =>
-				attemptIds.has(candidate.id) &&
-				candidate.state === "succeeded" &&
-				typeof candidate.commit === "string",
+				attemptIds.has(candidate.id) && candidate.state === "succeeded",
 		);
-		if (!attempt?.commit) {
-			throw new Error(
-				`Integrated step ${stepId} has no successful source commit attempt`,
-			);
+		if (!attempt) {
+			throw new Error(`Integrated step ${stepId} has no successful attempt`);
+		}
+		if (!attempt.commit) {
+			continue;
 		}
 		evidence.push({
 			kind: stepProfileName(record.definition) === "repair" ? "repair" : "task",

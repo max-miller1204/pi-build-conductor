@@ -266,7 +266,7 @@ describe("strict change workflow end to end", () => {
 	});
 
 	it("completes without a repair commit when every review is clean", async () => {
-		const { harness } = await createChangeHarness({
+		const { git, harness } = await createChangeHarness({
 			"add-api": {
 				act: (cwd) =>
 					writeFileIn(cwd, join("src", "api", "index.ts"), "export {};\n"),
@@ -289,6 +289,25 @@ describe("strict change workflow end to end", () => {
 			"step(add-docs): Add the docs",
 			"step(add-api): Add the API",
 			"Initial",
+		]);
+
+		const result = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+				artifacts: harness.artifacts,
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(result.mergeReady).toBeDefined();
+		expect(result.mergeReady?.commits.map((commit) => commit.id)).toEqual([
+			"add-api",
+			"add-docs",
 		]);
 	});
 });
