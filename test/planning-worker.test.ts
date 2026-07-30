@@ -139,6 +139,7 @@ describe("PlanningWorker end to end", () => {
 			repositoryRoot: "/repo",
 			requestText: "Add the feature",
 			profile: profileFixture(),
+			repositoryPaths: ["src/a.ts", "package.json", "README.md"],
 		});
 
 		expect(document.plan.title).toBe("Add the feature");
@@ -176,6 +177,7 @@ describe("PlanningWorker end to end", () => {
 				repositoryRoot: "/repo",
 				requestText: "Add the feature",
 				profile: profileFixture(),
+				repositoryPaths: ["src/a.ts", "package.json", "README.md"],
 			}),
 		).rejects.toThrow(/plan document/);
 		expect(workers.stopped).toBe(1);
@@ -192,6 +194,7 @@ describe("PlanningWorker end to end", () => {
 				repositoryRoot: "/repo",
 				requestText: "Add the feature",
 				profile: profileFixture(),
+				repositoryPaths: ["src/a.ts", "package.json", "README.md"],
 			}),
 		).rejects.toThrow(/model exploded/);
 	});
@@ -236,7 +239,7 @@ describe("parsePlanningDocument", () => {
 		document.observations[0] = {
 			taskId: "missing-task",
 			summary: "cites nothing",
-			paths: [],
+			paths: ["src/a.ts"],
 		};
 		expect(() => parsePlanningDocument(documentText(document))).toThrow(
 			/missing-task/,
@@ -250,6 +253,35 @@ describe("parsePlanningDocument", () => {
 		);
 	});
 
+	it("rejects a document without evidence for every task", () => {
+		const document = validDocument();
+		const implementationTask = document.plan.tasks[0];
+		if (!implementationTask) {
+			throw new Error("missing implementation task");
+		}
+		document.plan.tasks.push({
+			...implementationTask,
+			id: "document-feature",
+			title: "Document the feature",
+			dependencies: ["implement-feature"],
+		});
+		expect(() => parsePlanningDocument(documentText(document))).toThrow(
+			/document-feature.*observation/,
+		);
+	});
+
+	it("rejects observations without cited repository paths", () => {
+		const document = validDocument();
+		document.observations[0] = {
+			taskId: "implement-feature",
+			summary: "cites nothing",
+			paths: [],
+		};
+		expect(() => parsePlanningDocument(documentText(document))).toThrow(
+			/repository-relative paths/,
+		);
+	});
+
 	it("rejects unbounded observations", () => {
 		const document = validDocument();
 		document.observations = Array.from({ length: 51 }, () => ({
@@ -259,6 +291,27 @@ describe("parsePlanningDocument", () => {
 		expect(() => parsePlanningDocument(documentText(document))).toThrow(
 			/observations/,
 		);
+	});
+});
+
+describe("PlanningWorker evidence validation", () => {
+	it("rejects observations citing paths absent from the committed listing", async () => {
+		const document = validDocument();
+		document.observations[0]?.paths.splice(0, 1, "src/invented.ts");
+		const workers = new PlanningFakeWorkers({
+			status: "succeeded",
+			output: documentText(document),
+		});
+		const planner = new PlanningWorker({ workers, securityPolicy });
+
+		await expect(
+			planner.plan({
+				repositoryRoot: "/repo",
+				requestText: "Add the feature",
+				profile: profileFixture(),
+				repositoryPaths: ["src/a.ts", "package.json", "README.md"],
+			}),
+		).rejects.toThrow(/src\/invented\.ts.*does not exist/);
 	});
 });
 

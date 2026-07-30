@@ -111,6 +111,7 @@ class ScriptedWorkers implements WorkerBackend {
 function handlersFor(
 	workers: WorkerBackend,
 	progress: StepWorkerProgress[] = [],
+	commandTimeoutMs?: number,
 ) {
 	const git = new GitCli();
 	const securityPolicy = readSecurityPolicy({});
@@ -130,7 +131,11 @@ function handlersFor(
 			securityPolicy,
 			validator: new LocalTaskValidator(git),
 		}),
-		new CommandStepHandler({ git, securityPolicy }),
+		new CommandStepHandler({
+			git,
+			securityPolicy,
+			...(commandTimeoutMs === undefined ? {} : { commandTimeoutMs }),
+		}),
 	];
 }
 
@@ -417,6 +422,50 @@ describe("ported workflow step handlers", () => {
 		expect(finished.state).toBe("failed");
 		expect(finished.steps.verify?.error).toContain("exited with code 2");
 		expect(finished.steps.verify?.error).toContain("boom");
+	});
+
+	it("rejects a command step that declared away execution authority", async () => {
+		const workers = new ScriptedWorkers({});
+		const plan = workflowPlanOf([
+			commandStep("verify", [], {
+				capabilities: ["read-repository"],
+				retry: { maxAttempts: 3 },
+			}),
+		]);
+		const harness = await createWorkflowHarness(plan, handlersFor(workers));
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("failed");
+		expect(finished.steps.verify?.error).toContain(
+			"without the execute-commands capability",
+		);
+		expect(finished.attempts).toHaveLength(1);
+	});
+
+	it("fails a timed-out command even when SIGTERM produces exit code zero", async () => {
+		const workers = new ScriptedWorkers({});
+		const plan = workflowPlanOf([
+			{
+				...commandStep("verify", []),
+				command: {
+					command: process.execPath,
+					args: [
+						"-e",
+						"process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000)",
+					],
+				},
+			},
+		]);
+		const harness = await createWorkflowHarness(
+			plan,
+			handlersFor(workers, [], 200),
+		);
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("failed");
+		expect(finished.steps.verify?.error).toContain("exited with a timeout");
 	});
 
 	it("rejects an output no handler knows how to produce", async () => {

@@ -1,7 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { finalizeWorkflowRun } from "../src/engine/finalization.js";
+import {
+	finalizeWorkflowRun,
+	integratedCommitEvidence,
+} from "../src/engine/finalization.js";
 import type {
 	StepHandler,
 	StepHandlerContext,
@@ -129,6 +132,104 @@ describe("workflow finalization", () => {
 
 		expect(result.evidence.passed).toBe(false);
 		expect(result.mergeReady).toBeUndefined();
+	});
+
+	it("orders commit evidence by integration order after a retry", async () => {
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"]),
+			changeStep("ui", [], ["src/ui/"]),
+		]);
+		const harness = await createWorkflowHarness(plan, [
+			handlerOf("change", async (context) => ({
+				status: "succeeded",
+				commit: await writeAndCommit(context),
+			})),
+		]);
+		const finished = await harness.engine.run(harness.initial.id);
+		const apiAttempt = finished.attempts.find(
+			(attempt) => attempt.stepId === "api",
+		);
+		const uiAttempt = finished.attempts.find(
+			(attempt) => attempt.stepId === "ui",
+		);
+		if (!apiAttempt || !uiAttempt) {
+			throw new Error("missing workflow attempts");
+		}
+		const apiRecord = finished.steps.api;
+		if (!apiRecord) {
+			throw new Error("missing api step");
+		}
+		const { commit: _commit, ...failedApiAttempt } = apiAttempt;
+		const retried = {
+			...finished,
+			steps: {
+				...finished.steps,
+				api: {
+					...apiRecord,
+					attemptIds: ["api-failed", apiAttempt.id],
+				},
+			},
+			attempts: [
+				{
+					...failedApiAttempt,
+					id: "api-failed",
+					state: "failed" as const,
+				},
+				uiAttempt,
+				apiAttempt,
+			],
+		};
+
+		expect(integratedCommitEvidence(retried).map((entry) => entry.id)).toEqual([
+			"api",
+			"ui",
+		]);
+	});
+
+	it("rejects finalization unless the run is completed and fully integrated", async () => {
+		const plan = workflowPlanOf([changeStep("api", [], ["src/api/"])]);
+		const harness = await createWorkflowHarness(plan, [
+			handlerOf("change", async (context) => ({
+				status: "succeeded",
+				commit: await writeAndCommit(context),
+			})),
+		]);
+		const finished = await harness.engine.run(harness.initial.id);
+		const git = new GitCli();
+		const dependencies = {
+			finalValidator: new LocalFinalValidator(git),
+			worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+			git,
+			securityPolicy: readSecurityPolicy({}),
+		};
+		const repository = await git.inspect(harness.repositoryRoot);
+		const apiRecord = finished.steps.api;
+		if (!apiRecord) {
+			throw new Error("missing api step");
+		}
+		const { integratedCommit: _integratedCommit, ...unintegratedApiRecord } =
+			apiRecord;
+
+		await expect(
+			finalizeWorkflowRun(dependencies, {
+				state: { ...finished, state: "failed" },
+				repository,
+			}),
+		).rejects.toThrow(/expected completed/);
+		await expect(
+			finalizeWorkflowRun(dependencies, {
+				state: {
+					...finished,
+					steps: {
+						...finished.steps,
+						api: {
+							...unintegratedApiRecord,
+						},
+					},
+				},
+				repository,
+			}),
+		).rejects.toThrow(/has not been integrated/);
 	});
 });
 

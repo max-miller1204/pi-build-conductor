@@ -1,5 +1,5 @@
 import type { StepArtifactReader } from "../domain/step-context.js";
-import { stepProfileName } from "../domain/steps.js";
+import { stepProfileName, topologicalStepIds } from "../domain/steps.js";
 import {
 	type FinalReviewSummary,
 	type FinalValidationEvidence,
@@ -17,6 +17,7 @@ import {
 } from "../validation/final-validator.js";
 import type { ReviewFindingsPayload } from "./steps/review.js";
 import type { WorkflowRunState } from "./workflow-state.js";
+import { stepRequiresIntegration } from "./workspaces.js";
 
 export interface WorkflowFinalizationDependencies {
 	finalValidator: FinalValidator;
@@ -49,18 +50,30 @@ export function integratedCommitEvidence(
 	state: WorkflowRunState,
 ): IntegratedCommitEvidence[] {
 	const evidence: IntegratedCommitEvidence[] = [];
-	for (const attempt of state.attempts) {
-		const record = state.steps[attempt.stepId];
+	for (const stepId of topologicalStepIds(state.plan)) {
+		const record = state.steps[stepId];
 		if (
-			attempt.state !== "succeeded" ||
-			!attempt.commit ||
-			!record?.integratedCommit
+			!record ||
+			!stepRequiresIntegration(state.capabilityProfiles, record.definition) ||
+			!record.integratedCommit
 		) {
 			continue;
 		}
+		const attemptIds = new Set(record.attemptIds);
+		const attempt = state.attempts.findLast(
+			(candidate) =>
+				attemptIds.has(candidate.id) &&
+				candidate.state === "succeeded" &&
+				typeof candidate.commit === "string",
+		);
+		if (!attempt?.commit) {
+			throw new Error(
+				`Integrated step ${stepId} has no successful source commit attempt`,
+			);
+		}
 		evidence.push({
 			kind: stepProfileName(record.definition) === "repair" ? "repair" : "task",
-			id: attempt.stepId,
+			id: stepId,
 			sourceCommit: attempt.commit,
 			integratedCommit: record.integratedCommit,
 		});
@@ -98,6 +111,30 @@ async function reviewOutcomes(
 	return { summaries, risks };
 }
 
+function assertFinalizableState(state: WorkflowRunState): void {
+	if (state.state !== "completed") {
+		throw new Error(
+			`Cannot finalize workflow run ${state.id} in ${state.state} state; expected completed`,
+		);
+	}
+	for (const stepId of topologicalStepIds(state.plan)) {
+		const record = state.steps[stepId];
+		if (!record || record.state !== "succeeded") {
+			throw new Error(
+				`Cannot finalize workflow run ${state.id}; step ${stepId} has not succeeded`,
+			);
+		}
+		if (
+			stepRequiresIntegration(state.capabilityProfiles, record.definition) &&
+			!record.integratedCommit
+		) {
+			throw new Error(
+				`Cannot finalize workflow run ${state.id}; mutating step ${stepId} has not been integrated`,
+			);
+		}
+	}
+}
+
 /**
  * Runs the plan's final validation against the exact integrated result and,
  * when it passes, assembles the merge-ready evidence a reviewer needs: the
@@ -109,6 +146,7 @@ export async function finalizeWorkflowRun(
 ): Promise<WorkflowFinalizationResult> {
 	const now = dependencies.now ?? (() => new Date().toISOString());
 	const { state } = input;
+	assertFinalizableState(state);
 	const attemptNumber = input.attemptNumber ?? 1;
 	const worktreePath =
 		await dependencies.worktrees.prepareFinalValidationWorktree(

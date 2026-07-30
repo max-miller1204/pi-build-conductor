@@ -78,6 +78,7 @@ export class PlanningStepHandler implements StepHandler {
 				repositoryRoot: context.workspace.path,
 				requestText: this.options.requestText,
 				profile,
+				repositoryPaths: listing.files.map((file) => file.path),
 				signal: context.signal,
 				identity: {
 					runId: context.runId,

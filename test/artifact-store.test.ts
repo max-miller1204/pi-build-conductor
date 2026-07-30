@@ -330,4 +330,49 @@ describe("ArtifactStore", () => {
 		}
 		expect(await store.list("run-1")).toHaveLength(1);
 	});
+
+	it("serializes concurrent writes before enforcing per-run count limits", async () => {
+		const store = await temporaryStore({ maxRunArtifacts: 1 });
+		const results = await Promise.allSettled([
+			store.write(reportRequest()),
+			store.write(reportRequest({ output: "other" })),
+		]);
+
+		expect(
+			results.filter((result) => result.status === "fulfilled"),
+		).toHaveLength(1);
+		expect(
+			results.some(
+				(result) =>
+					result.status === "rejected" &&
+					result.reason instanceof ArtifactStoreError &&
+					result.reason.code === "artifact_count_exceeded",
+			),
+		).toBe(true);
+		expect(await store.list("run-1")).toHaveLength(1);
+	});
+
+	it("serializes concurrent writes before enforcing per-run byte limits", async () => {
+		const store = await temporaryStore({
+			maxRunArtifacts: 2,
+			maxRunBytes: 700,
+		});
+		const results = await Promise.allSettled([
+			store.write(reportRequest()),
+			store.write(reportRequest({ output: "other" })),
+		]);
+
+		expect(
+			results.filter((result) => result.status === "fulfilled"),
+		).toHaveLength(1);
+		expect(
+			results.some(
+				(result) =>
+					result.status === "rejected" &&
+					result.reason instanceof ArtifactStoreError &&
+					result.reason.code === "artifact_bytes_exceeded",
+			),
+		).toBe(true);
+		expect(await store.list("run-1")).toHaveLength(1);
+	});
 });

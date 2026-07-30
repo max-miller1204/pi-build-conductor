@@ -69,6 +69,12 @@ export class CommandStepHandler implements StepHandler {
 				retryable: false,
 			};
 		}
+		if (!context.capabilityProfile.capabilities.includes("execute-commands")) {
+			const error = new CapabilityViolationError(
+				`Command step ${step.id} cannot execute without the execute-commands capability (approved: ${context.capabilityProfile.capabilities.join(", ") || "none"})`,
+			);
+			return { status: "failed", error: error.message, retryable: false };
+		}
 		const startedAt = this.now();
 		const result = await executeValidationCommand(
 			step.command,
@@ -86,7 +92,7 @@ export class CommandStepHandler implements StepHandler {
 			exitCode: result.exitCode,
 			stdoutTail: result.stdoutTail,
 			stderrTail: result.stderrTail,
-			passed: result.exitCode === 0,
+			passed: result.exitCode === 0 && !result.timedOut && !result.aborted,
 			executionBoundary: result.executionBoundary,
 		};
 		try {

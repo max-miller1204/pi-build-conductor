@@ -140,6 +140,27 @@ export class StepExecutor {
 		}
 		let outcome: StepOutcome;
 		try {
+			const aborted = new Promise<StepOutcome>((resolve) => {
+				const settle = () => {
+					resolve(
+						timedOut
+							? {
+									status: "failed",
+									error: `Step ${prepared.step.id} timed out after ${timeoutMs}ms`,
+								}
+							: {
+									status: "cancelled",
+									error: errorMessage(
+										controller.signal.reason ?? "Step execution cancelled",
+									),
+								},
+					);
+				};
+				controller.signal.addEventListener("abort", settle, { once: true });
+				if (controller.signal.aborted) {
+					settle();
+				}
+			});
 			const context: StepHandlerContext = {
 				runId: prepared.runId,
 				repository: prepared.repository,
@@ -151,7 +172,14 @@ export class StepExecutor {
 				signal: controller.signal,
 				now: this.now,
 			};
-			outcome = await prepared.handler.execute(context);
+			const execution = prepared.handler
+				.execute(context)
+				.catch((error) =>
+					request.signal?.aborted
+						? { status: "cancelled" as const, error: errorMessage(error) }
+						: { status: "failed" as const, error: errorMessage(error) },
+				);
+			outcome = await Promise.race([aborted, execution]);
 		} catch (error) {
 			outcome = request.signal?.aborted
 				? { status: "cancelled", error: errorMessage(error) }

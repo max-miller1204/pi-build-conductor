@@ -528,6 +528,76 @@ describe("step executor", () => {
 		});
 	});
 
+	it("settles a timeout when the handler ignores cancellation", async () => {
+		const provider = new RecordingProvider("read-only");
+		const executor = executorWith(provider, [
+			handlerOf(
+				"investigation",
+				() => new Promise<StepOutcome>(() => undefined),
+			),
+		]);
+		const preparedStep = await prepared(
+			executor,
+			investigation({ timeoutMs: 20 }),
+		);
+
+		const result = await Promise.race([
+			executor.execute({
+				prepared: preparedStep,
+				attempt: attemptOf(preparedStep.workspace),
+				execution,
+			}),
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(
+					() => reject(new Error("executor did not settle after timeout")),
+					250,
+				);
+			}),
+		]);
+
+		expect(result.timedOut).toBe(true);
+		expect(result.outcome).toEqual({
+			status: "failed",
+			error: "Step survey timed out after 20ms",
+		});
+		expect(result.workspaceRetained).toBe(true);
+	});
+
+	it("settles run cancellation when the handler ignores cancellation", async () => {
+		const provider = new RecordingProvider("read-only");
+		const controller = new AbortController();
+		const executor = executorWith(provider, [
+			handlerOf(
+				"investigation",
+				() => new Promise<StepOutcome>(() => undefined),
+			),
+		]);
+		const preparedStep = await prepared(executor, investigation());
+		setTimeout(() => controller.abort(new Error("run cancelled")), 20);
+
+		const result = await Promise.race([
+			executor.execute({
+				prepared: preparedStep,
+				attempt: attemptOf(preparedStep.workspace),
+				execution,
+				signal: controller.signal,
+			}),
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(
+					() => reject(new Error("executor did not settle after cancellation")),
+					250,
+				);
+			}),
+		]);
+
+		expect(result.timedOut).toBe(false);
+		expect(result.outcome).toEqual({
+			status: "cancelled",
+			error: "run cancelled",
+		});
+		expect(result.workspaceRetained).toBe(true);
+	});
+
 	it("classifies an aborted run as cancellation rather than failure", async () => {
 		const provider = new RecordingProvider("read-only");
 		const controller = new AbortController();

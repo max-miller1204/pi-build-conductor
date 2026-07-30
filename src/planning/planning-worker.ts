@@ -68,7 +68,7 @@ function validateObservations(
 			`observations exceed the limit of ${MAX_PLANNING_OBSERVATIONS}`,
 		);
 	}
-	return value.map((entry, index) => {
+	const observations = value.map((entry, index) => {
 		if (!isRecord(entry)) {
 			throw parseError(`observations[${index}] must be an object`);
 		}
@@ -84,6 +84,7 @@ function validateObservations(
 		}
 		if (
 			!Array.isArray(paths) ||
+			paths.length === 0 ||
 			paths.length > MAX_OBSERVATION_PATHS ||
 			paths.some(
 				(path) =>
@@ -93,7 +94,7 @@ function validateObservations(
 			)
 		) {
 			throw parseError(
-				`observations[${index}].paths must list at most ${MAX_OBSERVATION_PATHS} repository-relative paths`,
+				`observations[${index}].paths must list 1 to ${MAX_OBSERVATION_PATHS} repository-relative paths`,
 			);
 		}
 		if (taskId !== undefined) {
@@ -109,6 +110,12 @@ function validateObservations(
 			paths: paths as string[],
 		};
 	});
+	for (const taskId of taskIds) {
+		if (!observations.some((observation) => observation.taskId === taskId)) {
+			throw parseError(`task ${taskId} has no repository observation`);
+		}
+	}
+	return observations;
 }
 
 /**
@@ -257,6 +264,7 @@ export interface PlanningRequest {
 	repositoryRoot: string;
 	requestText: string;
 	profile: RepositoryProfile;
+	repositoryPaths: readonly string[];
 	signal?: AbortSignal;
 	/** Real run identifiers when planning executes as a workflow step. */
 	identity?: { runId: string; stepId: string; attemptId: string };
@@ -304,7 +312,18 @@ export class PlanningWorker {
 		if (outcome.status !== "succeeded") {
 			throw new Error(`Planning worker ${outcome.status}: ${outcome.error}`);
 		}
-		return parsePlanningDocument(outcome.output ?? "");
+		const document = parsePlanningDocument(outcome.output ?? "");
+		const repositoryPaths = new Set(request.repositoryPaths);
+		for (const [index, observation] of document.observations.entries()) {
+			for (const path of observation.paths) {
+				if (!repositoryPaths.has(path)) {
+					throw parseError(
+						`observations[${index}] cites ${JSON.stringify(path)}, which does not exist at commit ${request.profile.commit}`,
+					);
+				}
+			}
+		}
+		return document;
 	}
 }
 

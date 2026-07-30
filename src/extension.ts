@@ -1270,6 +1270,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 						repositoryRoot: repository.root,
 						requestText,
 						profile,
+						repositoryPaths: listing.files.map((file) => file.path),
 					});
 					plan = document.plan;
 					planningEvidence = renderPlanningObservations(document.observations);

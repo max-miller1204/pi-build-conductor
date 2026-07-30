@@ -9,6 +9,7 @@ import {
 	stat,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { lock } from "proper-lockfile";
 import {
 	ARTIFACT_KIND_MEDIA_TYPES,
 	ARTIFACT_RECORD_VERSION,
@@ -31,6 +32,10 @@ const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 const DEFAULT_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_RUN_ARTIFACTS = 500;
 const DEFAULT_MAX_RUN_BYTES = 64 * 1024 * 1024;
+const LOCK_STALE_MS = 5_000;
+const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
+const LOCK_RETRY_MS = 20;
+const LOCK_UPDATE_MS = 2_000;
 
 export type ArtifactStoreErrorCode =
 	| "invalid_artifact"
@@ -324,6 +329,31 @@ export class ArtifactStore {
 		}
 	}
 
+	private async withRunWriteLock<T>(
+		runId: string,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		const runDirectory = this.runDirectory(runId);
+		await mkdir(runDirectory, { recursive: true, mode: 0o700 });
+		const release = await lock(runDirectory, {
+			realpath: false,
+			stale: LOCK_STALE_MS,
+			update: LOCK_UPDATE_MS,
+			retries: {
+				retries: Math.ceil(LOCK_ACQUIRE_TIMEOUT_MS / LOCK_RETRY_MS),
+				factor: 1,
+				minTimeout: LOCK_RETRY_MS,
+				maxTimeout: LOCK_RETRY_MS,
+				randomize: false,
+			},
+		});
+		try {
+			return await operation();
+		} finally {
+			await release();
+		}
+	}
+
 	/**
 	 * Persists one immutable artifact. Rewriting an identity with identical
 	 * content returns the stored record; rewriting it with different content
@@ -332,20 +362,22 @@ export class ArtifactStore {
 	async write(request: ArtifactWriteRequest): Promise<ArtifactRecord> {
 		const record = this.buildRecord(request);
 		const serialized = `${JSON.stringify(record, null, 2)}\n`;
-		const existing = await this.readExisting(record.runId, record.id);
-		if (existing) {
-			return this.reconcileExisting(existing, record);
-		}
-		await this.enforceRunLimits(record, serialized);
-		if ((await this.publishExclusive(record, serialized)) === "exists") {
-			const published = await this.readRecordFile(
-				record.runId,
-				`${record.id}.json`,
-			);
-			return this.reconcileExisting(published, record);
-		}
-		await this.applyRetention(record);
-		return record;
+		return this.withRunWriteLock(record.runId, async () => {
+			const existing = await this.readExisting(record.runId, record.id);
+			if (existing) {
+				return this.reconcileExisting(existing, record);
+			}
+			await this.enforceRunLimits(record, serialized);
+			if ((await this.publishExclusive(record, serialized)) === "exists") {
+				const published = await this.readRecordFile(
+					record.runId,
+					`${record.id}.json`,
+				);
+				return this.reconcileExisting(published, record);
+			}
+			await this.applyRetention(record);
+			return record;
+		});
 	}
 
 	private async readExisting(
