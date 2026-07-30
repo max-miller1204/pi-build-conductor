@@ -44,6 +44,7 @@
 		"registry": "https://registry.npmjs.org/"
 	},
 	"scripts": {
+		"audit:high": "node scripts/audit-dependencies.mjs",
 		"check": "npm run format:check && npm run docs:check && npm run version:check && npm run typecheck && npm test",
 		"docs:check": "markdownlint-cli2 README.md SECURITY.md RELEASING.md",
 		"format": "biome check --write .",
@@ -52,7 +53,7 @@
 		"package:smoke": "node scripts/smoke-package.mjs",
 		"pack:check": "npm pack --dry-run",
 		"prepublishOnly": "npm run release:check",
-		"release:check": "npm run check && npm run package:smoke && npm audit --audit-level=high",
+		"release:check": "npm run check && npm run package:smoke && npm run audit:high",
 		"test": "vitest run",
 		"test:compatibility": "node scripts/run-server-compatibility.mjs",
 		"test:crash-fixture": "vite-node test/fixtures/crash-after-task-commit.ts",
