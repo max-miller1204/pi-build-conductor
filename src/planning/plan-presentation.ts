@@ -1,10 +1,27 @@
 import { analyzeTaskPlan, type PlanValidationIssue } from "../domain/dag.js";
+import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
+import {
+	type StepDefinition,
+	stepCapabilities,
+	stepPathLocks,
+	stepResourceLocks,
+	stepRetryPolicy,
+	type WorkflowPlan,
+} from "../domain/steps.js";
 import type {
-	BuildRun,
+	OrchestrationRun,
 	PlanRevision,
+	RunSecurityPolicy,
 	TaskPlan,
 	ValidationCommand,
 } from "../domain/types.js";
+import {
+	capabilityProfileFor,
+	describeCapabilityProfile,
+	EXTERNAL_EFFECT_BOUNDARY,
+	narrowCapabilityProfile,
+	stepCapabilityProfile,
+} from "../security/capabilities.js";
 import { securityPolicyLines } from "../security/policy.js";
 
 const SIMPLE_ARGUMENT = /^[A-Za-z0-9_./:@%+=,-]+$/;
@@ -82,7 +99,64 @@ export function diffPlanRevisions(
 	].join("\n");
 }
 
-export function renderApprovalSummary(run: BuildRun): string {
+function stepPaths(step: StepDefinition): string[] {
+	return step.kind === "change" ? step.allowedPaths : stepPathLocks(step);
+}
+
+function stepChecks(step: StepDefinition): ValidationCommand[] {
+	switch (step.kind) {
+		case "change":
+			return step.validationCommands;
+		case "command":
+			return [step.command];
+		default:
+			return [];
+	}
+}
+
+/**
+ * Renders the exact per-step authority a user approves: capabilities from
+ * the frozen profile snapshot, approved paths, locks, and the
+ * external-effect boundary.
+ */
+export function renderStepAuthorityLines(
+	plan: WorkflowPlan,
+	policy: RunSecurityPolicy,
+): string[] {
+	const profiles = policy.workers.capabilityProfiles;
+	const lines = plan.steps.flatMap((step) => {
+		const paths = stepPaths(step);
+		const profile = profiles
+			? stepCapabilityProfile(profiles, step)
+			: narrowCapabilityProfile(
+					capabilityProfileFor(stepCapabilities(step)),
+					stepCapabilities(step),
+				);
+		const authority = profiles
+			? describeCapabilityProfile(profile)
+			: `${describeCapabilityProfile(profile)} (derived; this legacy policy predates frozen profiles)`;
+		const resourceLocks = stepResourceLocks(step);
+		const retry = stepRetryPolicy(step);
+		const limits = [
+			...(step.timeoutMs !== undefined ? [`timeout ${step.timeoutMs}ms`] : []),
+			...(retry.maxAttempts > 1 ? [`retry up to ${retry.maxAttempts}`] : []),
+			...(resourceLocks.length > 0
+				? [`resource locks: ${resourceLocks.join(", ")}`]
+				: []),
+		];
+		return [
+			`- ${step.id} (${step.title}) paths: ${paths.join(", ") || "none"}`,
+			`  authority: ${step.kind} step; ${authority}`,
+			...(limits.length > 0 ? [`  limits: ${limits.join(" | ")}`] : []),
+			...stepChecks(step).map(
+				(command) => `  check: ${formatCommand(command)}`,
+			),
+		];
+	});
+	return [...lines, EXTERNAL_EFFECT_BOUNDARY];
+}
+
+export function renderApprovalSummary(run: OrchestrationRun): string {
 	const analysis = analyzeTaskPlan(run.plan);
 	const pathCount = new Set(run.plan.tasks.flatMap((task) => task.allowedPaths))
 		.size;
@@ -94,12 +168,10 @@ export function renderApprovalSummary(run: BuildRun): string {
 		.slice(0, 6)
 		.map((layer, index) => `${index + 1}: ${layer.join(", ")}`)
 		.join(" | ");
-	const taskAuthority = run.plan.tasks.flatMap((task) => [
-		`- ${task.id} (${task.title}) paths: ${task.allowedPaths.join(", ")}`,
-		...task.validationCommands.map(
-			(command) => `  check: ${formatCommand(command)}`,
-		),
-	]);
+	const stepAuthority = renderStepAuthorityLines(
+		readWorkflowPlanDocument(run.plan),
+		run.securityPolicy,
+	);
 	const finalCommands = run.plan.finalValidationCommands.map(
 		(command) => `- ${formatCommand(command)}`,
 	);
@@ -109,8 +181,8 @@ export function renderApprovalSummary(run: BuildRun): string {
 		`DAG layers: ${layerPreview}`,
 		`Worker limit: ${run.maxConcurrentWorkers} | Approved paths: ${pathCount} | Focused checks: ${focusedCommandCount}`,
 		`Integration branch: ${run.integrationBranch}`,
-		"Task authority:",
-		...taskAuthority,
+		"Step authority:",
+		...stepAuthority,
 		"Final validation:",
 		...finalCommands,
 		"Security boundary:",
@@ -123,6 +195,6 @@ export function renderApprovalSummary(run: BuildRun): string {
 			: []),
 		"Prompt instructions and post-run diff checks cannot prevent host or external side effects.",
 		"Merge-ready evidence proves recorded Git and validation state, not the absence of external side effects.",
-		"Only conductor metadata has been persisted. No Git refs, worktrees, workers, or validation commands have started.",
+		"Only orchestrator metadata has been persisted. No Git refs, worktrees, workers, or validation commands have started.",
 	].join("\n");
 }

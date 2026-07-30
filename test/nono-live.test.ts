@@ -66,7 +66,7 @@ describe.runIf(Boolean(nonoPath))("live Nono validation sandbox", () => {
 		});
 	});
 
-	it("uses the same fixed wrapper shape documented by the conductor", () => {
+	it("uses the same fixed wrapper shape documented by the orchestrator", () => {
 		if (!nonoPath) {
 			throw new Error("PI_BUILD_LIVE_NONO_PATH is required");
 		}

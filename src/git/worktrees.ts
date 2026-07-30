@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import * as nodePath from "node:path";
-import type { BuildRun } from "../domain/types.js";
+import type { OrchestrationRun } from "../domain/types.js";
 import {
 	type GitClient,
 	integrationScratchDirectoryPrefix,
@@ -78,6 +78,8 @@ export interface WorktreeManager {
 	prepareTaskWorktree(
 		input: PrepareTaskWorktreeInput,
 	): Promise<WorktreeAllocation>;
+	/** A detached, branchless worktree for a step that never commits. */
+	prepareReadOnlyWorktree(input: PrepareTaskWorktreeInput): Promise<string>;
 	finalValidationWorktreePath(runId: string, attemptNumber: number): string;
 	prepareFinalValidationWorktree(
 		repository: RepositoryInfo,
@@ -86,8 +88,12 @@ export interface WorktreeManager {
 		commit: string,
 	): Promise<string>;
 	removeTaskWorktree(repositoryRoot: string, path: string): Promise<void>;
-	reconcileRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
-	pruneRunResources?(run: BuildRun): Promise<ResourceReconciliationReport>;
+	reconcileRunResources?(
+		run: OrchestrationRun,
+	): Promise<ResourceReconciliationReport>;
+	pruneRunResources?(
+		run: OrchestrationRun,
+	): Promise<ResourceReconciliationReport>;
 }
 
 export class GitWorktreeManager implements WorktreeManager {
@@ -96,11 +102,26 @@ export class GitWorktreeManager implements WorktreeManager {
 	constructor(
 		private readonly git: GitClient,
 		private readonly worktreeRoot: string,
+		private readonly legacyWorktreeRoot?: string,
 	) {}
 
 	private canonicalWorktreeRoot(): Promise<string> {
 		this.canonicalRoot ??= canonicalizeExistingPrefix(this.worktreeRoot);
 		return this.canonicalRoot;
+	}
+
+	// New worktrees are always created below worktreeRoot; the legacy root only
+	// keeps recovery and cleanup working for runs started before the storage
+	// migration, because moving an existing Git worktree would break its
+	// metadata back-pointers.
+	private async canonicalRunRoots(runId: string): Promise<string[]> {
+		const roots = [await this.canonicalPath(join(this.worktreeRoot, runId))];
+		if (this.legacyWorktreeRoot) {
+			roots.push(
+				await canonicalizeExistingPrefix(join(this.legacyWorktreeRoot, runId)),
+			);
+		}
+		return roots;
 	}
 
 	private async canonicalPath(path: string): Promise<string> {
@@ -122,7 +143,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const freshRepository = await this.git.inspect(repository.root);
 		if (!freshRepository.isClean) {
 			throw new Error(
-				"The current worktree must be clean before starting a build run",
+				"The current worktree must be clean before starting an orchestration run",
 			);
 		}
 		if (
@@ -223,6 +244,36 @@ export class GitWorktreeManager implements WorktreeManager {
 		return { branch, path };
 	}
 
+	async prepareReadOnlyWorktree(
+		input: PrepareTaskWorktreeInput,
+	): Promise<string> {
+		const path = join(
+			this.worktreeRoot,
+			input.runId,
+			input.taskId,
+			`attempt-${input.attemptNumber}`,
+		);
+		const expectedHead = this.git.resolveCommit
+			? await this.git.resolveCommit(input.repository.root, input.startPoint)
+			: input.startPoint;
+		try {
+			await lstat(path);
+			await this.git.verifyDetachedWorktree(path, expectedHead);
+			return path;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+		}
+		await mkdir(dirname(path), { recursive: true });
+		await this.git.addDetachedWorktree(
+			input.repository.root,
+			path,
+			expectedHead,
+		);
+		return path;
+	}
+
 	finalValidationWorktreePath(runId: string, attemptNumber: number): string {
 		return join(
 			this.worktreeRoot,
@@ -257,11 +308,14 @@ export class GitWorktreeManager implements WorktreeManager {
 		repositoryRoot: string,
 		path: string,
 	): Promise<void> {
-		const root = resolve(this.worktreeRoot);
+		const roots = [
+			resolve(this.worktreeRoot),
+			...(this.legacyWorktreeRoot ? [resolve(this.legacyWorktreeRoot)] : []),
+		];
 		const target = resolve(path);
-		if (!isPathInside(root, target)) {
+		if (!roots.some((root) => isPathInside(root, target))) {
 			throw new Error(
-				`Refusing to remove worktree outside conductor root: ${path}`,
+				`Refusing to remove worktree outside orchestrator root: ${path}`,
 			);
 		}
 		try {
@@ -288,7 +342,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	}
 
 	async pruneRunResources(
-		run: BuildRun,
+		run: OrchestrationRun,
 	): Promise<ResourceReconciliationReport> {
 		if (!["completed", "failed", "cancelled"].includes(run.state)) {
 			throw new Error(`Cannot prune resources for non-terminal run ${run.id}`);
@@ -308,7 +362,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 
 		const orphanReport = await this.reconcileRunResources(run);
-		const runRoot = await this.canonicalPath(join(this.worktreeRoot, run.id));
+		const runRoots = await this.canonicalRunRoots(run.id);
 		const prefix = `conductor/${run.id}/`;
 		const expectedWorktreeHeads = new Map<string, string>();
 		const deletableBranchHeads = new Map<string, string>();
@@ -349,7 +403,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const retainedUnexpectedWorktrees: string[] = [];
 		for (const worktree of await this.git.listWorktrees(run.repositoryRoot)) {
 			const target = resolve(worktree.path);
-			if (!isPathInside(runRoot, target)) {
+			if (!runRoots.some((root) => isPathInside(root, target))) {
 				continue;
 			}
 			const expectedHead = expectedWorktreeHeads.get(target);
@@ -444,7 +498,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	}
 
 	async reconcileRunResources(
-		run: BuildRun,
+		run: OrchestrationRun,
 	): Promise<ResourceReconciliationReport> {
 		if (
 			!this.git.listWorktrees ||
@@ -459,7 +513,7 @@ export class GitWorktreeManager implements WorktreeManager {
 				retainedUnexpectedBranches: [],
 			};
 		}
-		const runRoot = await this.canonicalPath(join(this.worktreeRoot, run.id));
+		const runRoots = await this.canonicalRunRoots(run.id);
 		const prefix = `conductor/${run.id}/`;
 		const retainedPaths = new Set<string>();
 		const protectedBranches = new Set<string>([run.integrationBranch]);
@@ -521,10 +575,11 @@ export class GitWorktreeManager implements WorktreeManager {
 				removedWorktrees.push(target);
 				continue;
 			}
-			const fromRunRoot = nodePath.relative(runRoot, target);
-			if (!isPathInside(runRoot, target) || retainedPaths.has(target)) {
+			const runRoot = runRoots.find((root) => isPathInside(root, target));
+			if (!runRoot || retainedPaths.has(target)) {
 				continue;
 			}
+			const fromRunRoot = nodePath.relative(runRoot, target);
 			const relativeParts = fromRunRoot.split(/[\\/]/);
 			const isDetachedFinalValidation =
 				worktree.branch === undefined &&

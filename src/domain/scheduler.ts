@@ -1,7 +1,7 @@
 import { topologicalTaskIds } from "./dag.js";
 import {
-	type BuildRun,
 	isActiveAttemptState,
+	type OrchestrationRun,
 	type RunTask,
 	type TaskState,
 } from "./types.js";
@@ -35,7 +35,7 @@ function nextState(task: RunTask, tasks: Record<string, RunTask>): TaskState {
 	return "planned";
 }
 
-export function reconcileTaskStates(run: BuildRun): BuildRun {
+export function reconcileTaskStates(run: OrchestrationRun): OrchestrationRun {
 	const tasks = { ...run.tasks };
 	for (const id of topologicalTaskIds(run.plan)) {
 		const task = tasks[id];
@@ -46,7 +46,7 @@ export function reconcileTaskStates(run: BuildRun): BuildRun {
 	return { ...run, tasks };
 }
 
-export function getLaunchableTaskIds(run: BuildRun): string[] {
+export function getLaunchableTaskIds(run: OrchestrationRun): string[] {
 	if (run.state !== "running") {
 		return [];
 	}

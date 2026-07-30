@@ -6,6 +6,7 @@ import type {
 	ValidationCheckEvidence,
 } from "../domain/types.js";
 import type { GitClient, TaskWorktreeSnapshot } from "../git/git.js";
+import { assertCapabilityBoundary } from "../security/capabilities.js";
 import { executeValidationCommand } from "./command-runner.js";
 
 const DEFAULT_VALIDATION_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -98,6 +99,16 @@ export class LocalTaskValidator implements TaskValidator {
 				input.attempt.branch,
 				input.attempt.baseCommit,
 			);
+			// Frozen capability profiles are enforced on observed output, not
+			// only promised in prompts: without mutate-repository authority no
+			// repository change may survive validation.
+			const mutationProfile =
+				input.securityPolicy?.workers.capabilityProfiles?.change;
+			if (mutationProfile) {
+				assertCapabilityBoundary(mutationProfile, {
+					changedPaths: snapshot.changedFiles.map((file) => file.path),
+				});
+			}
 			const outOfScope = snapshot.changedFiles.flatMap((file) =>
 				[file.path, ...(file.previousPath ? [file.previousPath] : [])].filter(
 					(path) => !pathIsAllowed(path, input.task.allowedPaths),

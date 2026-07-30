@@ -1,7 +1,7 @@
 import type {
-	BuildRun,
 	FinalValidationAttempt,
 	FinalValidationEvidence,
+	OrchestrationRun,
 	RepairAttempt,
 	ReviewAttempt,
 	RunTask,
@@ -135,7 +135,7 @@ function renderEvidence(
 	];
 }
 
-export function taskStateSummary(run: BuildRun): string {
+export function taskStateSummary(run: OrchestrationRun): string {
 	const counts = Object.values(run.tasks).reduce((result, task) => {
 		result.set(task.state, (result.get(task.state) ?? 0) + 1);
 		return result;
@@ -158,7 +158,7 @@ export function taskStateSummary(run: BuildRun): string {
 	return summary || "none";
 }
 
-export function reviewStateSummary(run: BuildRun): string {
+export function reviewStateSummary(run: OrchestrationRun): string {
 	if (run.reviewRounds.length === 0) {
 		return "Reviews: not started";
 	}
@@ -193,9 +193,9 @@ export function reviewStateSummary(run: BuildRun): string {
 	return `Review round ${roundNumber}: ${succeeded}/${REVIEW_CATEGORIES.length} reports received, ${repairRequired} repair-required, ${unresolved} unresolved, ${deferred} deferred`;
 }
 
-function nextRunAction(run: BuildRun): string {
+function nextRunAction(run: OrchestrationRun): string {
 	if (run.state === "completed" || run.state === "cancelled") {
-		return `/build-prune ${safeInline(run.id)}`;
+		return `/orchestrate-prune ${safeInline(run.id)}`;
 	}
 	if (
 		run.state === "running" ||
@@ -204,16 +204,19 @@ function nextRunAction(run: BuildRun): string {
 	) {
 		const followable = latestFollowableWorkerAttempt(run);
 		if (followable) {
-			return `/build-follow ${safeInline(run.id)} ${safeInline(followable.attempt.id)}`;
+			return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(followable.attempt.id)}`;
 		}
-		return `/build-cancel ${safeInline(run.id)}`;
+		return `/orchestrate-cancel ${safeInline(run.id)}`;
 	}
-	return `/build-resume ${safeInline(run.id)}`;
+	return `/orchestrate-resume ${safeInline(run.id)}`;
 }
 
-export function renderRunList(runs: readonly BuildRun[]): string[] {
+export function renderRunList(runs: readonly OrchestrationRun[]): string[] {
 	if (runs.length === 0) {
-		return ["No build runs found.", "Next: /build <handoff-file>"];
+		return [
+			"No orchestration runs found.",
+			"Next: /orchestrate <request-file>",
+		];
 	}
 	const sorted = [...runs].sort(
 		(left, right) =>
@@ -221,12 +224,12 @@ export function renderRunList(runs: readonly BuildRun[]): string[] {
 			left.id.localeCompare(right.id),
 	);
 	return [
-		`Build runs (${runs.length}), newest first:`,
+		`Orchestration runs (${runs.length}), newest first:`,
 		...sorted.map(
 			(run) =>
 				`${display(run.updatedAt)} | ${safeInline(run.id)} | ${run.state} | ${taskStateSummary(run)} | ${safeInline(run.plan.title)}`,
 		),
-		"Next: /build-show <run-id>",
+		"Next: /orchestrate-show <run-id>",
 	];
 }
 
@@ -244,7 +247,7 @@ function renderRunTaskOverview(
 	return details;
 }
 
-function latestReviewRoundLines(run: BuildRun): string[] {
+function latestReviewRoundLines(run: OrchestrationRun): string[] {
 	const round = run.reviewRounds.at(-1);
 	if (!round) {
 		return [];
@@ -259,7 +262,10 @@ function latestReviewRoundLines(run: BuildRun): string[] {
 	return [line];
 }
 
-function blockedWorkerLines(run: BuildRun, attemptId?: string): string[] {
+function blockedWorkerLines(
+	run: OrchestrationRun,
+	attemptId?: string,
+): string[] {
 	const blockedWorkers = attemptId
 		? run.blockedWorkers.filter((blocked) => blocked.attemptId === attemptId)
 		: run.blockedWorkers;
@@ -277,7 +283,7 @@ function blockedWorkerLines(run: BuildRun, attemptId?: string): string[] {
 	];
 }
 
-function finalValidationLines(run: BuildRun): string[] {
+function finalValidationLines(run: OrchestrationRun): string[] {
 	const attempt = run.finalValidationAttempts.at(-1);
 	if (!attempt) {
 		return ["Final validation: not started"];
@@ -295,7 +301,7 @@ function finalValidationLines(run: BuildRun): string[] {
 	return [line];
 }
 
-export function renderRunOverview(run: BuildRun): string[] {
+export function renderRunOverview(run: OrchestrationRun): string[] {
 	return [
 		`Run ${safeInline(run.id)}: ${safeInline(run.plan.title)}`,
 		`State: ${run.state} | Snapshot revision: ${run.revision} | Schema: ${run.schemaVersion}`,
@@ -304,7 +310,7 @@ export function renderRunOverview(run: BuildRun): string[] {
 		`Base: ${display(run.baseBranch)} @ ${display(run.baseCommit)}`,
 		`Integration: ${display(run.integrationBranch)} @ ${display(run.integrationHead)}`,
 		`Plan revision: ${run.planRevision}${run.approvedPlanRevision ? ` (approved ${run.approvedPlanRevision})` : ""} | Worker limit: ${run.maxConcurrentWorkers}`,
-		`Handoff: ${display(run.handoff.sourcePath)}`,
+		`Request: ${display(run.request.sourcePath)}`,
 		"Security boundary:",
 		...securityPolicyLines(run.securityPolicy).map((line) => safeInline(line)),
 		`Tasks: ${taskStateSummary(run)}`,
@@ -329,7 +335,7 @@ function bulletLines(values: string[]): string[] {
 }
 
 function taskAttemptHistoryLines(
-	run: BuildRun,
+	run: OrchestrationRun,
 	attemptIds: string[],
 ): { lines: string[]; latest: TaskAttempt | undefined } {
 	if (attemptIds.length === 0) {
@@ -366,28 +372,31 @@ function taskAttemptHistoryLines(
 }
 
 function nextTaskAction(
-	run: BuildRun,
+	run: OrchestrationRun,
 	taskId: string,
 	task: RunTask,
 	latest: TaskAttempt | undefined,
 ): string {
 	if (latest && isFollowableWorkerAttempt({ kind: "task", attempt: latest })) {
-		return `/build-follow ${safeInline(run.id)} ${safeInline(latest.id)}`;
+		return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(latest.id)}`;
 	}
 	if (
 		task.state === "failed" ||
 		latest?.state === "failed" ||
 		latest?.state === "interrupted"
 	) {
-		return `/build-retry ${safeInline(run.id)} ${safeInline(taskId)}`;
+		return `/orchestrate-retry ${safeInline(run.id)} ${safeInline(taskId)}`;
 	}
 	if (latest) {
-		return `/build-attempt ${safeInline(run.id)} ${safeInline(latest.id)}`;
+		return `/orchestrate-show ${safeInline(run.id)} attempt ${safeInline(latest.id)}`;
 	}
-	return `/build-show ${safeInline(run.id)}`;
+	return `/orchestrate-show ${safeInline(run.id)}`;
 }
 
-export function renderTaskDetails(run: BuildRun, taskId: string): string[] {
+export function renderTaskDetails(
+	run: OrchestrationRun,
+	taskId: string,
+): string[] {
 	const task = run.tasks[taskId];
 	if (!task) {
 		throw new Error(`Unknown task ID: ${safeInline(taskId)}`);
@@ -413,7 +422,7 @@ export function renderTaskDetails(run: BuildRun, taskId: string): string[] {
 }
 
 export function resolveRunAttempt(
-	run: BuildRun,
+	run: OrchestrationRun,
 	attemptId: string,
 ): RunAttemptResolution {
 	const matches: RunAttemptResolution[] = [];
@@ -452,7 +461,7 @@ export function resolveRunAttempt(
 	return match;
 }
 
-function workerAttempts(run: BuildRun): WorkerAttemptResolution[] {
+function workerAttempts(run: OrchestrationRun): WorkerAttemptResolution[] {
 	return [
 		...run.attempts.map(
 			(attempt): WorkerAttemptResolution => ({ kind: "task", attempt }),
@@ -467,7 +476,7 @@ function workerAttempts(run: BuildRun): WorkerAttemptResolution[] {
 }
 
 export function latestWorkerAttempt(
-	run: BuildRun,
+	run: OrchestrationRun,
 ): WorkerAttemptResolution | undefined {
 	return workerAttempts(run).sort(
 		(left, right) =>
@@ -485,7 +494,7 @@ function isFollowableWorkerAttempt(resolution: RunAttemptResolution): boolean {
 }
 
 export function latestFollowableWorkerAttempt(
-	run: BuildRun,
+	run: OrchestrationRun,
 ): WorkerAttemptResolution | undefined {
 	return workerAttempts(run)
 		.filter(isFollowableWorkerAttempt)
@@ -497,7 +506,7 @@ export function latestFollowableWorkerAttempt(
 }
 
 export function renderAttemptDetails(
-	run: BuildRun,
+	run: OrchestrationRun,
 	attemptId: string,
 ): string[] {
 	const resolution = resolveRunAttempt(run, attemptId);
@@ -573,7 +582,7 @@ export function renderAttemptDetails(
 	}
 	let next: string;
 	if (isFollowableWorkerAttempt(resolution)) {
-		next = `/build-follow ${safeInline(run.id)} ${safeInline(attempt.id)}`;
+		next = `/orchestrate-follow ${safeInline(run.id)} ${safeInline(attempt.id)}`;
 	} else if (
 		attempt.state === "failed" ||
 		attempt.state === "interrupted" ||
@@ -581,10 +590,10 @@ export function renderAttemptDetails(
 	) {
 		next =
 			resolution.kind === "task"
-				? `/build-retry ${safeInline(run.id)} ${safeInline(resolution.attempt.taskId)}`
-				: `/build-resume ${safeInline(run.id)}`;
+				? `/orchestrate-retry ${safeInline(run.id)} ${safeInline(resolution.attempt.taskId)}`
+				: `/orchestrate-resume ${safeInline(run.id)}`;
 	} else {
-		next = `/build-show ${safeInline(run.id)}`;
+		next = `/orchestrate-show ${safeInline(run.id)}`;
 	}
 	return [
 		...common,

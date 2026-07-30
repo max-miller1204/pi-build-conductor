@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
 import type { TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { Orchestrator } from "../src/orchestrator.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
@@ -164,7 +164,7 @@ describe("sequential task integration", () => {
 				`dependent sees ${foundation}`,
 			);
 		});
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(join(parent, "runs")),
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -172,10 +172,10 @@ describe("sequential task integration", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Build in dependency order",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Build in dependency order",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -199,8 +199,9 @@ describe("sequential task integration", () => {
 			},
 		});
 
-		const completed = await (await conductor.approveAndLaunch(run, repository))
-			.completion;
+		const completed = await (
+			await orchestrator.approveAndLaunch(run, repository)
+		).completion;
 		const foundationAttempt = completed.attempts.find(
 			(attempt) => attempt.taskId === "foundation",
 		);
@@ -250,7 +251,7 @@ describe("sequential task integration", () => {
 			await writeFile(join(cwd, "src", `${taskId}.txt`), `${taskId}\n`);
 		});
 		const store = new RunStore(join(parent, "runs"));
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -258,10 +259,10 @@ describe("sequential task integration", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Integrate deterministically",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Integrate deterministically",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -275,7 +276,7 @@ describe("sequential task integration", () => {
 			},
 		});
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		releaseSecond();
 		await vi.waitFor(async () => {
 			expect((await store.load(run.id)).tasks.second?.state).toBe("succeeded");
@@ -300,7 +301,7 @@ describe("sequential task integration", () => {
 			.trim()
 			.split("\n");
 
-		expect(subjects).toEqual(["build(first): first", "build(second): second"]);
+		expect(subjects).toEqual(["step(first): first", "step(second): second"]);
 		expect(await git.inspect(repositoryRoot)).toMatchObject({
 			currentBranch: "main",
 			head: repository.head,
@@ -315,7 +316,7 @@ describe("sequential task integration", () => {
 		const workers = new WritingWorkers(async (taskId, cwd) => {
 			await writeFile(join(cwd, "shared.txt"), `${taskId}\n`, "utf8");
 		});
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store: new RunStore(join(parent, "runs")),
 			git,
 			worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
@@ -323,10 +324,10 @@ describe("sequential task integration", () => {
 			validator: new LocalTaskValidator(git),
 			finalValidator: new LocalFinalValidator(git),
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Create conflicting independent changes",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Create conflicting independent changes",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -340,8 +341,9 @@ describe("sequential task integration", () => {
 			},
 		});
 
-		const completed = await (await conductor.approveAndLaunch(run, repository))
-			.completion;
+		const completed = await (
+			await orchestrator.approveAndLaunch(run, repository)
+		).completion;
 
 		expect(completed.state).toBe("failed");
 		expect(completed.tasks.first?.integratedCommit).toBeTruthy();

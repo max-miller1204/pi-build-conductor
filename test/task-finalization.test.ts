@@ -12,10 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BuildConductor } from "../src/conductor.js";
 import type { TaskAttempt, TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { Orchestrator } from "../src/orchestrator.js";
+import { capabilityProfileFor } from "../src/security/capabilities.js";
+import { readSecurityPolicy } from "../src/security/policy.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
@@ -155,7 +157,7 @@ afterEach(async () => {
 	);
 });
 
-describe("task validation and conductor-owned commits", () => {
+describe("task validation and orchestrator-owned commits", () => {
 	it("validates an approved diff, creates one commit, and safely removes its worktree", async () => {
 		const fixture = await allocateTaskWorktree();
 		await mkdir(join(fixture.allocation.path, "src"), { recursive: true });
@@ -185,7 +187,7 @@ describe("task validation and conductor-owned commits", () => {
 		const commit = await fixture.git.commitTaskWork(
 			fixture.allocation.path,
 			validation.snapshot,
-			"build(implementation): Implementation",
+			"step(implementation): Implementation",
 		);
 
 		expect(validation.evidence).toMatchObject({
@@ -253,7 +255,7 @@ describe("task validation and conductor-owned commits", () => {
 			fixture.git.commitTaskWork(
 				fixture.allocation.path,
 				validation.snapshot,
-				"build(implementation): filtered content",
+				"step(implementation): filtered content",
 			),
 		).rejects.toThrow(/clean filter would alter validated bytes/);
 		expect((await fixture.git.inspect(fixture.repositoryRoot)).head).toBe(
@@ -290,7 +292,7 @@ describe("task validation and conductor-owned commits", () => {
 			fixture.git.commitTaskWork(
 				fixture.allocation.path,
 				validation.snapshot,
-				"build(implementation): literal pathspec",
+				"step(implementation): literal pathspec",
 			),
 		).resolves.toEqual(expect.any(String));
 		expect(await fixture.git.status(fixture.allocation.path)).toBe("");
@@ -312,6 +314,44 @@ describe("task validation and conductor-owned commits", () => {
 			head: fixture.repository.head,
 			isClean: false,
 		});
+	});
+
+	it("rejects repository mutations that exceed the frozen capability profile", async () => {
+		const fixture = await allocateTaskWorktree();
+		await mkdir(join(fixture.allocation.path, "src"), { recursive: true });
+		await writeFile(
+			join(fixture.allocation.path, "src", "result.txt"),
+			"done\n",
+			"utf8",
+		);
+		const validator = new LocalTaskValidator(fixture.git);
+		const securityPolicy = readSecurityPolicy({});
+		if (!securityPolicy.workers.capabilityProfiles) {
+			throw new Error("expected capability profiles");
+		}
+		securityPolicy.workers.capabilityProfiles.change = capabilityProfileFor([
+			"read-repository",
+			"execute-commands",
+		]);
+
+		await expect(
+			validator.validate({
+				task: task(),
+				attempt: fixture.attempt,
+				securityPolicy,
+			}),
+		).rejects.toThrow(
+			/mutations without the mutate-repository capability.*src\/result\.txt/,
+		);
+
+		// The same diff passes once the frozen profile grants mutation authority.
+		const permissive = readSecurityPolicy({});
+		const result = await validator.validate({
+			task: task(),
+			attempt: fixture.attempt,
+			securityPolicy: permissive,
+		});
+		expect(result.evidence.passed).toBe(true);
 	});
 
 	it("rejects worker-created commits and validation commands that mutate files", async () => {
@@ -397,7 +437,7 @@ describe("task validation and conductor-owned commits", () => {
 		const repository = await git.inspect(repositoryRoot);
 		const store = new RunStore(join(parent, "runs"));
 		const worktrees = new GitWorktreeManager(git, join(parent, "worktrees"));
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			git,
 			worktrees,
@@ -406,10 +446,10 @@ describe("task validation and conductor-owned commits", () => {
 			finalValidator: new LocalFinalValidator(git),
 			now: () => "2026-01-01T00:00:00.000Z",
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Implement the feature",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Implement the feature",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -420,7 +460,7 @@ describe("task validation and conductor-owned commits", () => {
 			},
 		});
 
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		const completed = await launch.completion;
 		const attempt = completed.attempts[0];
 		if (!attempt?.commit) {
@@ -456,7 +496,7 @@ describe("task validation and conductor-owned commits", () => {
 		const repository = await git.inspect(repositoryRoot);
 		const store = new RunStore(join(parent, "runs"));
 		const worktrees = new GitWorktreeManager(git, join(parent, "worktrees"));
-		const conductor = new BuildConductor({
+		const orchestrator = new Orchestrator({
 			store,
 			git,
 			worktrees,
@@ -472,10 +512,10 @@ describe("task validation and conductor-owned commits", () => {
 				},
 			],
 		});
-		const run = await conductor.createRun({
+		const run = await orchestrator.createRun({
 			repository,
-			handoffPath: join(repositoryRoot, "handoff.md"),
-			handoffText: "Implement the feature",
+			requestPath: join(repositoryRoot, "request.md"),
+			requestText: "Implement the feature",
 			plan: {
 				version: 3,
 				finalValidationCommands: [
@@ -485,12 +525,12 @@ describe("task validation and conductor-owned commits", () => {
 				tasks: [slowTask],
 			},
 		});
-		const launch = await conductor.approveAndLaunch(run, repository);
+		const launch = await orchestrator.approveAndLaunch(run, repository);
 		await vi.waitFor(async () => {
 			expect((await store.load(run.id)).attempts[0]?.state).toBe("validating");
 		});
 
-		const cancelled = await conductor.cancelRun(launch.run);
+		const cancelled = await orchestrator.cancelRun(launch.run);
 		const completed = await launch.completion;
 		const attempt = completed.attempts[0];
 
@@ -498,7 +538,7 @@ describe("task validation and conductor-owned commits", () => {
 		expect(completed.state).toBe("cancelled");
 		expect(attempt?.state).toBe("cancelled");
 		expect(attempt?.commit).toBeUndefined();
-		await expect(access(attempt?.worktreePath ?? "")).resolves.toBeUndefined();
+		await access(attempt?.worktreePath ?? "");
 		expect(await git.inspect(attempt?.worktreePath ?? "")).toMatchObject({
 			head: repository.head,
 			isClean: false,

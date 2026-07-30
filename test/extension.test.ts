@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -8,7 +8,7 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { createBuildRun } from "../src/domain/run.js";
+import { createOrchestrationRun } from "../src/domain/run.js";
 import extension from "../src/extension.js";
 import { GitCli } from "../src/git/git.js";
 import { RunStore } from "../src/storage/run-store.js";
@@ -40,13 +40,13 @@ async function repositoryFixture(): Promise<{
 	const store = new RunStore(
 		join(repository.commonDirectory, "pi-build-conductor", "runs"),
 	);
-	const run = createBuildRun({
+	const run = createOrchestrationRun({
 		id: "inspect-run",
 		repositoryRoot: repository.root,
 		baseBranch: repository.currentBranch,
 		baseCommit: repository.head,
 		integrationBranch: "conductor/inspect-run/integration",
-		handoff: { sourcePath: join(root, "handoff.md"), text: "Build it" },
+		request: { sourcePath: join(root, "request.md"), text: "Build it" },
 		plan: {
 			version: 3,
 			title: "Inspection fixture",
@@ -88,18 +88,51 @@ describe("run inspection extension commands", () => {
 		} as unknown as ExtensionAPI);
 
 		expect([...commands.keys()]).toEqual([
+			"orchestrate-list",
 			"build-list",
+			"orchestrate-show",
 			"build-show",
+			"orchestrate-follow",
 			"build-follow",
+			"orchestrate-retry",
 			"build-retry",
+			"orchestrate-prune",
 			"build-prune",
+			"orchestrate",
 			"build",
+			"orchestrate-plan",
+			"build-plan",
+			"orchestrate-investigate",
+			"build-investigate",
+			"orchestrate-cancel",
 			"build-cancel",
+			"orchestrate-resume",
 			"build-resume",
 		]);
 	});
 
-	it("lists and shows persisted runs without contacting workers", async () => {
+	it("marks every legacy /build command as a temporary alias", () => {
+		const descriptions = new Map<string, string>();
+		extension({
+			registerCommand(name: string, options: { description: string }) {
+				descriptions.set(name, options.description);
+			},
+		} as unknown as ExtensionAPI);
+
+		for (const [name, description] of descriptions) {
+			if (name.startsWith("build")) {
+				const primary = name.replace(/^build/, "orchestrate");
+				expect(description).toContain(`temporary alias of /${primary}`);
+			} else {
+				expect(description).not.toContain("alias");
+			}
+		}
+		expect(descriptions.get("orchestrate-cancel")).toBe(
+			"Cancel an orchestration run and stop its active workers",
+		);
+	});
+
+	it("migrates legacy storage and lists runs through /orchestrate-list", async () => {
 		const fixture = await repositoryFixture();
 		const commands = new Map<string, CommandHandler>();
 		extension({
@@ -124,15 +157,64 @@ describe("run inspection extension commands", () => {
 			},
 		} as unknown as ExtensionCommandContext;
 
-		await commands.get("build-list")?.("", ctx);
-		expect(widgets.get("pi-build-conductor:runs")?.join("\n")).toContain(
+		await commands.get("orchestrate-list")?.("", ctx);
+		expect(widgets.get("pi-orchestrator:runs")?.join("\n")).toContain(
 			"inspect-run | awaiting_approval",
 		);
+		const repository = await new GitCli().inspect(fixture.root);
+		await readFile(
+			join(
+				repository.commonDirectory,
+				"pi-orchestrator",
+				"runs",
+				"inspect-run.json",
+			),
+			"utf8",
+		);
+		await expect(
+			readFile(
+				join(
+					repository.commonDirectory,
+					"pi-build-conductor",
+					"runs",
+					"inspect-run.json",
+				),
+				"utf8",
+			),
+		).rejects.toMatchObject({ code: "ENOENT" });
 
-		await commands.get("build-show")?.(fixture.runId, ctx);
-		expect(widgets.get("pi-build-conductor:inspect-run")?.join("\n")).toContain(
+		await commands.get("orchestrate-show")?.(fixture.runId, ctx);
+		expect(widgets.get("pi-orchestrator:inspect-run")?.join("\n")).toContain(
 			"Run inspect-run: Inspection fixture",
 		);
-		expect(notifications).toContain("Showing build inspect-run");
+		expect(notifications).toContain("Showing run inspect-run");
+	});
+
+	it("serves the same runs through the temporary /build aliases", async () => {
+		const fixture = await repositoryFixture();
+		const commands = new Map<string, CommandHandler>();
+		extension({
+			registerCommand(name: string, options: { handler: CommandHandler }) {
+				commands.set(name, options.handler);
+			},
+		} as unknown as ExtensionAPI);
+		const widgets = new Map<string, string[]>();
+		const ctx = {
+			cwd: fixture.root,
+			hasUI: false,
+			mode: "print",
+			ui: {
+				setWidget(key: string, lines: string[] | undefined) {
+					if (lines) widgets.set(key, lines);
+				},
+				notify() {},
+				setStatus() {},
+			},
+		} as unknown as ExtensionCommandContext;
+
+		await commands.get("build-list")?.("", ctx);
+		expect(widgets.get("pi-orchestrator:runs")?.join("\n")).toContain(
+			"inspect-run | awaiting_approval",
+		);
 	});
 });

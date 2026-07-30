@@ -1,5 +1,9 @@
 import { reconcileTaskStates } from "./scheduler.js";
-import { type BuildRun, isActiveAttemptState, type RunTask } from "./types.js";
+import {
+	isActiveAttemptState,
+	type OrchestrationRun,
+	type RunTask,
+} from "./types.js";
 
 export type RunRetryPhase = "tasks" | "final-validation";
 
@@ -68,7 +72,7 @@ function blocked(
 	return { retryable: false, reasonCode, reason };
 }
 
-function activeAttemptIds(run: BuildRun): string[] {
+function activeAttemptIds(run: OrchestrationRun): string[] {
 	return [...run.attempts, ...run.reviewAttempts, ...run.repairAttempts]
 		.filter((attempt) => isActiveAttemptState(attempt.state))
 		.map((attempt) => attempt.id)
@@ -79,7 +83,7 @@ function activeAttemptIds(run: BuildRun): string[] {
 		);
 }
 
-function interruptedAttemptIds(run: BuildRun): string[] {
+function interruptedAttemptIds(run: OrchestrationRun): string[] {
 	const latestTasks = new Map<string, (typeof run.attempts)[number]>();
 	for (const attempt of run.attempts) {
 		latestTasks.set(attempt.taskId, attempt);
@@ -103,7 +107,7 @@ function interruptedAttemptIds(run: BuildRun): string[] {
 		.map((attempt) => attempt.id);
 }
 
-function taskRetryWork(run: BuildRun): TaskRunRetryWork | undefined {
+function taskRetryWork(run: OrchestrationRun): TaskRunRetryWork | undefined {
 	const failedTaskIds = run.plan.tasks.flatMap((definition) =>
 		run.tasks[definition.id]?.state === "failed" ? [definition.id] : [],
 	);
@@ -137,7 +141,7 @@ function taskRetryWork(run: BuildRun): TaskRunRetryWork | undefined {
 	};
 }
 
-export function retryableRunWork(run: BuildRun): RunRetryAssessment {
+export function retryableRunWork(run: OrchestrationRun): RunRetryAssessment {
 	if (run.state !== "failed") {
 		return blocked(
 			"run-not-failed",
@@ -206,7 +210,9 @@ export function retryableRunWork(run: BuildRun): RunRetryAssessment {
 	);
 }
 
-export function recommendedRunAction(run: BuildRun): RecommendedRunAction {
+export function recommendedRunAction(
+	run: OrchestrationRun,
+): RecommendedRunAction {
 	if (!["cancelled", "completed"].includes(run.state)) {
 		const activeIds = activeAttemptIds(run);
 		const interruptedIds = interruptedAttemptIds(run);
@@ -236,7 +242,7 @@ export function recommendedRunAction(run: BuildRun): RecommendedRunAction {
 	return { action: "none", reason: assessment.reason };
 }
 
-function resetFailedTask(run: BuildRun, task: RunTask): RunTask {
+function resetFailedTask(run: OrchestrationRun, task: RunTask): RunTask {
 	const { integrationError, ...historicalTask } = task;
 	if (
 		integrationError &&
@@ -254,7 +260,10 @@ function resetFailedTask(run: BuildRun, task: RunTask): RunTask {
 	return { ...historicalTask, state: "planned" };
 }
 
-export function prepareFailedRunRetry(run: BuildRun, now: string): BuildRun {
+export function prepareFailedRunRetry(
+	run: OrchestrationRun,
+	now: string,
+): OrchestrationRun {
 	const assessment = retryableRunWork(run);
 	if (!assessment.retryable) {
 		throw new RunRetryError(run.id, assessment.reasonCode, assessment.reason);

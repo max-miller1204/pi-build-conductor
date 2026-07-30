@@ -13,11 +13,23 @@ const expectedCommands = [
 	"build",
 	"build-cancel",
 	"build-follow",
+	"build-investigate",
 	"build-list",
+	"build-plan",
 	"build-prune",
 	"build-resume",
 	"build-retry",
 	"build-show",
+	"orchestrate",
+	"orchestrate-cancel",
+	"orchestrate-follow",
+	"orchestrate-investigate",
+	"orchestrate-list",
+	"orchestrate-plan",
+	"orchestrate-prune",
+	"orchestrate-resume",
+	"orchestrate-retry",
+	"orchestrate-show",
 ];
 const temporaryRoot = await mkdtemp(join(tmpdir(), "pi-build-package-smoke-"));
 

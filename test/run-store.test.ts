@@ -11,11 +11,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	approveRun,
-	createBuildRun,
+	createOrchestrationRun,
 	restoreRunPlanRevision,
 	reviseRunPlan,
 } from "../src/domain/run.js";
-import type { BuildRun, TaskPlan } from "../src/domain/types.js";
+import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
 import { RunStore, validateStoredRun } from "../src/storage/run-store.js";
 
 const directories: string[] = [];
@@ -26,7 +26,7 @@ async function temporaryStore(): Promise<RunStore> {
 	return new RunStore(directory);
 }
 
-function createRun(): BuildRun {
+function createRun(): OrchestrationRun {
 	const plan: TaskPlan = {
 		version: 3,
 		finalValidationCommands: [{ command: process.execPath, args: ["-e", ""] }],
@@ -43,13 +43,13 @@ function createRun(): BuildRun {
 			},
 		],
 	};
-	return createBuildRun({
+	return createOrchestrationRun({
 		id: "run-1",
 		repositoryRoot: "/repo",
 		baseBranch: "main",
 		baseCommit: "abc123",
 		integrationBranch: "conductor/run-1/integration",
-		handoff: { sourcePath: "/repo/handoff.md", text: "Build it" },
+		request: { sourcePath: "/repo/request.md", text: "Build it" },
 		plan,
 		maxConcurrentWorkers: 2,
 		now: "2026-01-01T00:00:00.000Z",
@@ -93,7 +93,7 @@ describe("RunStore", () => {
 		const first = await store.load(run.id);
 		const second = await store.load(run.id);
 		expect(first).toMatchObject({
-			schemaVersion: 8,
+			schemaVersion: 9,
 			revision: 0,
 			planRevision: 1,
 			blockedWorkers: [],
@@ -103,7 +103,7 @@ describe("RunStore", () => {
 			join(store.directory, `${run.id}.json`),
 			"utf8",
 		);
-		expect(persisted).toContain('"schemaVersion": 8');
+		expect(persisted).toContain('"schemaVersion": 9');
 		expect(persisted).toContain('"revision": 0');
 	});
 
@@ -124,7 +124,7 @@ describe("RunStore", () => {
 
 		const migrated = await store.load(run.id);
 		expect(migrated).toMatchObject({
-			schemaVersion: 8,
+			schemaVersion: 9,
 			planRevision: 1,
 			approvedPlanRevision: 1,
 			planRevisions: [
@@ -148,12 +148,29 @@ describe("RunStore", () => {
 
 		const migrated = await store.load(run.id);
 		expect(migrated).toMatchObject({
-			schemaVersion: 8,
+			schemaVersion: 9,
 			blockedWorkers: [],
 		});
 		expect(
 			await readFile(join(store.directory, `${run.id}.json`), "utf8"),
 		).toContain('"blockedWorkers": []');
+	});
+
+	it("migrates schema 8 handoff snapshots to the neutral request terminology", async () => {
+		const store = await temporaryStore();
+		const run = createRun();
+		const { request, ...legacy } = run;
+		await writeFile(
+			join(store.directory, `${run.id}.json`),
+			`${JSON.stringify({ ...legacy, schemaVersion: 8, handoff: request }, null, 2)}\n`,
+			"utf8",
+		);
+
+		const migrated = await store.load(run.id);
+		expect(migrated).toEqual(run);
+		expect(migrated.schemaVersion).toBe(9);
+		expect(Object.hasOwn(migrated, "handoff")).toBe(false);
+		expect(await store.load(run.id)).toEqual(migrated);
 	});
 
 	it("keeps current plans, task projections, and historical revisions isolated", () => {
@@ -408,7 +425,7 @@ describe("RunStore", () => {
 			throw new Error("Missing test task");
 		}
 		const integratedCommit = "integrated-implementation";
-		const integratedRun: BuildRun = {
+		const integratedRun: OrchestrationRun = {
 			...run,
 			integrationHead: integratedCommit,
 			tasks: {
@@ -524,7 +541,7 @@ describe("RunStore", () => {
 			baseCommit: run.baseCommit,
 			startedAt: run.updatedAt,
 			finishedAt: run.updatedAt,
-			error: "Conductor restarted",
+			error: "Orchestrator restarted",
 		};
 
 		expect(() =>
@@ -555,7 +572,7 @@ describe("RunStore", () => {
 		if (!implementation) {
 			throw new Error("Missing implementation task");
 		}
-		const active: BuildRun = {
+		const active: OrchestrationRun = {
 			...run,
 			tasks: {
 				implementation: {
@@ -652,7 +669,7 @@ describe("RunStore", () => {
 			if (!implementation) {
 				throw new Error("missing implementation task");
 			}
-			const running: BuildRun = {
+			const running: OrchestrationRun = {
 				...approved,
 				tasks: {
 					implementation: {
@@ -685,7 +702,7 @@ describe("RunStore", () => {
 			expect(recovered.attempts[0]).toMatchObject({
 				state: "interrupted",
 				finishedAt: "2026-01-01T01:00:00.000Z",
-				error: "Conductor restarted",
+				error: "Orchestrator restarted",
 			});
 			expect(await store.load("run-1")).toEqual(recovered);
 		},

@@ -120,6 +120,143 @@
       "status": "done",
       "createdAt": "2026-07-23T18:01:59.743Z",
       "updatedAt": "2026-07-23T23:21:10.832Z"
+    },
+    {
+      "id": "goal-mry8o2jb-03ea6bec",
+      "title": "Integrate orchestration with pi-worklist",
+      "description": "Use a versioned pi.events capability protocol to select or provide a pi-worklist Project Goal, snapshot its exact revision, perform repository-aware planning, obtain explicit approval, create and atomically reconcile associated Session Task projections, consume structured user-override events, and degrade cleanly when pi-worklist is absent or incompatible. Execute the approved tasks as one orchestration session and write bounded status and result references back without automatically completing the Project Goal.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.127Z",
+      "updatedAt": "2026-07-24T18:17:45.670Z"
+    },
+    {
+      "id": "goal-mry8o2je-47b3d0e5",
+      "title": "Add repository-aware planning",
+      "description": "Give a read-only planning agent access to repository structure, instructions, manifests, conventions, relevant source files, and detected validation commands before it proposes an evidence-backed task DAG for approval.",
+      "status": "done",
+      "createdAt": "2026-07-24T01:05:43.130Z",
+      "updatedAt": "2026-07-29T19:37:01.774Z"
+    },
+    {
+      "id": "goal-mry8o2km-9e209bd0",
+      "title": "Generalize tasks into workflow steps",
+      "description": "Replace implementation-only task assumptions with typed investigation, change, command, and approval steps that declare dependencies, capabilities, path or resource locks, validation, outputs, timeouts, and retry policies.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.174Z",
+      "updatedAt": "2026-07-25T20:54:37.205Z"
+    },
+    {
+      "id": "goal-mry8o2kt-abdd9d8e",
+      "title": "Make artifacts first-class outputs",
+      "description": "Persist typed reports, decisions, findings, test evidence, patches, commits, and merge candidates so dependent steps coordinate through explicit inspectable artifacts instead of only integrated Git changes.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.181Z",
+      "updatedAt": "2026-07-25T21:05:46.670Z"
+    },
+    {
+      "id": "goal-mry8o2lg-797b80b6",
+      "title": "Build a reusable workflow engine",
+      "description": "Decompose the fixed BuildConductor lifecycle into a generic run state machine, scheduler, step handlers, executors, workspace providers, artifact storage, quality gates, event timelines, and conflict-aware resource scheduling.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.204Z",
+      "updatedAt": "2026-07-29T19:15:20.861Z"
+    },
+    {
+      "id": "goal-mry8o2lj-6361b2b1",
+      "title": "Provide built-in orchestration workflows",
+      "description": "Recast the current strict build lifecycle as a change workflow and add investigate and plan-only workflows while preserving approval, isolation, review, repair, validation, recovery, and evidence guarantees where applicable.",
+      "status": "active",
+      "createdAt": "2026-07-24T01:05:43.207Z",
+      "updatedAt": "2026-07-29T19:37:02.248Z"
+    },
+    {
+      "id": "goal-mry8o2lk-50778d73",
+      "title": "Create zero-config repository onboarding",
+      "description": "Make /orchestrate usable directly in a normal repository, add optional initialization for persisted repository defaults under .pi, and explicitly support or document clean baselines, dirty worktrees, and repositories without an initial commit.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.208Z",
+      "updatedAt": "2026-07-24T01:05:43.208Z"
+    },
+    {
+      "id": "goal-mry8o2ll-fd9d991a",
+      "title": "Define generalized orchestration safety",
+      "description": "Preserve immutable approval and least-authority execution, introduce capability profiles for each step type, expose sandbox policy during approval, and keep deployment, publishing, cloud administration, and other external mutations disabled until safely supported.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.209Z",
+      "updatedAt": "2026-07-29T18:02:25.642Z"
+    },
+    {
+      "id": "goal-mry8o2lm-a8c5a52c",
+      "title": "Rename and migrate the product surface",
+      "description": "Adopt neutral package, command, type, configuration, storage, and documentation naming centered on orchestration, provide /orchestrate as the main interface, and retain temporary /build aliases plus readers for existing run schemas.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.210Z",
+      "updatedAt": "2026-07-25T20:41:49.029Z"
+    },
+    {
+      "id": "goal-mry8o2lo-4cca8faf",
+      "title": "Prepare the generalized npm release",
+      "description": "Resolve the pinned server installation dependency, define a small supported public API or publish compiled JavaScript and declarations, finalize platform support, remove publication blockers, migrate existing users, and validate a complete clean-install orchestration flow before npm release.",
+      "status": "open",
+      "createdAt": "2026-07-24T01:05:43.212Z",
+      "updatedAt": "2026-07-24T01:05:43.212Z"
+    },
+    {
+      "id": "goal-mrz9ja7k-d69c36a5",
+      "title": "Add a headless orchestration CLI and structured output",
+      "description": "Publish a compiled CLI supporting bounded list and show operations, deterministic mutation results, stable typed errors, --json output, event streaming, and npm-installed execution without importing TypeScript from node_modules. Keep the Pi extension as an adapter over the same application service.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:17:45.584Z",
+      "updatedAt": "2026-07-24T18:17:45.584Z"
+    },
+    {
+      "id": "goal-mrz9ja9v-0d72f46d",
+      "title": "Add pi-worklist compatibility and cross-extension E2E coverage",
+      "description": "Test capability negotiation, Project Goal intake, approved Session Task projections, user overrides, idempotent reconciliation, /tree, /fork, /clone, /resume, missing or incompatible pi-worklist versions, recovery, and the guarantee that the orchestrator never automatically completes a Project Goal.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:17:45.667Z",
+      "updatedAt": "2026-07-24T18:17:45.667Z"
+    },
+    {
+      "id": "goal-mrza0kt4-7451c890",
+      "title": "Add hierarchical roadmap planning",
+      "description": "Model a broad objective as an approved hierarchy of roadmap phases, repository runs, workflow steps, and attempts. Persist immutable roadmap revisions, phase outcomes, dependencies, success criteria, and evidence references while keeping detailed execution plans scoped to individual repository runs.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:31:12.472Z",
+      "updatedAt": "2026-07-24T18:31:12.472Z"
+    },
+    {
+      "id": "goal-mrza0kt9-fbb05394",
+      "title": "Add multi-repository parent orchestration",
+      "description": "Coordinate a parent roadmap across multiple repositories while preserving independent repository policies, base snapshots, branches, worktrees, validation, merge candidates, recovery, and evidence. Track cross-repository dependencies through child-run and artifact references without combining repositories into one unsafe Git transaction.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:31:12.477Z",
+      "updatedAt": "2026-07-24T18:31:12.477Z"
+    },
+    {
+      "id": "goal-mrza0kul-7e62f0cd",
+      "title": "Materialize approved roadmaps into pi-worklist",
+      "description": "Convert an explicitly approved roadmap into idempotently created pi-worklist Project Goals carrying bounded roadmap and repository references. Negotiate the required capability through the versioned inter-extension protocol, never create or rewrite goals before approval, and never automatically complete a Project Goal.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:31:12.525Z",
+      "updatedAt": "2026-07-24T18:31:12.525Z"
+    },
+    {
+      "id": "goal-mrza0kuo-df511150",
+      "title": "Add phase-boundary replanning",
+      "description": "After each roadmap phase, inspect current repository snapshots, consume produced artifacts and validation evidence, reassess remaining assumptions, and propose revisions to later phases. Require renewed approval whenever objectives, authority, mutation scope, validation commands, repository membership, or safety policy change.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:31:12.528Z",
+      "updatedAt": "2026-07-24T18:31:12.528Z"
+    },
+    {
+      "id": "goal-mrza0kvc-7ab8ac99",
+      "title": "Add self-upgrade handoff and restart recovery",
+      "description": "When the orchestrator changes its own implementation, finish the current generation, persist a restart checkpoint, stop safely, load and verify the newly installed version, and resume through a new child run. Preserve schema and protocol compatibility and never hot-swap implementation code inside an active run.",
+      "status": "open",
+      "createdAt": "2026-07-24T18:31:12.552Z",
+      "updatedAt": "2026-07-24T18:31:12.552Z"
     }
-  ]
+  ],
+  "revision": 8
 }
