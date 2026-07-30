@@ -259,7 +259,8 @@ The run allows at most two successful repair and re-review cycles.
 > Git worktrees isolate source history, not the operating system.
 > Worker Pi processes are unsandboxed and retain host filesystem and network reachability.
 
-The compatible server disables worker extension, skill, prompt-template, and context-file discovery.
+The compatible server applies the versioned worker discovery restrictions described in
+the [`SECURITY.md` worker-authority section](SECURITY.md#worker-authority).
 The orchestrator freezes capability profiles at run creation, narrows them to each step's declarations, and verifies the resulting server tool-policy attestation before accepting a worker.
 Read-only profiles cannot use Bash or mutation tools, while change and repair profiles retain only the command and mutation tools their approved work requires.
 No capability profile grants deployment, publishing, cloud administration, or remote mutation authority.
