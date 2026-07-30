@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   server-compatibility:
-    name: Pi 0.81.1 compatible server
+    name: Pi 0.83.0 compatible server
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: max-miller1204/pi
-          ref: c08917e1163c4742ecb7065c099ec57cf5b6c3e5
+          ref: b713633149eae9f14bac029af4938b6476d8202d
           path: compatible-pi
           persist-credentials: false
       - name: Set up Node.js

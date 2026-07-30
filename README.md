@@ -64,7 +64,7 @@ Build and run the pinned compatible commit:
 ```sh
 git clone https://github.com/max-miller1204/pi.git
 cd pi
-git checkout c08917e1163c4742ecb7065c099ec57cf5b6c3e5
+git checkout b713633149eae9f14bac029af4938b6476d8202d
 npm ci --ignore-scripts
 npm run build
 npm exec --workspace packages/server -- server serve
