@@ -11,13 +11,14 @@ updates:
       time: "06:17"
       timezone: Etc/UTC
     # The Pi packages are not an ordinary dependency. They are one leg of a
-    # three-way compatibility pin together with
-    # conductorCompatibility.upstreamPiCommit and the compatible Pi server fork
-    # commit, and scripts/check-release.mjs requires the development pin to
-    # equal conductorCompatibility.testedPiVersion exactly. An isolated bump can
-    # therefore never pass version:check. Upgrading Pi means rebuilding the
-    # server fork and re-running test:compatibility, which is the cross-repository
-    # procedure documented in README.md and RELEASING.md.
+    # three-way compatibility pin together with the
+    # conductorCompatibility.upstreamPiCommit and
+    # conductorCompatibility.serverCommit values, and scripts/check-release.mjs
+    # requires the development pin to equal
+    # conductorCompatibility.testedPiVersion exactly. An isolated bump can
+    # therefore never pass version:check. Upgrading Pi requires merging the new
+    # upstream commit into the compatible server fork, updating all three pins,
+    # rebuilding that server, and re-running test:compatibility.
     ignore:
       - dependency-name: "@earendil-works/pi-ai"
       - dependency-name: "@earendil-works/pi-coding-agent"
