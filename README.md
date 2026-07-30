@@ -35,8 +35,8 @@ Workers never merge into the user's branch, worker-created commits are rejected,
 | Component | Supported version | Notes |
 | --- | --- | --- |
 | Node.js | 22.19.0 or newer | Enforced by `package.json` |
-| Pi coding agent | 0.81.1 | Pi core packages are declared as `*` peers as required by Pi package conventions, while release tests use this exact version |
-| Pi server | [`c08917e`](https://github.com/max-miller1204/pi/commit/c08917e1163c4742ecb7065c099ec57cf5b6c3e5), based on Pi 0.81.1 | Required for worker launch policy version 1 and ESM RPC entry resolution |
+| Pi coding agent | 0.83.0 | Pi core packages are declared as `*` peers as required by Pi package conventions, while release tests use this exact version |
+| Pi server | [`b713633`](https://github.com/max-miller1204/pi/commit/b713633149eae9f14bac029af4938b6476d8202d), based on Pi 0.83.0 | Required for worker launch policy version 1 and ESM RPC entry resolution |
 | Git | A modern CLI with worktree support | The source repository must have at least one commit |
 | Nono | Optional | Used only when validation sandboxing is enabled |
 

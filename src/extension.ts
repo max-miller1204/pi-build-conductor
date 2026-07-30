@@ -148,12 +148,23 @@ function errorMessage(error: unknown): string {
 	return `${error.message}${cause}`;
 }
 
-function selectedWorkerModel(
+/**
+ * Resolves the model every spawned worker must use.
+ *
+ * Workers run as separate Pi processes and do not inherit the session's
+ * `--models` scoping, so an unset session model would let a worker fall back to
+ * the server's own default and escape a scope the user deliberately configured.
+ * Falling back to the first scoped model keeps workers inside the session's
+ * approved envelope; an empty scope means no scoping is configured.
+ */
+export function selectedWorkerModel(
 	ctx: ExtensionCommandContext,
 ): WorkerModelSelection | undefined {
-	return ctx.model
-		? { provider: ctx.model.provider, model: ctx.model.id }
-		: undefined;
+	if (ctx.model) {
+		return { provider: ctx.model.provider, model: ctx.model.id };
+	}
+	const scoped = ctx.scopedModels?.[0]?.model;
+	return scoped ? { provider: scoped.provider, model: scoped.id } : undefined;
 }
 
 function configuredTimeoutMs(suffix: string): number | undefined {
