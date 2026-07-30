@@ -72,16 +72,16 @@
 		"@earendil-works/pi-coding-agent": "*"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.5",
+		"@biomejs/biome": "2.5.5",
 		"@earendil-works/pi-ai": "0.83.0",
 		"@earendil-works/pi-coding-agent": "0.83.0",
-		"@types/node": "22.19.19",
+		"@types/node": "26.1.1",
 		"@types/proper-lockfile": "^4.1.4",
 		"markdownlint-cli2": "0.23.2",
 		"semver": "7.8.5",
-		"typescript": "5.9.3",
-		"vite-node": "^3.2.4",
-		"vitest": "3.2.7"
+		"typescript": "7.0.2",
+		"vite-node": "^6.0.0",
+		"vitest": "4.1.10"
 	},
 	"dependencies": {
 		"proper-lockfile": "^4.1.2"
