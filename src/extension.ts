@@ -1472,7 +1472,7 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 	});
 
 	registerWithLegacyAlias("orchestrate-cancel", "build-cancel", {
-		description: "Cancel a orchestration run and stop its active workers",
+		description: "Cancel an orchestration run and stop its active workers",
 		handler: async (args, ctx) => {
 			const runId = args.trim();
 			if (!runId || /\s/.test(runId)) {

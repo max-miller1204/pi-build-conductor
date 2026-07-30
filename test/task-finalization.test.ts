@@ -538,7 +538,7 @@ describe("task validation and orchestrator-owned commits", () => {
 		expect(completed.state).toBe("cancelled");
 		expect(attempt?.state).toBe("cancelled");
 		expect(attempt?.commit).toBeUndefined();
-		await expect(access(attempt?.worktreePath ?? "")).resolves.toBeUndefined();
+		await access(attempt?.worktreePath ?? "");
 		expect(await git.inspect(attempt?.worktreePath ?? "")).toMatchObject({
 			head: repository.head,
 			isClean: false,

@@ -7,14 +7,17 @@
 `pi-build-conductor` turns a change request into an isolated, dependency-aware multi-agent orchestration run for [Pi](https://pi.dev).
 It plans the work, asks for explicit approval, coordinates parallel workers, validates every change, integrates accepted commits on a separate branch, runs independent review and repair passes, and produces merge-ready evidence.
 
-The orchestrator owns the Git history and lifecycle from start to finish.
-Workers never merge into the user's branch, worker-created commits are rejected, and no execution side effects begin before the plan is approved.
+For strict change workflows, the orchestrator owns the Git history and lifecycle from start to finish.
+Workers never merge into the user's branch, worker-created commits are rejected, and no repository mutation begins before the plan is approved.
 
 ## Features
 
-- Builds and edits a validated task DAG from a request file.
+- Provides plan-only, read-only investigation, and strict change workflows.
+- Builds and edits a repository-validated task DAG from a request file.
+- Schedules typed investigation, change, command, and approval steps with explicit dependencies, locks, timeouts, retries, and least-authority capabilities.
+- Routes declared outputs through immutable, hash-bound artifacts and gives dependent steps only their explicit inputs.
 - Runs two to four implementation, review, and repair workers concurrently.
-- Gives every worker a dedicated branch and Git worktree.
+- Gives mutating workers dedicated branches and worktrees, while read-only workers use detached branchless worktrees.
 - Dispatches tasks deterministically as their dependencies become ready.
 - Restricts each implementation task to explicitly approved repository paths and validation commands.
 - Inspects worker diffs, runs focused checks, and creates orchestrator-owned commits.
@@ -24,7 +27,7 @@ Workers never merge into the user's branch, worker-created commits are rejected,
 - Runs the approved complete validation suite in a detached worktree at the exact integration head.
 - Persists atomic run state, immutable plan revisions, bounded worker journals, validation evidence, and merge-ready reports.
 - Recovers safely after interruption and supports inspection, retry, cancellation, and conservative cleanup.
-- Negotiates and verifies a fixed worker launch policy with the compatible Pi server.
+- Freezes capability profiles into every new run and verifies the resulting least-authority tool policy with the compatible Pi server.
 - Supports optional fail-closed [Nono](https://github.com/always-further/nono) sandboxing for validation commands.
 
 ## Requirements and compatibility
@@ -90,7 +93,7 @@ Start Pi in a clean Git worktree with a model selected, then run:
 
 The orchestrator generates a plan unless `docs/health-check-request.md.plan.json` exists.
 Review the DAG, approved paths, commands, worker limit, validation boundary, and security summary.
-Execution starts only after explicit approval.
+Repository mutation starts only after explicit approval.
 
 When the run completes, inspect its integration branch and evidence:
 
@@ -117,14 +120,16 @@ Merge or cherry-pick the integration branch only after reviewing the result.
 12. The approved final commands run in a detached worktree at the exact integration head.
 13. Completion requires passing checks, strict linear integration history, a clean validation worktree, and proof that the user's branch and worktree were untouched.
 
-Before approval, the orchestrator persists only restart-safe metadata and valid plan revisions.
-It does not create Git refs or worktrees, start workers, or run repository commands.
+Before approval, repository profiling reads only committed Git objects and any planning worker has read-only authority.
+The orchestrator persists restart-safe metadata and valid plan revisions, but does not create integration refs or mutating worktrees, start mutating workers, or run plan validation commands.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `/orchestrate <request-file>` | Create, review, approve, and start an orchestration run |
+| `/orchestrate-plan <request-file>` | Propose an evidence-backed plan without executing it |
+| `/orchestrate-investigate <request-file>` | Investigate repository questions and synthesize a read-only report |
 | `/orchestrate-list` | List repository-scoped runs and open the interactive inspector |
 | `/orchestrate-show <run-id>` | Show the run summary and merge-ready evidence |
 | `/orchestrate-show <run-id> task <task-id>` | Show one task and its attempts |
@@ -136,6 +141,7 @@ It does not create Git refs or worktrees, start workers, or run repository comma
 | `/orchestrate-prune <run-id>` | Remove only proven-clean disposable resources from a terminal run |
 
 Every command is also available under its legacy `/build*` name as a temporary alias.
+The plan-only and investigation commands require a clean repository, inspect only committed `HEAD` from detached branchless worktrees, and store their results as artifacts without creating an integration branch.
 Use `/orchestrate-resume`, not `/orchestrate-retry`, after a process or daemon interruption.
 Resume first reconciles server workers, attempts, commits, branches, and worktrees.
 
@@ -149,7 +155,7 @@ Pruning retains the integration branch, source-evidence branches, snapshots, jou
 ## Plan sidecar
 
 Add `<request-file>.plan.json` to provide a deterministic plan instead of generating one with the model.
-The current plan schema is version 3:
+The live `/orchestrate` path continues to accept task-plan sidecar schema version 3 during the staged engine migration:
 
 ```json
 {
@@ -199,6 +205,10 @@ Commands are executable and argument arrays, not shell strings.
 They run directly without a shell.
 Paths are repository-relative and define the complete mutation scope for each task.
 
+The reusable engine can translate this legacy schema into version 4 change steps.
+Its version 4 workflow schema also supports investigation, command, and approval steps.
+Steps can declare inputs, outputs, capabilities, path and resource locks, timeouts, and bounded retries; omitted fields use least-authority defaults for their step kind.
+
 The plan editor supports node creation, editing, renaming, removal, and reordering; dependency editing; final-command editing; worker-limit selection; full JSON editing; and restoration from immutable revision history.
 Every candidate is validated before persistence.
 Invalid candidates cannot be approved and never enter plan history.
@@ -247,12 +257,12 @@ The run allows at most two successful repair and re-review cycles.
 
 > [!WARNING]
 > Git worktrees isolate source history, not the operating system.
-> Implementation and repair workers are unsandboxed Pi processes with host filesystem and network reachability.
+> Worker Pi processes are unsandboxed and retain host filesystem and network reachability.
 
 The compatible server disables worker extension, skill, prompt-template, and context-file discovery.
-It applies fixed role-based tool allowlists and returns an exact launch-policy attestation that the orchestrator verifies before accepting a worker.
-Reviewers cannot use Bash or mutation tools.
-Implementation and repair workers retain Bash and mutation tools because they must change and validate code.
+The orchestrator freezes capability profiles at run creation, narrows them to each step's declarations, and verifies the resulting server tool-policy attestation before accepting a worker.
+Read-only profiles cannot use Bash or mutation tools, while change and repair profiles retain only the command and mutation tools their approved work requires.
+No capability profile grants deployment, publishing, cloud administration, or remote mutation authority.
 
 Focused and final commands receive a fresh temporary home, reduced credential-free environment, disabled Git credential prompting, bounded output, and process-group termination.
 That reduced environment is not a filesystem or network sandbox.
@@ -278,6 +288,7 @@ Run state is stored outside the checked-out tree at:
 
 Worker journals are stored below the same run directory in `output/` and are capped at 5 MiB each.
 A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new location automatically the first time a command touches run storage.
+Immutable workflow artifacts are stored by run below `<git-common-dir>/pi-orchestrator/artifacts/`.
 Orchestrator worktrees are stored at:
 
 ```text

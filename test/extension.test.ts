@@ -127,6 +127,9 @@ describe("run inspection extension commands", () => {
 				expect(description).not.toContain("alias");
 			}
 		}
+		expect(descriptions.get("orchestrate-cancel")).toBe(
+			"Cancel an orchestration run and stop its active workers",
+		);
 	});
 
 	it("migrates legacy storage and lists runs through /orchestrate-list", async () => {

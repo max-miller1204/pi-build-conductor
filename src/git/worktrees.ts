@@ -143,7 +143,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		const freshRepository = await this.git.inspect(repository.root);
 		if (!freshRepository.isClean) {
 			throw new Error(
-				"The current worktree must be clean before starting a orchestration run",
+				"The current worktree must be clean before starting an orchestration run",
 			);
 		}
 		if (

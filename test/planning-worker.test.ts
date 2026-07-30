@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TaskPlan } from "../src/domain/types.js";
 import {
 	BEGIN_PLAN_DOCUMENT_MARKER,
 	buildPlanningWorkerPrompt,
@@ -51,7 +52,7 @@ function profileFixture(): RepositoryProfile {
 	};
 }
 
-function planFixture() {
+function planFixture(): TaskPlan {
 	return {
 		version: 3,
 		title: "Add the feature",

@@ -584,7 +584,9 @@ describe("GitWorktreeManager", () => {
 
 		await expect(
 			manager.prepareIntegrationBranch(repository, "run-1"),
-		).rejects.toThrow(/must be clean/);
+		).rejects.toThrow(
+			"The current worktree must be clean before starting an orchestration run",
+		);
 	});
 
 	it("refuses stale repository metadata before creating a branch", async () => {
