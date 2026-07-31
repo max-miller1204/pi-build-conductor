@@ -40,6 +40,7 @@ export interface WorkflowFinalizationInput {
 	repository: RepositoryInfo;
 	attemptNumber?: number;
 	signal?: AbortSignal;
+	onValidationReady?: () => Promise<void>;
 }
 
 export interface WorkflowFinalizationResult {
@@ -245,6 +246,12 @@ export async function finalizeWorkflowRun(
 	if (gap) {
 		return { evidenceGap: gap };
 	}
+	if (input.signal?.aborted) {
+		throw input.signal.reason instanceof Error
+			? input.signal.reason
+			: new Error("Final validation aborted");
+	}
+	await input.onValidationReady?.();
 	const attemptNumber = input.attemptNumber ?? 1;
 	const worktreePath =
 		await dependencies.worktrees.prepareFinalValidationWorktree(

@@ -274,6 +274,7 @@ export class EngineChangeRunner {
 					this.initialState(run, this.now()),
 				);
 			}
+			await this.interruptStaleFinalValidation(run.id);
 			const { state } = await recoverWorkflowRun(
 				{
 					store: this.dependencies.workflowStates,
@@ -623,42 +624,72 @@ export class EngineChangeRunner {
 				),
 			startedAt,
 		};
-		const validating = await this.dependencies.store.transaction(
-			run.id,
-			(stored) =>
-				stored.state === "cancelled"
-					? stored
-					: {
-							...stored,
-							state: "validating",
-							finalValidationAttempts: [
-								...stored.finalValidationAttempts,
-								attempt,
-							],
-							updatedAt: this.now(),
-						},
-		);
-		if (validating.state === "cancelled") {
-			options.onRunUpdated?.(validating);
-			return validating;
-		}
-		options.onRunUpdated?.(validating);
-		const result = await finalizeWorkflowRun(
-			{
-				finalValidator: this.dependencies.finalValidator,
-				worktrees: this.dependencies.worktrees,
-				git: this.dependencies.git,
-				securityPolicy: run.securityPolicy,
-				artifacts: this.dependencies.artifacts,
-				now: this.now,
-			},
-			{
-				state,
-				repository,
-				attemptNumber,
+		let attemptStarted = false;
+		let result;
+		try {
+			result = await finalizeWorkflowRun(
+				{
+					finalValidator: this.dependencies.finalValidator,
+					worktrees: this.dependencies.worktrees,
+					git: this.dependencies.git,
+					securityPolicy: run.securityPolicy,
+					artifacts: this.dependencies.artifacts,
+					now: this.now,
+				},
+				{
+					state,
+					repository,
+					attemptNumber,
+					signal,
+					onValidationReady: async () => {
+						const validating = await this.dependencies.store.transaction(
+							run.id,
+							(stored) =>
+								stored.state === "cancelled"
+									? stored
+									: {
+											...stored,
+											state: "validating",
+											finalValidationAttempts: [
+												...stored.finalValidationAttempts,
+												attempt,
+											],
+											updatedAt: this.now(),
+										},
+						);
+						if (validating.state === "cancelled") {
+							throw new Error("The run was cancelled");
+						}
+						attemptStarted = validating.finalValidationAttempts.some(
+							(candidate) =>
+								candidate.id === attempt.id && candidate.state === "running",
+						);
+						if (!attemptStarted) {
+							throw new Error(
+								`Final validation attempt ${attempt.id} did not start`,
+							);
+						}
+						options.onRunUpdated?.(validating);
+					},
+				},
+			);
+		} catch (error) {
+			return this.settleFinalizationException(
+				run.id,
+				attempt,
+				attemptStarted,
 				signal,
-			},
-		);
+				error,
+				options,
+			);
+		}
+		if (result.evidenceGap) {
+			return this.settleReviewFailure(
+				run.id,
+				result.evidenceGap,
+				options,
+			);
+		}
 		const cancelled = signal.aborted;
 		const finishedAt = this.now();
 		const settled = await this.dependencies.store.transaction(
@@ -702,6 +733,116 @@ export class EngineChangeRunner {
 		);
 		options.onRunUpdated?.(settled);
 		return settled;
+	}
+
+	private async settleReviewFailure(
+		runId: string,
+		error: string,
+		options: EngineLaunchOptions,
+	): Promise<OrchestrationRun> {
+		const finishedAt = this.now();
+		const settled = await this.dependencies.store.transaction(
+			runId,
+			(stored) => {
+				if (stored.state === "cancelled") {
+					return stored;
+				}
+				const finalRound = stored.reviewRounds.at(-1);
+				return {
+					...stored,
+					state: "failed",
+					reviewRounds: stored.reviewRounds.map((round) =>
+						round.number === finalRound?.number
+							? {
+									...round,
+									state: "failed" as const,
+									finishedAt,
+									error,
+								}
+							: round,
+					),
+					updatedAt: finishedAt,
+				};
+			},
+		);
+		options.onRunUpdated?.(settled);
+		return settled;
+	}
+
+	private async settleFinalizationException(
+		runId: string,
+		attempt: FinalValidationAttempt,
+		attemptStarted: boolean,
+		signal: AbortSignal,
+		error: unknown,
+		options: EngineLaunchOptions,
+	): Promise<OrchestrationRun> {
+		const message = error instanceof Error ? error.message : String(error);
+		if (!attemptStarted) {
+			if (signal.aborted) {
+				const cancelled = await this.cancelStoredRun(runId);
+				options.onRunUpdated?.(cancelled);
+				return cancelled;
+			}
+			return this.settleReviewFailure(runId, message, options);
+		}
+		const finishedAt = this.now();
+		const settled = await this.dependencies.store.transaction(
+			runId,
+			(stored) => {
+				if (stored.state === "cancelled") {
+					return stored;
+				}
+				const cancelled = signal.aborted;
+				return {
+					...stored,
+					state: cancelled ? "cancelled" : "failed",
+					finalValidationAttempts: stored.finalValidationAttempts.map(
+						(candidate) =>
+							candidate.id === attempt.id && candidate.state === "running"
+								? {
+										...candidate,
+										state: cancelled
+											? ("cancelled" as const)
+											: ("failed" as const),
+										finishedAt,
+										error: cancelled ? signalError(signal) : message,
+									}
+								: candidate,
+					),
+					updatedAt: finishedAt,
+				};
+			},
+		);
+		options.onRunUpdated?.(settled);
+		return settled;
+	}
+
+	private async interruptStaleFinalValidation(
+		runId: string,
+	): Promise<OrchestrationRun> {
+		const finishedAt = this.now();
+		return this.dependencies.store.transaction(runId, (stored) => {
+			if (stored.state !== "validating") {
+				return stored;
+			}
+			return {
+				...stored,
+				state: "reviewed",
+				finalValidationAttempts: stored.finalValidationAttempts.map(
+					(attempt) =>
+						attempt.state === "running"
+							? {
+									...attempt,
+									state: "interrupted" as const,
+									finishedAt,
+									error: "Final validation lifecycle restarted",
+								}
+							: attempt,
+				),
+				updatedAt: finishedAt,
+			};
+		});
 	}
 
 	private async cancelStoredRun(runId: string): Promise<OrchestrationRun> {

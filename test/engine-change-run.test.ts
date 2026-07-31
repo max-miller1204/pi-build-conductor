@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { retryableRunWork } from "../src/domain/run-control.js";
 import {
 	type OrchestrationRun,
 	REVIEW_CATEGORIES,
@@ -35,6 +36,16 @@ import {
 
 const execute = promisify(execFile);
 const directories: string[] = [];
+
+class TestArtifactStore extends ArtifactStore {
+	missingStepId?: string;
+
+	override latest(runId: string, stepId: string, output: string) {
+		return stepId === this.missingStepId
+			? Promise.resolve(undefined)
+			: super.latest(runId, stepId, output);
+	}
+}
 
 afterEach(async () => {
 	await Promise.all(
@@ -125,7 +136,7 @@ async function createHarness(
 	const dependencies = {
 		store,
 		workflowStates: new FileWorkflowStateStore(join(parent, "workflow-runs")),
-		artifacts: new ArtifactStore(join(parent, "artifacts")),
+		artifacts: new TestArtifactStore(join(parent, "artifacts")),
 		workers,
 		git,
 		worktrees,
@@ -486,6 +497,76 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(settled.state).toBe("cancelled");
 		expect(settled.mergeReadyEvidence).toBeUndefined();
 		expect((await harness.store.load(harness.run.id)).state).toBe("cancelled");
+	}, 120_000);
+
+	it("records a review evidence gap without a validation attempt", async () => {
+		const harness = await createHarness();
+		harness.dependencies.artifacts.missingStepId = "review-3-security";
+
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+
+		expect(failed.state).toBe("failed");
+		expect(failed.finalValidationAttempts).toEqual([]);
+		expect(failed.reviewRounds.at(-1)).toMatchObject({
+			state: "failed",
+			error: expect.stringContaining("Review evidence is unavailable"),
+		});
+		expect(retryableRunWork(failed)).toMatchObject({
+			retryable: false,
+			reasonCode: "review-phase-unsupported",
+		});
+	}, 120_000);
+
+	it("settles an unexpected finalization exception", async () => {
+		const harness = await createHarness();
+		harness.dependencies.finalValidator = {
+			async validate() {
+				throw new Error("Final validator crashed");
+			},
+		};
+
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+
+		expect(failed.state).toBe("failed");
+		expect(failed.finalValidationAttempts.at(-1)).toMatchObject({
+			state: "failed",
+			error: "Final validator crashed",
+		});
+		expect(await harness.store.load(harness.run.id)).toEqual(failed);
+	}, 120_000);
+
+	it("interrupts stale final validation before resuming", async () => {
+		const harness = await createHarness(undefined, "high", true);
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		const stale = await harness.store.transaction(failed.id, (stored) => ({
+			...stored,
+			state: "validating",
+			finalValidationAttempts: stored.finalValidationAttempts.map(
+				(attempt) => {
+					const {
+						error: _error,
+						evidence: _evidence,
+						finishedAt: _finishedAt,
+						...retained
+					} = attempt;
+					return { ...retained, state: "running" as const };
+				},
+			),
+		}));
+
+		const resumed = await harness.runner.resume(stale, harness.repository);
+		const completed = await resumed.completion;
+
+		expect(completed.state).toBe("completed");
+		expect(
+			completed.finalValidationAttempts.map((attempt) => attempt.state),
+		).toEqual(["interrupted", "succeeded"]);
 	}, 120_000);
 
 	it("retries the failed work of a settled run without losing its history", async () => {
