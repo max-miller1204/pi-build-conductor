@@ -333,13 +333,6 @@ export class EngineChangeRunner {
 	}
 
 	/**
-	 * Retries the failed work of a settled run.
-	 *
-	 * Every step the run stopped on becomes runnable again, keeping its
-	 * attempt history: a retry is another attempt at the same approved plan,
-	 * never a new plan and never a rewrite of what already happened.
-	 */
-	/**
 	 * Runs again the work an interruption stopped.
 	 *
 	 * Recovery settles an attempt it cannot adopt as terminally failed once the
@@ -404,6 +397,13 @@ export class EngineChangeRunner {
 		});
 	}
 
+	/**
+	 * Retries the failed work of a settled run.
+	 *
+	 * Every step the run stopped on becomes runnable again, keeping its
+	 * attempt history: a retry is another attempt at the same approved plan,
+	 * never a new plan and never a rewrite of what already happened.
+	 */
 	async retry(
 		run: OrchestrationRun,
 		repository: RepositoryInfo,

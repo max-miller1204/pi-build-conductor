@@ -144,6 +144,7 @@ Every command is also available under its legacy `/build*` name as a temporary a
 The plan-only and investigation commands require a clean repository, inspect only committed `HEAD` from detached branchless worktrees, and store their results as artifacts without creating an integration branch.
 Use `/orchestrate-resume`, not `/orchestrate-retry`, after a process or daemon interruption.
 Resume first reconciles durable attempts, commits, artifacts, branches, and worktrees before launching new work.
+An interrupted engine step is adopted only when its commit, declared outputs, and required passing validation evidence can be proved; otherwise resume runs that step and its blocked descendants again.
 
 Task-phase retry creates new attempts for all failed tasks in the retry set and their blocked descendants while preserving history.
 Final-validation retry creates a new detached attempt for the already approved complete suite.
