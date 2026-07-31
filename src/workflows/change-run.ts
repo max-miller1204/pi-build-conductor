@@ -29,8 +29,8 @@ import {
 } from "../engine/steps/worker-runner.js";
 import {
 	createWorkflowRunState,
-	type WorkflowRunState,
 	updateStepAttempt,
+	type WorkflowRunState,
 } from "../engine/workflow-state.js";
 import { defaultWorkspaceProviders } from "../engine/workspaces.js";
 import type { GitClient, RepositoryInfo } from "../git/git.js";

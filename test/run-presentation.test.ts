@@ -350,12 +350,15 @@ describe("run inspection presentation", () => {
 
 	it("skips a newer workerless adoption when selecting output", () => {
 		const run = populatedRun();
+		const { workerId: _workerId, ...workerlessReviewAttempt } = required(
+			run.reviewAttempts[0],
+			"review attempt",
+		);
 		const adopted = {
-			...required(run.reviewAttempts[0], "review attempt"),
+			...workerlessReviewAttempt,
 			id: "review-adopted",
 			number: 2,
 			round: 2,
-			workerId: undefined,
 			startedAt: "2026-01-01T00:45:00.000Z",
 		};
 		expect(

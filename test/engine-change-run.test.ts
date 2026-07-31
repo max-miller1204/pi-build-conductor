@@ -470,8 +470,8 @@ describe("live /orchestrate change runs on the engine", () => {
 		);
 		await started;
 		expect(
-			(await harness.dependencies.workflowStates.load(harness.run.id)).attempts[0]
-				?.workerId,
+			(await harness.dependencies.workflowStates.load(harness.run.id))
+				.attempts[0]?.workerId,
 		).toEqual(expect.any(String));
 		const cancelled = await harness.runner.cancel(
 			await harness.store.load(harness.run.id),
