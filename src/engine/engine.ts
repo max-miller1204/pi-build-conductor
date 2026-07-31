@@ -434,6 +434,7 @@ export class WorkflowEngine {
 				let next = updateStepAttempt(current, attempt.id, {
 					state: attemptState,
 					finishedAt: result.finishedAt,
+					...(outcome.workerId ? { workerId: outcome.workerId } : {}),
 					...(outcome.status === "succeeded"
 						? {
 								...(outcome.summary ? { summary: outcome.summary } : {}),

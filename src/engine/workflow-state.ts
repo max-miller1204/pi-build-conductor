@@ -54,6 +54,8 @@ export interface WorkflowStepAttempt {
 	finishedAt?: string;
 	summary?: string;
 	error?: string;
+	/** The worker process that ran this attempt, for output inspection. */
+	workerId?: string;
 	commit?: string;
 	/** The focused checks that justified this attempt's commit. */
 	evidence?: TaskValidationEvidence;

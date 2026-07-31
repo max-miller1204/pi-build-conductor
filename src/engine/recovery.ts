@@ -183,15 +183,25 @@ async function inspectInterruptedAttempt(
 			} of ${step.id}: ${missing.map((entry) => entry.output).join(", ")}`,
 		};
 	}
-	return {
-		commit: decision.commit,
-		artifactIds: declared.flatMap((entry) =>
-			entry.artifactId ? [entry.artifactId] : [],
-		),
-		...(attempt.evidence
-			? { evidence: attempt.evidence }
-			: await adoptedEvidence(dependencies, state.id, step, attempt)),
-	};
+	const artifactIds = declared.flatMap((entry) =>
+		entry.artifactId ? [entry.artifactId] : [],
+	);
+	if (attempt.evidence) {
+		return { commit: decision.commit, artifactIds, evidence: attempt.evidence };
+	}
+	if (!(step.outputs ?? []).includes(EVIDENCE_OUTPUT)) {
+		return { commit: decision.commit, artifactIds };
+	}
+	// A step that publishes its checks is adopted on those checks. Evidence the
+	// engine cannot read back is not evidence, and a commit whose justification
+	// cannot be produced is worth running again rather than reporting as
+	// validated work.
+	const evidence = await adoptedEvidence(dependencies, state.id, step, attempt);
+	return evidence
+		? { commit: decision.commit, artifactIds, evidence }
+		: {
+				retryReason: `published no readable passing validation evidence for ${step.id}`,
+			};
 }
 
 /**
@@ -205,10 +215,10 @@ async function adoptedEvidence(
 	runId: string,
 	step: StepDefinition,
 	attempt: WorkflowStepAttempt,
-): Promise<{ evidence?: TaskValidationEvidence }> {
+): Promise<TaskValidationEvidence | undefined> {
 	const artifacts = dependencies.artifacts;
-	if (!artifacts?.read || !(step.outputs ?? []).includes(EVIDENCE_OUTPUT)) {
-		return {};
+	if (!artifacts?.read) {
+		return undefined;
 	}
 	try {
 		const record = await artifacts.read(
@@ -220,11 +230,9 @@ async function adoptedEvidence(
 			}),
 		);
 		const evidence = JSON.parse(record.payload) as TaskValidationEvidence;
-		return evidence.passed === true ? { evidence } : {};
+		return evidence.passed === true ? evidence : undefined;
 	} catch {
-		// The commit still stands on its own durable Git evidence; only the
-		// recorded checks are missing.
-		return {};
+		return undefined;
 	}
 }
 

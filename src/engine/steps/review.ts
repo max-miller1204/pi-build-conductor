@@ -284,10 +284,11 @@ export class ReviewStepHandler implements StepHandler {
 			),
 			signal: context.signal,
 		});
+		const workerId = result.workerId ? { workerId: result.workerId } : {};
 		if (result.status !== "succeeded") {
 			return result.status === "cancelled"
-				? { status: "cancelled", error: result.error }
-				: { status: "failed", error: result.error };
+				? { status: "cancelled", error: result.error, ...workerId }
+				: { status: "failed", error: result.error, ...workerId };
 		}
 		try {
 			await assertUnchangedWorkspace(
@@ -299,6 +300,7 @@ export class ReviewStepHandler implements StepHandler {
 			return {
 				status: "failed",
 				error: error instanceof Error ? error.message : String(error),
+				...workerId,
 				retryable: !(error instanceof CapabilityViolationError),
 			};
 		}
@@ -317,11 +319,13 @@ export class ReviewStepHandler implements StepHandler {
 				error: `Review step ${step.id} returned an unusable report: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
+				...workerId,
 			};
 		}
 		return {
 			status: "succeeded",
 			summary: payload.summary,
+			...workerId,
 			artifacts: [reviewFindingsArtifact(output, category, payload)],
 		};
 	}

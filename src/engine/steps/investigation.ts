@@ -66,10 +66,11 @@ export class InvestigationStepHandler implements StepHandler {
 			}),
 			signal: context.signal,
 		});
+		const workerId = result.workerId ? { workerId: result.workerId } : {};
 		if (result.status !== "succeeded") {
 			return result.status === "cancelled"
-				? { status: "cancelled", error: result.error }
-				: { status: "failed", error: result.error };
+				? { status: "cancelled", error: result.error, ...workerId }
+				: { status: "failed", error: result.error, ...workerId };
 		}
 		try {
 			await assertUnchangedWorkspace(
@@ -82,6 +83,7 @@ export class InvestigationStepHandler implements StepHandler {
 				status: "failed",
 				error: error instanceof Error ? error.message : String(error),
 				retryable: !(error instanceof CapabilityViolationError),
+				...workerId,
 			};
 		}
 		const answer = result.output ?? "";
@@ -90,6 +92,7 @@ export class InvestigationStepHandler implements StepHandler {
 			return {
 				status: "failed",
 				error: `Investigation step ${step.id} produced no answer for output ${output}`,
+				...workerId,
 			};
 		}
 		const artifacts: StepArtifactDraft[] = output
@@ -106,6 +109,7 @@ export class InvestigationStepHandler implements StepHandler {
 			status: "succeeded",
 			summary: answer.slice(0, 500),
 			...(artifacts.length > 0 ? { artifacts } : {}),
+			...workerId,
 		};
 	}
 }

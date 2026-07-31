@@ -272,6 +272,7 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		finalValidator,
 		securityPolicy,
 		attemptLogs,
+		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
 	const orchestrator = new Orchestrator({
 		store,

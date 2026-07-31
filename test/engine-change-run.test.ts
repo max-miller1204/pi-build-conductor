@@ -338,6 +338,113 @@ describe("live /orchestrate change runs on the engine", () => {
 		);
 	}, 120_000);
 
+	it("refuses to adopt an interrupted commit whose evidence is unreadable", async () => {
+		const parent = await mkdtemp(join(tmpdir(), "pi-orchestrator-evidence-"));
+		directories.push(parent);
+		const repositoryRoot = join(parent, "repository");
+		await execute("git", ["init", "-b", "main", repositoryRoot]);
+		await execute("git", ["config", "user.name", "Test"], {
+			cwd: repositoryRoot,
+		});
+		await execute("git", ["config", "user.email", "test@example.com"], {
+			cwd: repositoryRoot,
+		});
+		await writeFile(join(repositoryRoot, "README.md"), "base\n");
+		await execute("git", ["add", "README.md"], { cwd: repositoryRoot });
+		await execute("git", ["commit", "-m", "Initial"], { cwd: repositoryRoot });
+
+		const runDirectory = join(parent, "runs");
+		const stateDirectory = join(parent, "workflow-runs");
+		const artifactDirectory = join(parent, "artifacts");
+		const worktreeRoot = join(parent, "worktrees");
+		await expect(
+			execute(
+				"npm",
+				[
+					"run",
+					"test:change-run-crash-fixture",
+					"--",
+					repositoryRoot,
+					runDirectory,
+					stateDirectory,
+					artifactDirectory,
+					worktreeRoot,
+				],
+				{ cwd: process.cwd() },
+			),
+		).rejects.toMatchObject({ code: CHANGE_RUN_CRASH_EXIT_CODE });
+
+		// The evidence the interrupted attempt published is no longer readable,
+		// so its commit cannot be reported as validated work.
+		const artifacts = new ArtifactStore(artifactDirectory);
+		const evidence = await artifacts.latest(
+			CHANGE_RUN_CRASH_RUN_ID,
+			"implementation",
+			"evidence",
+		);
+		if (!evidence) {
+			throw new Error("the fixture published no evidence artifact");
+		}
+		const corrupt = new (class extends ArtifactStore {
+			override read(runId: string, artifactId: string) {
+				return artifactId === evidence.id
+					? Promise.reject(new Error("unreadable evidence"))
+					: super.read(runId, artifactId);
+			}
+		})(artifactDirectory);
+
+		const git = new GitCli();
+		const store = new RunStore(runDirectory);
+		const runner = new EngineChangeRunner({
+			store,
+			workflowStates: new FileWorkflowStateStore(stateDirectory),
+			artifacts: corrupt,
+			workers: new ChangeRunWorkers(),
+			git,
+			worktrees: new GitWorktreeManager(git, worktreeRoot),
+			validator: new LocalTaskValidator(git),
+			finalValidator: new LocalFinalValidator(git),
+			securityPolicy: readSecurityPolicy({}),
+		});
+		const completed = await (
+			await runner.resume(
+				await store.load(CHANGE_RUN_CRASH_RUN_ID),
+				await git.inspect(repositoryRoot),
+			)
+		).completion;
+
+		// The step ran again instead of adopting an unjustified commit.
+		expect(completed.state).toBe("completed");
+		expect(completed.attempts.map((attempt) => attempt.number)).toEqual([1, 2]);
+		expect(completed.attempts.at(-1)).toMatchObject({
+			state: "succeeded",
+			evidence: expect.objectContaining({ passed: true }),
+		});
+	}, 120_000);
+
+	it("records the worker of every engine attempt so its output can be followed", async () => {
+		const harness = await createHarness();
+
+		const completed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+
+		expect(completed.state).toBe("completed");
+		for (const attempt of [
+			...completed.attempts,
+			...completed.repairAttempts,
+		]) {
+			expect(attempt.workerId).toEqual(expect.any(String));
+		}
+		// Rounds 1 and 2 ran real reviewers; round 3 adopted round 2 over an
+		// unchanged head and so had no worker of its own to follow.
+		for (const attempt of completed.reviewAttempts.filter(
+			(review) => review.round < 3,
+		)) {
+			expect(attempt.workerId).toEqual(expect.any(String));
+		}
+	}, 120_000);
+
 	it("cancels a running run and stops its workers", async () => {
 		const harness = await createHarness();
 		let workerStarted = () => {};

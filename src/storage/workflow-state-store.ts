@@ -331,7 +331,12 @@ function validateStoredAttempts(
 		for (const field of ["id", "stepId", "baseCommit", "startedAt"] as const) {
 			assertString(attempt[field], `${path}.${field}`);
 		}
-		for (const field of ["branch", "finishedAt", "commit"] as const) {
+		for (const field of [
+			"branch",
+			"finishedAt",
+			"commit",
+			"workerId",
+		] as const) {
 			assertOptionalString(attempt[field], `${path}.${field}`);
 		}
 		for (const field of [

@@ -17,7 +17,10 @@ import {
 } from "../engine/finalization.js";
 import { StepHandlerRegistry } from "../engine/handlers.js";
 import { GitStepIntegrator } from "../engine/integration.js";
-import { recoverWorkflowRun } from "../engine/recovery.js";
+import {
+	type RecoveredAttempt,
+	recoverWorkflowRun,
+} from "../engine/recovery.js";
 import { reconcileWorkflowSteps } from "../engine/scheduler.js";
 import type { ReviewFindingsPayload } from "../engine/steps/review.js";
 import {
@@ -59,6 +62,8 @@ export interface EngineChangeRunDependencies {
 	validator: TaskValidator;
 	finalValidator: FinalValidator;
 	securityPolicy: RunSecurityPolicy;
+	/** The configured bound on one worker step, when the user set one. */
+	workerTimeoutMs?: number;
 	attemptLogs?: AttemptLogStore;
 	now?: () => string;
 }
@@ -272,7 +277,7 @@ export class EngineChangeRunner {
 				);
 			}
 			await this.interruptStaleFinalValidation(run.id);
-			const { state } = await recoverWorkflowRun(
+			const { state, recovered } = await recoverWorkflowRun(
 				{
 					store: this.dependencies.workflowStates,
 					git: this.dependencies.git,
@@ -281,11 +286,16 @@ export class EngineChangeRunner {
 				},
 				run.id,
 			);
-			const projected = await this.project(run.id, state);
-			if (state.state !== "running") {
+			const relaunched = await this.relaunchInterruptedSteps(
+				run.id,
+				state,
+				recovered,
+			);
+			const projected = await this.project(run.id, relaunched);
+			if (relaunched.state !== "running") {
 				const completion = this.settle(
 					projected,
-					state,
+					relaunched,
 					repository,
 					options,
 					execution.controller.signal,
@@ -316,6 +326,71 @@ export class EngineChangeRunner {
 	 * attempt history: a retry is another attempt at the same approved plan,
 	 * never a new plan and never a rewrite of what already happened.
 	 */
+	/**
+	 * Runs again the work an interruption stopped.
+	 *
+	 * Recovery settles an attempt it cannot adopt as terminally failed once the
+	 * step's automatic retry budget is spent, but being interrupted is not the
+	 * step failing on its merits: resuming a run is the user asking for exactly
+	 * that work to be carried out, so those steps run again here rather than
+	 * leaving the run unresumable and unretryable.
+	 */
+	private async relaunchInterruptedSteps(
+		runId: string,
+		state: WorkflowRunState,
+		recovered: readonly RecoveredAttempt[],
+	): Promise<WorkflowRunState> {
+		const stopped = [
+			...new Set(
+				recovered
+					.filter((entry) => entry.outcome === "failed")
+					.map((entry) => entry.stepId),
+			),
+		].filter((stepId) => state.steps[stepId]?.state === "failed");
+		if (stopped.length === 0) {
+			return state;
+		}
+		return this.dependencies.workflowStates.transaction(runId, (current) => {
+			let next = current;
+			// Everything waiting behind the interrupted work was only blocked by
+			// it, so it becomes runnable again with it.
+			const runnable = [
+				...stopped,
+				...Object.entries(current.steps).flatMap(([stepId, record]) =>
+					record.state === "blocked" ? [stepId] : [],
+				),
+			];
+			for (const stepId of runnable) {
+				const record = current.steps[stepId];
+				if (!record || !["failed", "blocked"].includes(record.state)) {
+					continue;
+				}
+				const { error: _error, ...retained } = record;
+				next = {
+					...next,
+					steps: { ...next.steps, [stepId]: { ...retained, state: "planned" } },
+				};
+			}
+			const { error: _settled, ...rest } = next;
+			return appendWorkflowEvents(
+				reconcileWorkflowSteps({
+					...rest,
+					state: "running",
+					updatedAt: this.now(),
+				}),
+				stopped.map((stepId) => ({
+					kind: "step_retry_scheduled" as const,
+					stepId,
+					attemptId: current.steps[stepId]?.attemptIds.at(-1) ?? "",
+					nextAttemptNumber:
+						(current.steps[stepId]?.attemptIds.length ?? 0) + 1,
+					reason: "the resumed run runs the interrupted work again",
+				})),
+				this.now(),
+			);
+		});
+	}
+
 	async retry(
 		run: OrchestrationRun,
 		repository: RepositoryInfo,
@@ -513,6 +588,9 @@ export class EngineChangeRunner {
 			repository,
 			artifacts: this.dependencies.artifacts,
 			executor: new StepExecutor({
+				...(this.dependencies.workerTimeoutMs === undefined
+					? {}
+					: { defaultTimeoutMs: this.dependencies.workerTimeoutMs }),
 				workspaces: defaultWorkspaceProviders(this.dependencies.worktrees),
 				handlers: new StepHandlerRegistry(
 					changeWorkflowStepHandlers({
