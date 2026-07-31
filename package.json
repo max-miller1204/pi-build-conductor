@@ -57,6 +57,7 @@
 		"test": "vitest run",
 		"test:compatibility": "node scripts/run-server-compatibility.mjs",
 		"test:crash-fixture": "vite-node test/fixtures/crash-after-task-commit.ts",
+		"test:workflow-crash-fixture": "vite-node test/fixtures/crash-during-workflow-step.ts",
 		"test:server-compat": "vitest run test/server-compatibility.test.ts",
 		"test:upstream": "vitest run test/server-upstream.test.ts test/orchestrator-upstream.test.ts",
 		"test:watch": "vitest",

@@ -290,6 +290,7 @@ Run state is stored outside the checked-out tree at:
 Worker journals are stored below the same run directory in `output/` and are capped at 5 MiB each.
 A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new location automatically the first time a command touches run storage.
 Immutable workflow artifacts are stored by run below `<git-common-dir>/pi-orchestrator/artifacts/`.
+Workflow engine runs persist their own versioned snapshots below `<git-common-dir>/pi-orchestrator/workflow-runs/`, which is what lets an interrupted engine run be recovered after a restart; the `/orchestrate` command family still executes through the run state above.
 Orchestrator worktrees are stored at:
 
 ```text

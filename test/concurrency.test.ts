@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { approveRun } from "../src/domain/run.js";
 import type { OrchestrationRun, TaskDefinition } from "../src/domain/types.js";
 import type { RepositoryInfo } from "../src/git/git.js";
@@ -25,6 +25,7 @@ import type {
 } from "../src/workers/backend.js";
 import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
 import { reviewResult } from "./helpers/review.js";
+import { waitForOrchestration } from "./helpers/wait.js";
 
 const directories: string[] = [];
 
@@ -252,7 +253,7 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(workers.startOrder).toEqual(["first", "second"]);
 
 		workers.settle("first", { status: "succeeded" });
-		await vi.waitFor(() =>
+		await waitForOrchestration(() =>
 			expect(workers.startOrder).toEqual(["first", "second", "third"]),
 		);
 		expect(workers.maxInFlight).toBe(2);
@@ -278,14 +279,16 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(workers.startOrder).toEqual(["foundation"]);
 
 		workers.settle("foundation", { status: "succeeded" });
-		await vi.waitFor(() =>
+		await waitForOrchestration(() =>
 			expect(workers.startOrder).toEqual(["foundation", "api", "ui"]),
 		);
 		workers.settle("ui", { status: "succeeded" });
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(workers.startOrder).not.toContain("release");
 		workers.settle("api", { status: "succeeded" });
-		await vi.waitFor(() => expect(workers.startOrder.at(-1)).toBe("release"));
+		await waitForOrchestration(() =>
+			expect(workers.startOrder.at(-1)).toBe("release"),
+		);
 		workers.settle("release", { status: "succeeded" });
 
 		expect((await result.completion).state).toBe("completed");
@@ -301,7 +304,7 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(workers.startOrder).toEqual(["foundation", "unrelated"]);
 
 		workers.settle("foundation", { status: "succeeded" });
-		await vi.waitFor(() =>
+		await waitForOrchestration(() =>
 			expect(workers.startOrder).toEqual([
 				"foundation",
 				"unrelated",
@@ -331,7 +334,9 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(worktrees.allocations).toHaveLength(4);
 
 		workers.settle("one", { status: "succeeded" });
-		await vi.waitFor(() => expect(workers.startOrder.at(-1)).toBe("five"));
+		await waitForOrchestration(() =>
+			expect(workers.startOrder.at(-1)).toBe("five"),
+		);
 		for (const taskId of ["two", "three", "four", "five"]) {
 			workers.settle(taskId, { status: "succeeded" });
 		}
@@ -349,7 +354,7 @@ describe("bounded dependency-aware concurrency", () => {
 		expect(workers.startOrder).toEqual(["foundation", "independent"]);
 
 		workers.settle("foundation", { status: "failed", error: "failed" });
-		await vi.waitFor(async () =>
+		await waitForOrchestration(async () =>
 			expect((await store.load(run.id)).state).toBe("failed"),
 		);
 		expect(workers.startOrder).not.toContain("dependent");
