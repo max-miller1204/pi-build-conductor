@@ -258,21 +258,29 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     },
     {
-      "id": "goal-ms98t2jk-5f2a49c6",
-      "title": "Add autonomous and guided execution modes",
-      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement. --json",
-      "status": "open",
-      "createdAt": "2026-07-31T17:55:04.352Z",
-      "updatedAt": "2026-07-31T17:55:04.352Z"
-    },
-    {
       "id": "goal-ms98t7al-d4b5a7f6",
       "title": "Add autonomous and guided execution modes",
-      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement. --json",
+      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement.",
       "status": "open",
       "createdAt": "2026-07-31T17:55:10.509Z",
-      "updatedAt": "2026-07-31T17:55:10.509Z"
+      "updatedAt": "2026-07-31T18:57:53.455Z"
+    },
+    {
+      "id": "goal-ms9ads82-6f7a88cb",
+      "title": "Add continuation and context-budget handoff",
+      "description": "Make a session's continuation checkpoint durable resumable state, reach it deliberately at a step boundary when context is exhausting, and launch the successor generation automatically under the same frozen envelope within a bounded generation count. Roadmap sessions 39i to 39k. Sessions 48 and 49 must reuse this checkpoint rather than introduce a second generation model.",
+      "status": "open",
+      "createdAt": "2026-07-31T18:39:10.369Z",
+      "updatedAt": "2026-07-31T18:39:31.080Z"
+    },
+    {
+      "id": "goal-ms9adwil-ff52c9f2",
+      "title": "Add detached and unattended execution",
+      "description": "Execute a run in a detached owner that survives closing the interactive session, with a single-owner lease, durable progress, and safe takeover; attach, observe, approve escalations, and control it from a later session; notify the user when a run pauses, escalates, or settles. Roadmap sessions 39l and 39m. Decided 2026-07-31: the owner is a child process spawned per run, not a resident daemon, and detachment stays an optimization over a run any session can resume. Session 39l must fence the lease with an owner epoch and onCompromised abort, keep pending escalations in durable state rather than owner memory, freeze session-provided model scope into the envelope at approval time, and keep approve-then-detach as the boundary. Session 39l creates the run-owner entry point that sessions 68 and 69 extend.",
+      "status": "open",
+      "createdAt": "2026-07-31T18:39:15.933Z",
+      "updatedAt": "2026-07-31T18:42:53.567Z"
     }
   ],
-  "revision": 18
+  "revision": 25
 }
