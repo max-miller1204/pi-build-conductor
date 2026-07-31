@@ -380,7 +380,10 @@ export class GitWorktreeManager implements WorktreeManager {
 				await this.canonicalPath(attempt.worktreePath),
 				attempt.baseCommit,
 			);
-			deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
+			// A detached review worktree left no branch to delete.
+			if (attempt.branch) {
+				deletableBranchHeads.set(attempt.branch, attempt.baseCommit);
+			}
 		}
 		for (const attempt of run.repairAttempts) {
 			expectedWorktreeHeads.set(
@@ -534,7 +537,9 @@ export class GitWorktreeManager implements WorktreeManager {
 			}
 		}
 		for (const attempt of [...run.reviewAttempts, ...run.repairAttempts]) {
-			protectedBranches.add(attempt.branch);
+			if (attempt.branch) {
+				protectedBranches.add(attempt.branch);
+			}
 			safeStartPoints.add(attempt.baseCommit);
 			if (
 				["prepared", "launched", "running", "validating", "failed"].includes(

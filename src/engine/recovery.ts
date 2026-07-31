@@ -1,6 +1,9 @@
-import { artifactIdFor } from "../domain/artifacts.js";
+import { type ArtifactRecord, artifactIdFor } from "../domain/artifacts.js";
 import { type StepDefinition, stepRetryPolicy } from "../domain/steps.js";
-import { isActiveAttemptState } from "../domain/types.js";
+import {
+	isActiveAttemptState,
+	type TaskValidationEvidence,
+} from "../domain/types.js";
 import type { GitClient } from "../git/git.js";
 import type { StoredArtifactEntry } from "../storage/artifact-store.js";
 import {
@@ -18,9 +21,14 @@ import {
 	type WorkflowStepAttempt,
 } from "./workflow-state.js";
 
+/** The output every step that commits publishes its focused checks under. */
+const EVIDENCE_OUTPUT = "evidence";
+
 /** The read surface recovery needs to prove an artifact really is durable. */
 export interface RecoveryArtifactReader {
 	scan(runId: string): Promise<StoredArtifactEntry[]>;
+	/** Used to recover the checks behind an adopted commit, when available. */
+	read?(runId: string, artifactId: string): Promise<ArtifactRecord>;
 }
 
 export interface WorkflowRecoveryDependencies {
@@ -52,6 +60,8 @@ interface InterruptedAttemptDecision {
 	commit?: string;
 	/** The declared artifacts that attempt durably published. */
 	artifactIds?: string[];
+	/** The focused checks recovered for an adopted commit. */
+	evidence?: TaskValidationEvidence;
 	/** Why the attempt cannot be adopted, though it may still run again. */
 	retryReason?: string;
 	/** Why the attempt's step branch could not be safely reconciled. */
@@ -178,7 +188,44 @@ async function inspectInterruptedAttempt(
 		artifactIds: declared.flatMap((entry) =>
 			entry.artifactId ? [entry.artifactId] : [],
 		),
+		...(attempt.evidence
+			? { evidence: attempt.evidence }
+			: await adoptedEvidence(dependencies, state.id, step, attempt)),
 	};
+}
+
+/**
+ * Recovers the focused checks that justified an adopted commit. The evidence
+ * a step published is durable, but the attempt record that would have carried
+ * it was lost with the interrupted process, and a commit whose justification
+ * is unknown should not be reported as validated work.
+ */
+async function adoptedEvidence(
+	dependencies: WorkflowRecoveryDependencies,
+	runId: string,
+	step: StepDefinition,
+	attempt: WorkflowStepAttempt,
+): Promise<{ evidence?: TaskValidationEvidence }> {
+	const artifacts = dependencies.artifacts;
+	if (!artifacts?.read || !(step.outputs ?? []).includes(EVIDENCE_OUTPUT)) {
+		return {};
+	}
+	try {
+		const record = await artifacts.read(
+			runId,
+			artifactIdFor({
+				stepId: step.id,
+				output: EVIDENCE_OUTPUT,
+				attempt: attempt.number,
+			}),
+		);
+		const evidence = JSON.parse(record.payload) as TaskValidationEvidence;
+		return evidence.passed === true ? { evidence } : {};
+	} catch {
+		// The commit still stands on its own durable Git evidence; only the
+		// recorded checks are missing.
+		return {};
+	}
 }
 
 /**
@@ -223,6 +270,7 @@ export async function recoverWorkflowRun(
 					state: "succeeded",
 					finishedAt,
 					commit: decision.commit,
+					...(decision.evidence ? { evidence: decision.evidence } : {}),
 					...(artifactIds.length > 0 ? { artifactIds } : {}),
 				});
 				next = updateStep(next, attempt.stepId, { state: "succeeded" });

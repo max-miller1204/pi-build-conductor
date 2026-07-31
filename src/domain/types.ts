@@ -304,7 +304,8 @@ export interface ReviewAttempt {
 	category: ReviewCategory;
 	number: number;
 	state: AttemptState;
-	branch: string;
+	/** Absent for a review that read a detached, branchless worktree. */
+	branch?: string;
 	worktreePath: string;
 	baseCommit: string;
 	workerId?: string;

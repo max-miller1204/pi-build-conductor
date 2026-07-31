@@ -25,7 +25,11 @@ import {
 	assertRunSecurityPolicy,
 	legacySecurityPolicy,
 } from "../security/policy.js";
-import { acquireStorageLock, writeFileAtomic } from "./file-storage.js";
+import {
+	acquireStorageLock,
+	validateStoredEvidence,
+	writeFileAtomic,
+} from "./file-storage.js";
 
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
@@ -174,82 +178,6 @@ function migrateLegacyRun(
 		};
 	}
 	return migrated;
-}
-
-function validateEvidence(value: unknown, path: string): void {
-	if (!isRecord(value)) {
-		throw new Error(`${path} must be an object`);
-	}
-	assertString(value.startedAt, `${path}.startedAt`);
-	assertString(value.finishedAt, `${path}.finishedAt`);
-	if (typeof value.passed !== "boolean") {
-		throw new Error(`${path}.passed must be a boolean`);
-	}
-	if (!Array.isArray(value.changedFiles)) {
-		throw new Error(`${path}.changedFiles must be an array`);
-	}
-	for (const [index, file] of value.changedFiles.entries()) {
-		if (!isRecord(file)) {
-			throw new Error(`${path}.changedFiles[${index}] must be an object`);
-		}
-		assertString(file.path, `${path}.changedFiles[${index}].path`);
-		assertString(file.status, `${path}.changedFiles[${index}].status`);
-		if (file.previousPath !== undefined) {
-			assertString(
-				file.previousPath,
-				`${path}.changedFiles[${index}].previousPath`,
-			);
-		}
-	}
-	if (typeof value.diffHash !== "string") {
-		throw new Error(`${path}.diffHash must be a string`);
-	}
-	if (!Array.isArray(value.checks)) {
-		throw new Error(`${path}.checks must be an array`);
-	}
-	for (const [index, check] of value.checks.entries()) {
-		const checkPath = `${path}.checks[${index}]`;
-		if (!isRecord(check)) {
-			throw new Error(`${checkPath} must be an object`);
-		}
-		for (const field of [
-			"command",
-			"startedAt",
-			"finishedAt",
-			"stdoutTail",
-			"stderrTail",
-		] as const) {
-			if (typeof check[field] !== "string") {
-				throw new Error(`${checkPath}.${field} must be a string`);
-			}
-		}
-		if (
-			!Array.isArray(check.args) ||
-			check.args.some((arg) => typeof arg !== "string")
-		) {
-			throw new Error(`${checkPath}.args must be an array of strings`);
-		}
-		if (check.exitCode !== null && !Number.isInteger(check.exitCode)) {
-			throw new Error(`${checkPath}.exitCode must be an integer or null`);
-		}
-		if (typeof check.passed !== "boolean") {
-			throw new Error(`${checkPath}.passed must be a boolean`);
-		}
-		if (check.executionBoundary !== undefined) {
-			if (!isRecord(check.executionBoundary)) {
-				throw new Error(`${checkPath}.executionBoundary must be an object`);
-			}
-			const boundary = check.executionBoundary;
-			if (
-				!["none", "nono"].includes(String(boundary.sandbox)) ||
-				!["host", "blocked"].includes(String(boundary.network)) ||
-				boundary.environment !== "temporary-home-reduced" ||
-				(boundary.sandbox === "nono") !== (boundary.network === "blocked")
-			) {
-				throw new Error(`${checkPath}.executionBoundary is invalid`);
-			}
-		}
-	}
 }
 
 export function validateStoredRun(value: unknown): OrchestrationRun {
@@ -525,7 +453,7 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 			}
 		}
 		if (attempt.evidence !== undefined) {
-			validateEvidence(attempt.evidence, `${path}.evidence`);
+			validateStoredEvidence(attempt.evidence, `${path}.evidence`);
 		}
 		if (
 			attempt.commit !== undefined &&
@@ -581,12 +509,15 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 		}
 		for (const field of [
 			"id",
-			"branch",
 			"worktreePath",
 			"baseCommit",
 			"startedAt",
 		] as const) {
 			assertString(attempt[field], `${path}.${field}`);
+		}
+		// A review that read a detached worktree never had a branch.
+		if (attempt.branch !== undefined) {
+			assertString(attempt.branch, `${path}.branch`);
 		}
 		if (!Number.isInteger(attempt.round) || (attempt.round as number) < 1) {
 			throw new Error(`${path}.round must be a positive integer`);
@@ -752,7 +683,7 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 			}
 		}
 		if (attempt.evidence !== undefined) {
-			validateEvidence(attempt.evidence, `${path}.evidence`);
+			validateStoredEvidence(attempt.evidence, `${path}.evidence`);
 		}
 		if (
 			attempt.commit !== undefined &&
@@ -1013,7 +944,7 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 			if (!Array.isArray(attempt.evidence.checks)) {
 				throw new Error(`${path}.evidence.checks must be an array`);
 			}
-			validateEvidence(
+			validateStoredEvidence(
 				{
 					...attempt.evidence,
 					changedFiles: [],

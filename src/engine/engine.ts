@@ -438,6 +438,7 @@ export class WorkflowEngine {
 						? {
 								...(outcome.summary ? { summary: outcome.summary } : {}),
 								...(outcome.commit ? { commit: outcome.commit } : {}),
+								...(outcome.evidence ? { evidence: outcome.evidence } : {}),
 								...(artifactIds.length > 0 ? { artifactIds } : {}),
 							}
 						: { error: outcome.error }),

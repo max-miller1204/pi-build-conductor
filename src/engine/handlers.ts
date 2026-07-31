@@ -7,6 +7,7 @@ import {
 import type {
 	CapabilityProfile,
 	CapabilityProfileName,
+	TaskValidationEvidence,
 } from "../domain/types.js";
 import type { RepositoryInfo } from "../git/git.js";
 import type { StepArtifactDraft } from "./artifact-routing.js";
@@ -35,6 +36,8 @@ export type StepOutcome =
 			summary?: string;
 			/** The step branch commit an integrating step produced. */
 			commit?: string;
+			/** The focused checks that justified the commit. */
+			evidence?: TaskValidationEvidence;
 			/** One artifact per output the step declared. */
 			artifacts?: StepArtifactDraft[];
 	  }

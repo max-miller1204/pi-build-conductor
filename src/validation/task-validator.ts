@@ -1,3 +1,4 @@
+import { pathIsAllowed } from "../domain/paths.js";
 import type {
 	RunSecurityPolicy,
 	TaskAttempt,
@@ -43,12 +44,6 @@ export class TaskValidationError extends Error {
 		super(message, options);
 		this.name = "TaskValidationError";
 	}
-}
-
-function pathIsAllowed(path: string, allowedPaths: string[]): boolean {
-	return allowedPaths.some((allowed) =>
-		allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
-	);
 }
 
 function snapshotsMatch(

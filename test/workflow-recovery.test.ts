@@ -107,7 +107,7 @@ describe("workflow finalization", () => {
 			{ state: finished, repository },
 		);
 
-		expect(result.evidence.passed).toBe(true);
+		expect(result.evidence?.passed).toBe(true);
 		expect(result.mergeReady?.commits).toEqual([
 			{
 				kind: "task",
@@ -161,7 +161,7 @@ describe("workflow finalization", () => {
 			},
 		);
 
-		expect(result.evidence.passed).toBe(false);
+		expect(result.evidence?.passed).toBe(false);
 		expect(result.mergeReady).toBeUndefined();
 	});
 

@@ -1,3 +1,4 @@
+import type { ResolvedStepInput } from "../../domain/step-context.js";
 import type { InvestigationStepDefinition } from "../../domain/steps.js";
 import {
 	REVIEW_CATEGORIES,
@@ -44,22 +45,50 @@ export interface ReviewStepHandlerOptions {
 	requestText?: string;
 }
 
+function reviewFindingsArtifact(
+	output: string,
+	category: ReviewCategory,
+	payload: ReviewFindingsPayload,
+): StepArtifactDraft {
+	return {
+		output,
+		kind: "findings",
+		title: `${category} review findings`,
+		payload: { format: "json", value: payload },
+	};
+}
+
+/** The identity of a generated review step: `review-<round>-<category>`. */
+export interface ReviewStepIdentity {
+	round: number;
+	category: ReviewCategory;
+}
+
+export function reviewStepId(round: number, category: ReviewCategory): string {
+	return `review-${round}-${category}`;
+}
+
 /**
- * Resolves the review category from the step id. Review steps are generated
- * one per category, so `review-security` reviews security; nothing else is
- * accepted, because a mislabelled reviewer would silently skip a category.
+ * Resolves the round and category a review step covers. Review steps are
+ * generated one per category per round, so `review-2-security` is the second
+ * security review; nothing else is accepted, because a mislabelled reviewer
+ * would silently skip a category or claim the wrong round's evidence.
  */
+export function parseReviewStepId(stepId: string): ReviewStepIdentity {
+	const match = /^review-([1-9][0-9]*)-([a-z]+)$/.exec(stepId);
+	const category = REVIEW_CATEGORIES.find((known) => known === match?.[2]);
+	if (!match?.[1] || !category) {
+		throw new Error(
+			`Review step ${stepId} must be named review-<round>-<category>, with a category of ${REVIEW_CATEGORIES.join(", ")}`,
+		);
+	}
+	return { round: Number(match[1]), category };
+}
+
 export function reviewCategoryOf(
 	step: InvestigationStepDefinition,
 ): ReviewCategory {
-	const suffix = step.id.slice(step.id.lastIndexOf("-") + 1);
-	const category = REVIEW_CATEGORIES.find((known) => known === suffix);
-	if (!category) {
-		throw new Error(
-			`Review step ${step.id} must end in one of ${REVIEW_CATEGORIES.join(", ")}`,
-		);
-	}
-	return category;
+	return parseReviewStepId(step.id).category;
 }
 
 function buildReviewStepPrompt(
@@ -130,6 +159,56 @@ ${REVIEW_REPORT_END}`;
 }
 
 /**
+ * The findings of an earlier round that already reviewed exactly this commit.
+ *
+ * A later round exists to review what a repair changed. When the repair
+ * changed nothing, the integration head is the same tree the earlier round
+ * read, so re-running five reviewers could only produce a second opinion of
+ * the same commit: the earlier findings already target the final head, and
+ * adopting them keeps the evidence honest without spending the workers.
+ */
+function adoptablePriorFindings(
+	inputs: readonly ResolvedStepInput[],
+	category: ReviewCategory,
+	baseCommit: string,
+): ReviewFindingsPayload | undefined {
+	for (const input of inputs) {
+		if (input.artifact.kind !== "findings") {
+			continue;
+		}
+		let payload: unknown;
+		try {
+			payload = JSON.parse(input.artifact.payload);
+		} catch {
+			continue;
+		}
+		if (
+			isReviewFindingsPayload(payload) &&
+			payload.category === category &&
+			payload.baseCommit === baseCommit
+		) {
+			return payload;
+		}
+	}
+	return undefined;
+}
+
+function isReviewFindingsPayload(
+	value: unknown,
+): value is ReviewFindingsPayload {
+	if (typeof value !== "object" || value === null) {
+		return false;
+	}
+	const candidate = value as Partial<ReviewFindingsPayload>;
+	return (
+		typeof candidate.category === "string" &&
+		typeof candidate.baseCommit === "string" &&
+		typeof candidate.summary === "string" &&
+		Array.isArray(candidate.findings)
+	);
+}
+
+/**
  * Runs one independent category reviewer over the integrated result and
  * publishes its structured findings as the step's declared output.
  */
@@ -156,9 +235,9 @@ export class ReviewStepHandler implements StepHandler {
 				retryable: false,
 			};
 		}
-		let category: ReviewCategory;
+		let identity: ReviewStepIdentity;
 		try {
-			category = reviewCategoryOf(step);
+			identity = parseReviewStepId(step.id);
 		} catch (error) {
 			return {
 				status: "failed",
@@ -166,7 +245,21 @@ export class ReviewStepHandler implements StepHandler {
 				retryable: false,
 			};
 		}
+		const { category, round } = identity;
 		const baseCommit = context.execution.repositorySnapshot.commit;
+		const output = outputs[0] as string;
+		const adopted = adoptablePriorFindings(
+			context.execution.upstreamArtifacts,
+			category,
+			baseCommit,
+		);
+		if (adopted) {
+			return {
+				status: "succeeded",
+				summary: `Adopted the ${category} review of unchanged commit ${baseCommit}`,
+				artifacts: [reviewFindingsArtifact(output, category, adopted)],
+			};
+		}
 		const result = await this.options.worker.run({
 			runId: context.runId,
 			stepId: step.id,
@@ -208,11 +301,7 @@ export class ReviewStepHandler implements StepHandler {
 				category,
 				baseCommit,
 				summary: report.summary,
-				findings: materializeReviewFindings(
-					report,
-					category,
-					context.attempt.number,
-				),
+				findings: materializeReviewFindings(report, category, round),
 			};
 		} catch (error) {
 			return {
@@ -222,19 +311,10 @@ export class ReviewStepHandler implements StepHandler {
 				}`,
 			};
 		}
-		const output = outputs[0] as string;
-		const artifacts: StepArtifactDraft[] = [
-			{
-				output,
-				kind: "findings",
-				title: `${category} review findings`,
-				payload: { format: "json", value: payload },
-			},
-		];
 		return {
 			status: "succeeded",
 			summary: payload.summary,
-			artifacts,
+			artifacts: [reviewFindingsArtifact(output, category, payload)],
 		};
 	}
 }

@@ -1,3 +1,4 @@
+import { pathIsAllowed } from "../../domain/paths.js";
 import type { ResolvedStepInput } from "../../domain/step-context.js";
 import type { ChangeStepDefinition } from "../../domain/steps.js";
 import type { ReviewFinding, RunSecurityPolicy } from "../../domain/types.js";
@@ -120,6 +121,20 @@ export class RepairStepHandler implements StepHandler {
 			return {
 				status: "failed",
 				error: error instanceof Error ? error.message : String(error),
+				retryable: false,
+			};
+		}
+		// A finding outside the approved paths cannot be repaired under this
+		// run's authority, and widening the repair scope is the user's decision.
+		const outOfScope = required.filter((finding) =>
+			finding.paths.some((path) => !pathIsAllowed(path, step.allowedPaths)),
+		);
+		if (outOfScope.length > 0) {
+			return {
+				status: "failed",
+				error: `Important findings require changes outside approved paths: ${outOfScope
+					.map((finding) => finding.id)
+					.join(", ")}`,
 				retryable: false,
 			};
 		}

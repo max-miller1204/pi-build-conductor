@@ -219,6 +219,7 @@ export async function runValidatedChange(
 			status: "succeeded",
 			summary: `Committed ${evidence.changedFiles.length} changed file(s) as ${commit}`,
 			commit,
+			evidence,
 			artifacts: artifactsFor(
 				step,
 				evidence,
