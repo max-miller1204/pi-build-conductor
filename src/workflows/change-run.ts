@@ -33,6 +33,7 @@ import {
 import { defaultWorkspaceProviders } from "../engine/workspaces.js";
 import type { GitClient, RepositoryInfo } from "../git/git.js";
 import type { WorktreeManager } from "../git/worktrees.js";
+import { retryableRunWork } from "../inspection/run-control.js";
 import { readReviewFindings } from "../inspection/run-inspector.js";
 import { engineRunView, type RunView } from "../inspection/run-view.js";
 import { defaultCapabilityProfiles } from "../security/capabilities.js";
@@ -414,6 +415,10 @@ export class EngineChangeRunner {
 			options.signal,
 		);
 		try {
+			const assessment = retryableRunWork(await this.loadView(run.id));
+			if (!assessment.retryable) {
+				throw new Error(assessment.reason);
+			}
 			await this.markExecuting(run.id);
 			const reset: string[] = [];
 			let retryFinalization = false;
@@ -444,9 +449,8 @@ export class EngineChangeRunner {
 					}
 					if (reset.length === 0) {
 						retryFinalization =
-							current.state === "completed" &&
-							run.state === "failed" &&
-							run.finalValidationAttempts.at(-1)?.state === "failed";
+							assessment.phase === "final-validation" &&
+							current.state === "completed";
 						return current;
 					}
 					const { error: _settled, ...rest } = next;

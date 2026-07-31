@@ -906,6 +906,34 @@ describe("live /orchestrate change runs on the engine", () => {
 		120_000,
 	);
 
+	it("does not reopen a run completed after a stale retry assessment", async () => {
+		const harness = await createHarness();
+		harness.workers.failNextChange = true;
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		expect(failed.state).toBe("failed");
+		const stale = await harness.store.load(harness.run.id);
+
+		const completed = await (
+			await harness.runner.retry(stale, harness.repository)
+		).completion;
+		expect(completed.state).toBe("completed");
+		const mergeReadyEvidence = completed.mergeReadyEvidence;
+
+		await expect(
+			harness.runner.retry(stale, harness.repository),
+		).rejects.toThrow("only failed runs can be retried");
+		expect(await harness.view()).toMatchObject({
+			state: "completed",
+			mergeReadyEvidence,
+		});
+		expect(await harness.store.load(harness.run.id)).toMatchObject({
+			state: "completed",
+			mergeReadyEvidence,
+		});
+	}, 120_000);
+
 	it("re-keys deferred findings adopted by later review rounds", async () => {
 		const harness = await createHarness("src/follow-up.txt", "low");
 
