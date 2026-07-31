@@ -7,6 +7,10 @@ import {
 	type WorkflowRunState,
 } from "../src/engine/workflow-state.js";
 import {
+	renderRunOverview,
+	reviewStateSummary,
+} from "../src/inspection/run-presentation.js";
+import {
 	engineRunView,
 	type ReviewFindingsByStep,
 	reviewRoundViews,
@@ -324,6 +328,53 @@ describe("reading an engine run", () => {
 			state: "failed",
 			error: expect.stringContaining("Important findings remain"),
 		});
+	});
+
+	it("does not present planned review rounds as started", () => {
+		const view = engineRunView(storedRun(), workflowState());
+
+		expect(reviewRoundViews(view)).toHaveLength(3);
+		expect(reviewStateSummary(view)).toBe("Reviews: not started");
+		expect(renderRunOverview(view).join("\n")).not.toContain(
+			"Latest review round:",
+		);
+	});
+
+	it("presents round one while later review rounds are still planned", () => {
+		const state = workflowState();
+		const stepId = "review-1-security";
+		const record = state.steps[stepId];
+		if (!record) {
+			throw new Error(`Missing test fixture step: ${stepId}`);
+		}
+		const started = {
+			...state,
+			steps: {
+				...state.steps,
+				[stepId]: { ...record, state: "running" as const },
+			},
+			attempts: [
+				...state.attempts,
+				{
+					id: `${stepId}-1`,
+					stepId,
+					number: 1,
+					state: "running" as const,
+					workspaceRequirement: "read-only" as const,
+					workspacePath: `/worktrees/${stepId}`,
+					baseCommit: "integrated",
+					startedAt: "2026-01-01T00:10:00.000Z",
+					workerId: `worker-${stepId}`,
+				},
+			],
+		};
+		const view = engineRunView(storedRun(), started);
+		const overview = renderRunOverview(view).join("\n");
+
+		expect(reviewRoundViews(view)).toHaveLength(3);
+		expect(reviewStateSummary(view)).toContain("Review round 1:");
+		expect(overview).toContain("Latest review round: running");
+		expect(overview).not.toContain("Review round 3:");
 	});
 
 	it("reports a failed review round with the step failure behind it", () => {

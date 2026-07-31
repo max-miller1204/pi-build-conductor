@@ -87,6 +87,9 @@ async function executedRun() {
 	const repository = await git.inspect(root);
 	const directory = join(repository.commonDirectory, STORAGE_DIRECTORY_NAME);
 	const store = new RunStore(join(directory, "runs"));
+	const workflowStates = new FileWorkflowStateStore(
+		join(directory, WORKFLOW_RUNS_DIRECTORY_NAME),
+	);
 	const created = await store.create(
 		createOrchestrationRun({
 			id: "inspect-engine-run",
@@ -102,9 +105,7 @@ async function executedRun() {
 	);
 	const runner = new EngineChangeRunner({
 		store,
-		workflowStates: new FileWorkflowStateStore(
-			join(directory, WORKFLOW_RUNS_DIRECTORY_NAME),
-		),
+		workflowStates,
 		artifacts: new ArtifactStore(join(directory, "artifacts")),
 		// The reviews raise one finding the policy requires repaired, so the run
 		// has a repair with a commit and evidence to inspect.
@@ -121,7 +122,7 @@ async function executedRun() {
 	const completed = await (await runner.approveAndLaunch(created, repository))
 		.completion;
 	expect(completed.state).toBe("completed");
-	return { root, store, runId: created.id, view: completed };
+	return { root, store, workflowStates, runId: created.id, view: completed };
 }
 
 function commandContext(root: string) {
@@ -244,5 +245,48 @@ describe("inspecting an engine-backed run through the command surface", () => {
 		);
 
 		expect(notifications.join("\n")).toContain("Unknown step ID: missing-step");
+	}, 120_000);
+
+	it("does not cancel a workflow snapshot that is already failed", async () => {
+		const executed = await executedRun();
+		await executed.store.transaction(executed.runId, (stored) => ({
+			...stored,
+			state: "running",
+		}));
+		await executed.workflowStates.transaction(executed.runId, (state) => {
+			const stepId = "review-1-security";
+			const record = state.steps[stepId];
+			if (!record) {
+				throw new Error(`Missing test fixture step: ${stepId}`);
+			}
+			return {
+				...state,
+				state: "failed",
+				error: "The reviewer failed after the last store update",
+				steps: {
+					...state.steps,
+					[stepId]: {
+						...record,
+						state: "failed",
+						error: "The reviewer failed after the last store update",
+					},
+				},
+			};
+		});
+		const { commands, ctx, notifications, widget } = commandContext(
+			executed.root,
+		);
+
+		await commands.get("orchestrate-cancel")?.(executed.runId, ctx);
+
+		expect(notifications).toContain(
+			`Run ${executed.runId} was already failed; no lifecycle work was changed`,
+		);
+		expect(widget(`pi-orchestrator:${executed.runId}`)).toContain(
+			"State: failed",
+		);
+		expect((await executed.workflowStates.load(executed.runId)).state).toBe(
+			"failed",
+		);
 	}, 120_000);
 });

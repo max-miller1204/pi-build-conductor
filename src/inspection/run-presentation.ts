@@ -155,15 +155,26 @@ export function unitStateSummary(view: RunView): string {
 }
 
 export function reviewStateSummary(view: RunView): string {
-	const round = reviewRoundViews(view).at(-1);
+	const round = latestStartedReviewRound(view);
 	if (!round) {
 		return "Reviews: not started";
 	}
 	return `Review round ${round.number}: ${round.reported}/${round.categories} reports received, ${round.findings.repair_required} repair-required, ${round.findings.unresolved} unresolved, ${round.findings.deferred} deferred`;
 }
 
+function latestStartedReviewRound(view: RunView) {
+	const started = new Set(
+		view.units.flatMap((unit) =>
+			unit.review && unit.attemptIds.length > 0 ? [unit.review.round] : [],
+		),
+	);
+	return reviewRoundViews(view)
+		.filter((round) => started.has(round.number))
+		.at(-1);
+}
+
 function latestReviewRoundLines(view: RunView): string[] {
-	const round = reviewRoundViews(view).at(-1);
+	const round = latestStartedReviewRound(view);
 	if (!round) {
 		return [];
 	}
@@ -534,13 +545,16 @@ export function renderAttemptDetails(
 	let next: string;
 	if (resolution.kind === "step" && isFollowableAttempt(resolution.attempt)) {
 		next = `/orchestrate-follow ${safeInline(view.id)} ${safeInline(resolution.attempt.id)}`;
-	} else if (
-		["failed", "interrupted", "cancelled"].includes(resolution.attempt.state)
-	) {
+	} else if (resolution.attempt.state === "failed") {
 		next =
-			resolution.kind === "step" && resolution.attempt.role === "change"
+			resolution.kind === "step" &&
+			(view.source === "engine" || resolution.attempt.role === "change")
 				? `/orchestrate-retry ${safeInline(view.id)} ${safeInline(resolution.attempt.unitId)}`
-				: `/orchestrate-resume ${safeInline(view.id)}`;
+				: resolution.kind === "final-validation"
+					? `/orchestrate-retry ${safeInline(view.id)}`
+					: `/orchestrate-resume ${safeInline(view.id)}`;
+	} else if (resolution.attempt.state === "interrupted") {
+		next = `/orchestrate-resume ${safeInline(view.id)}`;
 	} else {
 		next = `/orchestrate-show ${safeInline(view.id)}`;
 	}

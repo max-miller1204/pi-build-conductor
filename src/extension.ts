@@ -1575,32 +1575,34 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				const { orchestrator, store } = runtime;
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
+				const view = await runView(runtime.views, stored);
 				if (
-					!["completed", "failed", "cancelled"].includes(stored.state) &&
+					!["completed", "failed", "cancelled"].includes(view.state) &&
 					ctx.hasUI &&
 					!(await ctx.ui.confirm(
 						`Cancel run ${runId}?`,
-						`The run is ${stored.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
+						`The run is ${view.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
 					))
 				) {
 					ctx.ui.setStatus("pi-orchestrator", undefined);
 					ctx.ui.notify("Cancellation declined", "info");
 					return;
 				}
-				const cancelled = (await runtime.engine.hasWorkflowState(runId))
-					? await runtime.engine.cancel(stored, repository)
-					: await orchestrator.cancelRun(stored);
+				let result = view;
+				if (!["completed", "failed", "cancelled"].includes(view.state)) {
+					const cancelled = (await runtime.engine.hasWorkflowState(runId))
+						? await runtime.engine.cancel(stored, repository)
+						: await orchestrator.cancelRun(stored);
+					result = await runView(runtime.views, cancelled);
+				}
 				const key = runUiKey(runId);
 				ctx.ui.setStatus("pi-orchestrator", undefined);
-				ctx.ui.setStatus(key, `run ${runId}: ${cancelled.state}`);
-				ctx.ui.setWidget(
-					key,
-					renderRunOverview(await runView(runtime.views, cancelled)),
-				);
+				ctx.ui.setStatus(key, `run ${runId}: ${result.state}`);
+				ctx.ui.setWidget(key, renderRunOverview(result));
 				ctx.ui.notify(
-					cancelled.state === "cancelled"
+					result.state === "cancelled"
 						? `Run ${runId} cancelled and workers stopped`
-						: `Run ${runId} was already ${cancelled.state}; no lifecycle work was changed`,
+						: `Run ${runId} was already ${result.state}; no lifecycle work was changed`,
 					"info",
 				);
 			} catch (error) {

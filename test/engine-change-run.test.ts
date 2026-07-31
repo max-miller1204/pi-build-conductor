@@ -865,6 +865,47 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect((await retry.completion).state).toBe("completed");
 	}, 120_000);
 
+	it.each(["retry", "resume"] as const)(
+		"keeps a failed snapshot recoverable if %s stops after reopening the stored run",
+		async (action) => {
+			const harness = await createHarness();
+			harness.workers.failNextChange = true;
+			const failed = await (
+				await harness.runner.approveAndLaunch(
+					harness.run,
+					harness.repository,
+				)
+			).completion;
+			expect(failed.state).toBe("failed");
+
+			let mutationReached = false;
+			harness.dependencies.workflowStates.transaction = async () => {
+				mutationReached = true;
+				expect((await harness.store.load(harness.run.id)).state).toBe(
+					"running",
+				);
+				throw new Error("Simulated crash before snapshot mutation");
+			};
+
+			await expect(
+				harness.runner[action](
+					await harness.store.load(harness.run.id),
+					harness.repository,
+				),
+			).rejects.toThrow("Simulated crash before snapshot mutation");
+			expect(mutationReached).toBe(true);
+
+			const intermediate = await harness.view();
+			expect(intermediate.state).toBe("failed");
+			expect(retryableRunWork(intermediate)).toMatchObject({
+				retryable: true,
+				phase: "steps",
+				failedUnitIds: ["implementation"],
+			});
+		},
+		120_000,
+	);
+
 	it("re-keys deferred findings adopted by later review rounds", async () => {
 		const harness = await createHarness("src/follow-up.txt", "low");
 

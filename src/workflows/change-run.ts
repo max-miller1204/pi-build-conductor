@@ -285,6 +285,7 @@ export class EngineChangeRunner {
 				);
 			}
 			await this.interruptStaleFinalValidation(run.id);
+			await this.markExecuting(run.id);
 			const { state, recovered } = await recoverWorkflowRun(
 				{
 					store: this.dependencies.workflowStates,
@@ -299,7 +300,6 @@ export class EngineChangeRunner {
 				state,
 				recovered,
 			);
-			await this.markExecuting(run.id);
 			if (relaunched.state !== "running") {
 				const view = await this.loadView(run.id, relaunched);
 				const completion = this.settle(
@@ -414,6 +414,7 @@ export class EngineChangeRunner {
 			options.signal,
 		);
 		try {
+			await this.markExecuting(run.id);
 			const reset: string[] = [];
 			let retryFinalization = false;
 			const state = await this.dependencies.workflowStates.transaction(
@@ -469,7 +470,6 @@ export class EngineChangeRunner {
 			);
 			if (reset.length === 0) {
 				if (retryFinalization) {
-					await this.markExecuting(run.id);
 					const view = await this.loadView(run.id, state);
 					const completion = this.settle(
 						run,
@@ -488,7 +488,6 @@ export class EngineChangeRunner {
 				}
 				throw new Error(`Run ${run.id} has no failed steps to retry`);
 			}
-			await this.markExecuting(run.id);
 			return this.launch(run, repository, model, options, execution);
 		} catch (error) {
 			await releaseExecution(

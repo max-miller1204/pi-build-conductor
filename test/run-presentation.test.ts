@@ -355,6 +355,39 @@ describe("run inspection presentation", () => {
 		},
 	);
 
+	it("retries failed engine review steps but preserves the legacy restriction", () => {
+		const legacy = populatedView();
+		const attempts = legacy.attempts.map((attempt) =>
+			attempt.id === "review-a"
+				? { ...attempt, state: "failed" as const }
+				: attempt,
+		);
+		const engine = { ...legacy, source: "engine" as const, attempts };
+
+		expect(renderAttemptDetails(engine, "review-a").join("\n")).toContain(
+			"Next: /orchestrate-retry run-inspect review-1-correctness",
+		);
+		expect(
+			renderAttemptDetails({ ...legacy, attempts }, "review-a").join("\n"),
+		).toContain("Next: /orchestrate-resume run-inspect");
+	});
+
+	it("resumes interrupted attempts instead of retrying their step", () => {
+		const view = populatedView();
+		const interrupted = {
+			...view,
+			attempts: view.attempts.map((attempt) =>
+				attempt.id === "task-a"
+					? { ...attempt, state: "interrupted" as const }
+					: attempt,
+			),
+		};
+
+		expect(renderAttemptDetails(interrupted, "task-a").join("\n")).toContain(
+			"Next: /orchestrate-resume run-inspect",
+		);
+	});
+
 	it("bounds output tails and removes terminal control characters", () => {
 		const lines = renderAttemptDetails(populatedView(), "task-a");
 		const output = lines.join("\n");
