@@ -912,10 +912,7 @@ describe("live /orchestrate change runs on the engine", () => {
 			const harness = await createHarness();
 			harness.workers.failNextChange = true;
 			const failed = await (
-				await harness.runner.approveAndLaunch(
-					harness.run,
-					harness.repository,
-				)
+				await harness.runner.approveAndLaunch(harness.run, harness.repository)
 			).completion;
 			expect(failed.state).toBe("failed");
 

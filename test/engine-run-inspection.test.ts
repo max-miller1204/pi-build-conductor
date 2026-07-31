@@ -7,7 +7,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOrchestrationRun } from "../src/domain/run.js";
 import type { TaskPlan } from "../src/domain/types.js";
 import extension from "../src/extension.js";
@@ -23,8 +23,45 @@ import {
 } from "../src/storage/workflow-state-store.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
+import type {
+	SpawnWorkerRequest,
+	WorkerBackend,
+	WorkerExecutionOptions,
+} from "../src/workers/backend.js";
 import { EngineChangeRunner } from "../src/workflows/change-run.js";
 import { ChangeRunWorkers } from "./helpers/change-run-workers.js";
+
+const mockedServer = vi.hoisted(() => ({
+	backend: undefined as WorkerBackend | undefined,
+}));
+
+vi.mock("../src/workers/server-backend.js", () => ({
+	OfficialServerBackend: class {
+		spawn(request: SpawnWorkerRequest) {
+			return mockedServer.backend?.spawn(request);
+		}
+
+		list() {
+			return mockedServer.backend?.list();
+		}
+
+		status(workerId: string) {
+			return mockedServer.backend?.status(workerId);
+		}
+
+		startPrompt(
+			workerId: string,
+			prompt: string,
+			options?: WorkerExecutionOptions,
+		) {
+			return mockedServer.backend?.startPrompt(workerId, prompt, options);
+		}
+
+		stop(workerId: string) {
+			return mockedServer.backend?.stop(workerId);
+		}
+	},
+}));
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -33,6 +70,12 @@ type CommandHandler = (
 	args: string,
 	ctx: ExtensionCommandContext,
 ) => Promise<void> | void;
+
+function showEvidence(label: string, body: string): void {
+	if (process.env.NO_MISTAKES_CAPTURE === "1") {
+		console.log(`\n--- ${label} ---\n${body}\n--- end ${label} ---`);
+	}
+}
 
 afterEach(async () => {
 	await Promise.all(
@@ -70,7 +113,7 @@ function plan(): TaskPlan {
  * A real engine change run, executed against a real repository, with its
  * stores where the extension commands look for them.
  */
-async function executedRun() {
+async function executedRun(failNextChange = false) {
 	const parent = await mkdtemp(join(tmpdir(), "pi-orchestrator-inspection-"));
 	directories.push(parent);
 	const root = join(parent, "repository");
@@ -103,16 +146,18 @@ async function executedRun() {
 			now: "2026-01-01T00:00:00.000Z",
 		}),
 	);
+	const workers = new ChangeRunWorkers({
+		path: "src/review-fix.txt",
+		severity: "high",
+	});
+	workers.failNextChange = failNextChange;
 	const runner = new EngineChangeRunner({
 		store,
 		workflowStates,
 		artifacts: new ArtifactStore(join(directory, "artifacts")),
 		// The reviews raise one finding the policy requires repaired, so the run
 		// has a repair with a commit and evidence to inspect.
-		workers: new ChangeRunWorkers({
-			path: "src/review-fix.txt",
-			severity: "high",
-		}),
+		workers,
 		git,
 		worktrees: new GitWorktreeManager(git, join(parent, "worktrees")),
 		validator: new LocalTaskValidator(git),
@@ -121,12 +166,15 @@ async function executedRun() {
 	});
 	const completed = await (await runner.approveAndLaunch(created, repository))
 		.completion;
-	expect(completed.state).toBe("completed");
+	expect(completed.state).toBe(failNextChange ? "failed" : "completed");
+	mockedServer.backend = workers;
 	return { root, store, workflowStates, runId: created.id, view: completed };
 }
 
 function commandContext(root: string) {
 	const widgets = new Map<string, string[]>();
+	const widgetHistory = new Map<string, string[]>();
+	const statuses = new Map<string, string | undefined>();
 	const notifications: string[] = [];
 	const commands = new Map<string, CommandHandler>();
 	extension({
@@ -142,19 +190,27 @@ function commandContext(root: string) {
 			setWidget(key: string, lines: string[] | undefined) {
 				if (lines) {
 					widgets.set(key, lines);
+					widgetHistory.set(key, [
+						...(widgetHistory.get(key) ?? []),
+						lines.join("\n"),
+					]);
 				}
 			},
 			notify(message: string) {
 				notifications.push(message);
 			},
-			setStatus() {},
+			setStatus(key: string, value: string | undefined) {
+				statuses.set(key, value);
+			},
 		},
 	} as unknown as ExtensionCommandContext;
 	return {
 		commands,
 		ctx,
 		notifications,
+		status: (key: string) => statuses.get(key),
 		widget: (key: string) => widgets.get(key)?.join("\n") ?? "",
+		widgets: (key: string) => widgetHistory.get(key) ?? [],
 	};
 }
 
@@ -164,12 +220,14 @@ describe("inspecting an engine-backed run through the command surface", () => {
 		const { commands, ctx, widget } = commandContext(executed.root);
 
 		await commands.get("orchestrate-list")?.("", ctx);
+		showEvidence("orchestrate-list", widget("pi-orchestrator:runs"));
 		expect(widget("pi-orchestrator:runs")).toContain(
 			`${executed.runId} | completed`,
 		);
 
 		await commands.get("orchestrate-show")?.(executed.runId, ctx);
 		const overview = widget(`pi-orchestrator:${executed.runId}`);
+		showEvidence("orchestrate-show overview", overview);
 		expect(overview).toContain("Execution record: engine");
 		expect(overview).toContain("implementation [succeeded]");
 		expect(overview).toContain("Review round 3: 5/5 reports received");
@@ -187,6 +245,7 @@ describe("inspecting an engine-backed run through the command surface", () => {
 			ctx,
 		);
 		const review = widget(`pi-orchestrator:${executed.runId}`);
+		showEvidence("orchestrate-show review step", review);
 		expect(review).toContain("Step review-1-security (review)");
 		expect(review).toContain("State: succeeded");
 
@@ -200,6 +259,7 @@ describe("inspecting an engine-backed run through the command surface", () => {
 			ctx,
 		);
 		const attempt = widget(`pi-orchestrator:${executed.runId}`);
+		showEvidence("orchestrate-show repair attempt", attempt);
 		expect(attempt).toContain("Repair: round 1");
 		expect(attempt).toContain("Worker authority: repair");
 		expect(attempt).toContain("Evidence: passed");
@@ -216,6 +276,48 @@ describe("inspecting an engine-backed run through the command surface", () => {
 		expect(notifications.join("\n")).toContain("output");
 		expect(widget(`pi-orchestrator:${executed.runId}:output`)).toContain(
 			"Worker output:",
+		);
+		showEvidence(
+			"orchestrate-follow",
+			widget(`pi-orchestrator:${executed.runId}:output`),
+		);
+	}, 120_000);
+
+	it("retries a failed engine step and renders its live run widget", async () => {
+		const executed = await executedRun(true);
+		const { commands, ctx, notifications, status, widgets } = commandContext(
+			executed.root,
+		);
+		await commands.get("orchestrate-show")?.(executed.runId, ctx);
+		expect(widgets(`pi-orchestrator:${executed.runId}`).at(-1)).toContain(
+			`Next: /orchestrate-retry ${executed.runId}`,
+		);
+
+		await commands.get("orchestrate-retry")?.(
+			`${executed.runId} implementation`,
+			ctx,
+		);
+
+		const key = `pi-orchestrator:${executed.runId}`;
+		await expect
+			.poll(() => status(key), { timeout: 120_000 })
+			.toBe("merge-ready validation passed");
+		const live = widgets(key).find((body) => body.includes("Run: running"));
+		showEvidence(
+			"orchestrate-retry live widget",
+			live ?? "missing live widget",
+		);
+		expect(live).toContain("Steps:");
+		expect(live).toContain("Reviews: not started");
+		expect(notifications.join("\n")).toContain(
+			`Executing run ${executed.runId}`,
+		);
+		expect((await executed.workflowStates.load(executed.runId)).state).toBe(
+			"completed",
+		);
+		showEvidence(
+			"orchestrate-retry completion",
+			[`Status: ${status(key)}`, ...notifications].join("\n"),
 		);
 	}, 120_000);
 
@@ -278,12 +380,21 @@ describe("inspecting an engine-backed run through the command surface", () => {
 		);
 
 		await commands.get("orchestrate-cancel")?.(executed.runId, ctx);
+		showEvidence(
+			"orchestrate-cancel stale store",
+			[...notifications, widget(`pi-orchestrator:${executed.runId}`)].join(
+				"\n",
+			),
+		);
 
 		expect(notifications).toContain(
 			`Run ${executed.runId} was already failed; no lifecycle work was changed`,
 		);
 		expect(widget(`pi-orchestrator:${executed.runId}`)).toContain(
 			"State: failed",
+		);
+		expect(widget(`pi-orchestrator:${executed.runId}`)).toContain(
+			`Next: /orchestrate-retry ${executed.runId}`,
 		);
 		expect((await executed.workflowStates.load(executed.runId)).state).toBe(
 			"failed",

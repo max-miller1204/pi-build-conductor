@@ -7,6 +7,7 @@ import type {
 } from "../domain/types.js";
 import { formatCommand } from "../planning/plan-presentation.js";
 import { securityPolicyLines, workerLaunchPolicy } from "../security/policy.js";
+import { recommendedRunAction } from "./run-control.js";
 import {
 	type RunAttemptView,
 	type RunUnitRole,
@@ -221,6 +222,16 @@ export function latestFollowableWorkerAttempt(
 function nextRunAction(view: RunView): string {
 	if (view.state === "completed" || view.state === "cancelled") {
 		return `/orchestrate-prune ${safeInline(view.id)}`;
+	}
+	if (view.state === "failed") {
+		const recommended = recommendedRunAction(view);
+		if (recommended.action === "retry") {
+			return `/orchestrate-retry ${safeInline(view.id)}`;
+		}
+		if (recommended.action === "resume") {
+			return `/orchestrate-resume ${safeInline(view.id)}`;
+		}
+		return `/orchestrate-show ${safeInline(view.id)}`;
 	}
 	if (
 		["running", "integrating", "reviewing", "repairing"].includes(view.state)

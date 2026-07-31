@@ -1080,11 +1080,7 @@ export class Orchestrator {
 								(item) => item.id === attempt.id,
 							);
 							const storedTask = stored.tasks[attempt.taskId];
-							if (
-								!storedAttempt ||
-								storedAttempt.state !== "validating" ||
-								!storedTask
-							) {
+							if (storedAttempt?.state !== "validating" || !storedTask) {
 								return stored;
 							}
 							const hasOtherFailedTask = Object.entries(stored.tasks).some(
@@ -1522,7 +1518,7 @@ export class Orchestrator {
 		let attempt = runAtValidation.attempts.find(
 			(item) => item.id === execution.attemptId,
 		);
-		if (!attempt || attempt.state !== "validating") {
+		if (attempt?.state !== "validating") {
 			return runAtValidation;
 		}
 		const task = runAtValidation.tasks[attempt.taskId];
@@ -1593,7 +1589,7 @@ export class Orchestrator {
 					const storedAttempt = stored.attempts.find(
 						(item) => item.id === execution.attemptId,
 					);
-					if (!storedAttempt || storedAttempt.state !== "validating") {
+					if (storedAttempt?.state !== "validating") {
 						throw new Error(
 							`Attempt left validation while commit ${commit} was being created`,
 						);
@@ -1619,7 +1615,7 @@ export class Orchestrator {
 					const storedAttempt = stored.attempts.find(
 						(item) => item.id === execution.attemptId,
 					);
-					if (!storedAttempt || storedAttempt.state !== "validating") {
+					if (storedAttempt?.state !== "validating") {
 						return stored;
 					}
 					const storedTask = stored.tasks[storedAttempt.taskId];
@@ -1690,7 +1686,7 @@ export class Orchestrator {
 					const storedAttempt = stored.attempts.find(
 						(item) => item.id === execution.attemptId,
 					);
-					if (!storedAttempt || storedAttempt.state !== "validating") {
+					if (storedAttempt?.state !== "validating") {
 						return stored;
 					}
 					const storedTask = stored.tasks[storedAttempt.taskId];
@@ -2144,7 +2140,7 @@ export class Orchestrator {
 			const attempt = stored.repairAttempts.find(
 				(candidate) => candidate.id === attemptId,
 			);
-			if (!attempt || attempt.state !== "validating" || !attempt.commit) {
+			if (attempt?.state !== "validating" || !attempt.commit) {
 				throw new Error(
 					`Repair attempt ${attemptId} is not ready for integration`,
 				);
@@ -3060,7 +3056,7 @@ export class Orchestrator {
 				return current;
 			}
 			const task = current.tasks[taskId];
-			if (!task || task.state !== "succeeded") {
+			if (task?.state !== "succeeded") {
 				return current;
 			}
 			const attempt = succeededTaskAttempt(current, taskId);

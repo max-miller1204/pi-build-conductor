@@ -150,7 +150,7 @@ Step-phase retry creates new attempts for all failed steps in the retry set and 
 Final-validation retry creates a new detached attempt for the already approved complete suite.
 
 Inspection reads a run from whichever record executed it.
-A run started by the workflow engine is read from its durable workflow snapshot, so its steps, review rounds, findings, and attempts are the engine's own record rather than a copy of it; `step <step-id>` names an engine step such as `implementation`, `review-2-security`, or `repair-1`, and `task <task-id>` still resolves for habit.
+A run started by the workflow engine is read from its durable workflow snapshot and published artifacts, so its steps, review rounds, findings, and attempts are the engine's own record rather than a copy of it; `step <step-id>` names an engine step such as `implementation`, `review-2-security`, or `repair-1`, and `task <task-id>` remains accepted as a compatibility alias.
 A run that executed under the legacy orchestrator is read from the stored run and keeps the same vocabulary, but its review and repair phases cannot be retried, because restarting one needs round coordination that lifecycle never had.
 
 Cancellation is idempotent.
@@ -297,7 +297,7 @@ A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new 
 Immutable workflow artifacts are stored by run below `<git-common-dir>/pi-orchestrator/artifacts/`.
 Workflow engine runs, including new `/orchestrate` change runs, execute from versioned snapshots below `<git-common-dir>/pi-orchestrator/workflow-runs/`, which are the authoritative execution record and allow recovery after a restart.
 For change runs, the corresponding `runs/` record holds only what the snapshot does not: the request, plan history, approval, security policy, final-validation attempts, and the run's terminal outcome and merge-ready evidence.
-No execution state is copied onto it, so a step, attempt, review round, or finding is read from the engine snapshot and exists in exactly one place.
+No execution state is copied onto it: steps, attempts, and review rounds are read from the engine snapshot, while review findings are read from their published workflow artifacts.
 Runs with legacy execution state and no workflow snapshot remain on the legacy execution path and are read from the stored run itself.
 Orchestrator worktrees are stored at:
 

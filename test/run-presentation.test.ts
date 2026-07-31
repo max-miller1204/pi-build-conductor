@@ -252,6 +252,25 @@ describe("run inspection presentation", () => {
 		expect(output).not.toContain("\u001b");
 	});
 
+	it("recommends retry rather than resume for a failed engine run", () => {
+		const view = populatedView();
+		const engine = {
+			...view,
+			source: "engine" as const,
+			state: "failed" as const,
+			attempts: view.attempts.map((attempt) =>
+				attempt.state === "running"
+					? { ...attempt, state: "succeeded" as const }
+					: attempt,
+			),
+			blockedWorkers: [],
+		};
+
+		expect(renderRunOverview(engine).at(-1)).toBe(
+			"Next: /orchestrate-retry run-inspect",
+		);
+	});
+
 	it("does not present a settled review round as in progress", () => {
 		const run = populatedRun();
 		const { finishedAt: _finishedAt, ...first } = required(
