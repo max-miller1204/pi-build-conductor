@@ -256,7 +256,23 @@
       "status": "open",
       "createdAt": "2026-07-24T18:31:12.552Z",
       "updatedAt": "2026-07-24T18:31:12.552Z"
+    },
+    {
+      "id": "goal-ms98t2jk-5f2a49c6",
+      "title": "Add autonomous and guided execution modes",
+      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement. --json",
+      "status": "open",
+      "createdAt": "2026-07-31T17:55:04.352Z",
+      "updatedAt": "2026-07-31T17:55:04.352Z"
+    },
+    {
+      "id": "goal-ms98t7al-d4b5a7f6",
+      "title": "Add autonomous and guided execution modes",
+      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement. --json",
+      "status": "open",
+      "createdAt": "2026-07-31T17:55:10.509Z",
+      "updatedAt": "2026-07-31T17:55:10.509Z"
     }
   ],
-  "revision": 16
+  "revision": 18
 }
