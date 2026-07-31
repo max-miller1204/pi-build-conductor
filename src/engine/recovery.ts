@@ -183,8 +183,9 @@ async function inspectInterruptedAttempt(
 
 /**
  * Reconciles a run whose executing process disappeared. Every attempt still
- * marked active is settled from durable evidence, so a resumed run never
- * double-runs a step and never loses a commit that already exists.
+ * marked active is settled from durable evidence. Recovery adopts only commits
+ * with every declared artifact and retries unverified work only when safe and
+ * budgeted.
  */
 export async function recoverWorkflowRun(
 	dependencies: WorkflowRecoveryDependencies,

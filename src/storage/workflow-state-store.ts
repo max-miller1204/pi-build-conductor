@@ -281,10 +281,7 @@ function validateStoredSteps(
 		if (new Set(attemptIds).size !== attemptIds.length) {
 			throw new Error(`${path}.attemptIds must be unique`);
 		}
-		assertOptionalString(
-			record.integratedCommit,
-			`${path}.integratedCommit`,
-		);
+		assertOptionalString(record.integratedCommit, `${path}.integratedCommit`);
 		for (const field of ["integrationError", "error"] as const) {
 			assertOptionalText(record[field], `${path}.${field}`);
 		}
@@ -333,7 +330,11 @@ function validateStoredAttempts(
 		for (const field of ["branch", "finishedAt", "commit"] as const) {
 			assertOptionalString(attempt[field], `${path}.${field}`);
 		}
-		for (const field of ["summary", "error", "workspaceReleaseError"] as const) {
+		for (const field of [
+			"summary",
+			"error",
+			"workspaceReleaseError",
+		] as const) {
 			assertOptionalText(attempt[field], `${path}.${field}`);
 		}
 		if (!definitions.has(attempt.stepId as string)) {
