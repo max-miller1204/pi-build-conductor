@@ -21,6 +21,7 @@ import {
 	execute,
 	investigationStep,
 	removeWorkflowHarnessDirectories,
+	type WorkflowHarness,
 	workflowPlanOf,
 } from "./helpers/workflow.js";
 
@@ -29,6 +30,36 @@ function handlerOf(
 	body: (context: StepHandlerContext) => Promise<StepOutcome>,
 ): StepHandler {
 	return { kind, execute: body };
+}
+
+/**
+ * Runs the workflow until its first step commits, then rebuilds the durable
+ * state a killed process leaves behind: the step branch carries the commit its
+ * worker really made, while the attempt is still recorded as active because
+ * nothing ever settled it. Returns that attempt's id.
+ */
+async function interruptAfterFirstCommit(
+	harness: WorkflowHarness,
+): Promise<string> {
+	await harness.engine.run(harness.initial.id);
+	const crashed = await harness.store.load(harness.initial.id);
+	const attempt = crashed.attempts[0];
+	const record = attempt ? crashed.steps[attempt.stepId] : undefined;
+	if (!attempt || !record) {
+		throw new Error("missing crashed attempt");
+	}
+	const { error: _stepError, ...stepWithoutError } = record;
+	const { error: _attemptError, ...attemptWithoutError } = attempt;
+	harness.store.save({
+		...crashed,
+		state: "running",
+		steps: {
+			...crashed.steps,
+			[attempt.stepId]: { ...stepWithoutError, state: "running" },
+		},
+		attempts: [{ ...attemptWithoutError, state: "running" }],
+	});
+	return attempt.id;
 }
 
 async function writeAndCommit(
@@ -250,36 +281,18 @@ describe("workflow recovery", () => {
 				return { status: "succeeded", commit };
 			}),
 		]);
-		await harness.engine.run(harness.initial.id);
-		const crashed = await harness.store.load(harness.initial.id);
-		const attempt = crashed.attempts[0];
-		const api = crashed.steps.api;
-		if (!attempt || !api) {
-			throw new Error("missing crashed attempt");
-		}
-		// Reproduce the durable state a killed process leaves behind: the commit
-		// exists on the step branch, but the attempt is still marked active.
-		const { error: _stepError, ...apiWithoutError } = api;
-		const { error: _attemptError, ...attemptWithoutError } = attempt;
-		harness.store.save({
-			...crashed,
-			state: "running",
-			steps: {
-				...crashed.steps,
-				api: { ...apiWithoutError, state: "running" },
-			},
-			attempts: [{ ...attemptWithoutError, state: "running" }],
-		});
-		const git = new GitCli();
+		const interrupted = await interruptAfterFirstCommit(harness);
+		const branch = (await harness.store.load(harness.initial.id)).attempts[0]
+			?.branch;
 
 		const recovery = await recoverWorkflowRun(
-			{ store: harness.store, git },
+			{ store: harness.store, git: new GitCli() },
 			harness.initial.id,
 		);
 
 		expect(recovery.recovered).toEqual([
 			{
-				attemptId: attempt.id,
+				attemptId: interrupted,
 				stepId: "api",
 				outcome: "adopted_commit",
 				commit: expect.any(String),
@@ -289,7 +302,7 @@ describe("workflow recovery", () => {
 		expect(recovery.state.steps.api?.state).toBe("succeeded");
 		expect(recovery.state.attempts[0]?.state).toBe("succeeded");
 		expect(recovery.state.attempts[0]?.commit).toBe(
-			await execute("git", ["rev-parse", attempt.branch ?? ""], {
+			await execute("git", ["rev-parse", branch ?? ""], {
 				cwd: harness.repositoryRoot,
 			}).then((result) => result.stdout.trim()),
 		);
@@ -307,6 +320,80 @@ describe("workflow recovery", () => {
 			"step(api): api",
 			"Initial",
 		]);
+	});
+
+	it("refuses to adopt a commit whose declared artifacts never reached storage", async () => {
+		// The producer's own retry budget is exhausted, so the only fail-closed
+		// answer is to fail it: adopting would complete a step whose dependents
+		// can never resolve the inputs it owed them.
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], { outputs: ["report"] }),
+			changeStep("ui", ["api"], ["src/ui/"], {
+				inputs: [{ stepId: "api", output: "report" }],
+			}),
+		]);
+		const harness = await createWorkflowHarness(plan, [
+			handlerOf("change", async (context) => {
+				await writeAndCommit(context);
+				return { status: "failed", error: "process crashed" };
+			}),
+		]);
+		const interrupted = await interruptAfterFirstCommit(harness);
+
+		const recovery = await recoverWorkflowRun(
+			{ store: harness.store, git: new GitCli(), artifacts: harness.artifacts },
+			harness.initial.id,
+		);
+
+		expect(recovery.recovered).toEqual([
+			{
+				attemptId: interrupted,
+				stepId: "api",
+				outcome: "failed",
+				reason: expect.stringContaining(
+					"did not durably store the declared output of api: report",
+				),
+			},
+		]);
+		expect(recovery.state.state).toBe("failed");
+		expect(recovery.state.steps.api?.state).toBe("failed");
+		expect(recovery.state.attempts[0]?.commit).toBeUndefined();
+		expect(recovery.state.steps.ui?.state).toBe("blocked");
+	});
+
+	it("refuses to adopt declared outputs it has no artifact store to verify", async () => {
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], {
+				outputs: ["report"],
+				retry: { maxAttempts: 3 },
+			}),
+		]);
+		const harness = await createWorkflowHarness(plan, [
+			handlerOf("change", async (context) => {
+				await writeAndCommit(context);
+				return { status: "failed", error: "process crashed" };
+			}),
+		]);
+		const interrupted = await interruptAfterFirstCommit(harness);
+
+		const recovery = await recoverWorkflowRun(
+			{ store: harness.store, git: new GitCli() },
+			harness.initial.id,
+		);
+
+		// Retry budget remains, but no retry can produce evidence a store that
+		// is not configured could ever confirm.
+		expect(recovery.recovered).toEqual([
+			{
+				attemptId: interrupted,
+				stepId: "api",
+				outcome: "failed",
+				reason: expect.stringContaining(
+					"no artifact store is configured to verify the declared output of api",
+				),
+			},
+		]);
+		expect(recovery.state.steps.api?.state).toBe("failed");
 	});
 
 	it("reschedules an interrupted attempt that produced nothing", async () => {

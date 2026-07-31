@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { lock } from "proper-lockfile";
 import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
@@ -27,6 +25,7 @@ import {
 	assertRunSecurityPolicy,
 	legacySecurityPolicy,
 } from "../security/policy.js";
+import { acquireStorageLock, writeFileAtomic } from "./file-storage.js";
 
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
@@ -1374,11 +1373,6 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 	return value as unknown as OrchestrationRun;
 }
 
-const LOCK_STALE_MS = 5_000;
-const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
-const LOCK_RETRY_MS = 20;
-const LOCK_UPDATE_MS = 2_000;
-
 function parseJson(text: string, context: string): unknown {
 	try {
 		return JSON.parse(text) as unknown;
@@ -1439,31 +1433,13 @@ export class RunStore {
 	}
 
 	private async writeAtomic(run: OrchestrationRun): Promise<void> {
+		// Validation rejects an unsafe run id, so the file name is already safe.
 		const validated = validateStoredRun(run);
-		await mkdir(this.directory, { recursive: true });
-		const destination = this.pathFor(validated.id);
-		const temporary = join(
+		await writeFileAtomic(
 			this.directory,
-			`.${validated.id}.${randomUUID()}.tmp`,
+			`${validated.id}.json`,
+			`${JSON.stringify(validated, null, 2)}\n`,
 		);
-		const handle = await open(temporary, "wx", 0o600);
-		try {
-			await handle.writeFile(`${JSON.stringify(validated, null, 2)}\n`, "utf8");
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		try {
-			await rename(temporary, destination);
-			const directoryHandle = await open(this.directory, "r");
-			try {
-				await directoryHandle.sync();
-			} finally {
-				await directoryHandle.close();
-			}
-		} finally {
-			await rm(temporary, { force: true });
-		}
 	}
 
 	private async readValidated(runId: string): Promise<OrchestrationRun> {
@@ -1477,19 +1453,10 @@ export class RunStore {
 	): Promise<() => Promise<void>> {
 		await mkdir(this.directory, { recursive: true });
 		try {
-			return await lock(join(this.directory, `.${runId}.${kind}`), {
-				realpath: false,
-				lockfilePath: this.lockPathFor(runId, kind),
-				stale: LOCK_STALE_MS,
-				update: LOCK_UPDATE_MS,
-				retries: {
-					retries: Math.ceil(LOCK_ACQUIRE_TIMEOUT_MS / LOCK_RETRY_MS),
-					factor: 1,
-					minTimeout: LOCK_RETRY_MS,
-					maxTimeout: LOCK_RETRY_MS,
-					randomize: false,
-				},
-			});
+			return await acquireStorageLock(
+				join(this.directory, `.${runId}.${kind}`),
+				this.lockPathFor(runId, kind),
+			);
 		} catch (error) {
 			throw new Error(`Failed to acquire ${kind} lock for run ${runId}`, {
 				cause: error,

@@ -31,6 +31,7 @@ import type {
 } from "../src/workers/backend.js";
 import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
 import { reviewResult } from "./helpers/review.js";
+import { waitForOrchestration } from "./helpers/wait.js";
 
 const directories: string[] = [];
 
@@ -813,7 +814,7 @@ describe("Orchestrator vertical slice", () => {
 		const run = await createSingleTaskRun(orchestrator);
 		const result = await orchestrator.approveAndLaunch(run, repository);
 
-		await vi.waitFor(async () => {
+		await waitForOrchestration(async () => {
 			expect(
 				(await store.load(run.id)).blockedWorkers.map(
 					(blocked) => blocked.requestId,
@@ -857,7 +858,7 @@ describe("Orchestrator vertical slice", () => {
 		});
 		const run = await createSingleTaskRun(orchestrator);
 		const result = await orchestrator.approveAndLaunch(run, repository);
-		await vi.waitFor(async () =>
+		await waitForOrchestration(async () =>
 			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
 		);
 
@@ -885,7 +886,7 @@ describe("Orchestrator vertical slice", () => {
 		});
 		const run = await createSingleTaskRun(orchestrator);
 		const result = await orchestrator.approveAndLaunch(run, repository);
-		await vi.waitFor(async () =>
+		await waitForOrchestration(async () =>
 			expect((await store.load(run.id)).blockedWorkers).toHaveLength(1),
 		);
 
@@ -1269,7 +1270,7 @@ describe("Orchestrator vertical slice", () => {
 		const run = await createSingleTaskRun(orchestrator);
 
 		const launch = orchestrator.approveAndLaunch(run, repository);
-		await vi.waitFor(() => {
+		await waitForOrchestration(() => {
 			expect(workers.calls.some((call) => call.operation === "prompt")).toBe(
 				true,
 			);

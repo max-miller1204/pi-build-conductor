@@ -157,17 +157,17 @@
       "id": "goal-mry8o2lg-797b80b6",
       "title": "Build a reusable workflow engine",
       "description": "Decompose the fixed BuildConductor lifecycle into a generic run state machine, scheduler, step handlers, executors, workspace providers, artifact storage, quality gates, event timelines, and conflict-aware resource scheduling.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.204Z",
-      "updatedAt": "2026-07-29T19:15:20.861Z"
+      "updatedAt": "2026-07-31T00:07:14.606Z"
     },
     {
       "id": "goal-mry8o2lj-6361b2b1",
       "title": "Provide built-in orchestration workflows",
       "description": "Recast the current strict build lifecycle as a change workflow and add investigate and plan-only workflows while preserving approval, isolation, review, repair, validation, recovery, and evidence guarantees where applicable.",
-      "status": "active",
+      "status": "open",
       "createdAt": "2026-07-24T01:05:43.207Z",
-      "updatedAt": "2026-07-29T19:37:02.248Z"
+      "updatedAt": "2026-07-31T00:07:14.606Z"
     },
     {
       "id": "goal-mry8o2lk-50778d73",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 8
+  "revision": 9
 }

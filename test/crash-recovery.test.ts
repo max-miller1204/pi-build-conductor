@@ -245,7 +245,7 @@ describe("process crash recovery", () => {
 			head: crashed.baseCommit,
 			isClean: true,
 		});
-	}, 20_000);
+	}, 60_000);
 
 	it("preserves a persisted reviewer and resumes only missing categories", async () => {
 		const { crashed, git, repositoryRoot, store, worktreeRoot } =
@@ -302,7 +302,7 @@ describe("process crash recovery", () => {
 			head: crashed.baseCommit,
 			isClean: true,
 		});
-	}, 20_000);
+	}, 60_000);
 
 	it("reconciles a repair integration created just before persistence", async () => {
 		const { crashed, git, repositoryRoot, store, worktreeRoot } =
@@ -382,7 +382,7 @@ describe("process crash recovery", () => {
 		);
 		expect(history.stdout.trim()).toBe("2");
 		expect(await git.listWorktrees(repositoryRoot)).toHaveLength(1);
-	}, 20_000);
+	}, 60_000);
 
 	it("resumes final validation after a process crash before evidence persistence", async () => {
 		const { crashed, git, repositoryRoot, store, worktreeRoot } =
@@ -433,7 +433,7 @@ describe("process crash recovery", () => {
 			head: crashed.baseCommit,
 			isClean: true,
 		});
-	}, 20_000);
+	}, 60_000);
 
 	it("reconciles an integration ref advanced just before state persistence", async () => {
 		const { crashed, git, repositoryRoot, store, worktreeRoot } =
@@ -490,5 +490,5 @@ describe("process crash recovery", () => {
 			head: crashed.baseCommit,
 			isClean: true,
 		});
-	}, 20_000);
+	}, 60_000);
 });

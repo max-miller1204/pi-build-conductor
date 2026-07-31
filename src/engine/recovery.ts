@@ -1,6 +1,8 @@
-import { stepRetryPolicy } from "../domain/steps.js";
+import { artifactIdFor } from "../domain/artifacts.js";
+import { type StepDefinition, stepRetryPolicy } from "../domain/steps.js";
 import { isActiveAttemptState } from "../domain/types.js";
 import type { GitClient } from "../git/git.js";
+import type { StoredArtifactEntry } from "../storage/artifact-store.js";
 import {
 	appendWorkflowEvents,
 	blockedStepEvents,
@@ -16,9 +18,16 @@ import {
 	type WorkflowStepAttempt,
 } from "./workflow-state.js";
 
+/** The read surface recovery needs to prove an artifact really is durable. */
+export interface RecoveryArtifactReader {
+	scan(runId: string): Promise<StoredArtifactEntry[]>;
+}
+
 export interface WorkflowRecoveryDependencies {
 	store: WorkflowStateStore;
 	git: Pick<GitClient, "branchHead" | "verifyTaskCommit">;
+	/** Required to recover any step that declares outputs. */
+	artifacts?: RecoveryArtifactReader;
 	now?: () => string;
 	onStateChanged?: (state: WorkflowRunState) => void;
 }
@@ -37,20 +46,66 @@ export interface WorkflowRecoveryResult {
 	recovered: RecoveredAttempt[];
 }
 
+/** Why one interrupted attempt may or may not be adopted as it stands. */
+interface InterruptedAttemptDecision {
+	/** The commit the attempt durably produced before the interruption. */
+	commit?: string;
+	/** The declared artifacts that attempt durably published. */
+	artifactIds?: string[];
+	/** Why the attempt cannot be adopted, though it may still run again. */
+	retryReason?: string;
+	/** Why the attempt can neither be adopted nor safely run again. */
+	blockedReason?: string;
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Decides an interrupted attempt from durable Git state rather than from the
- * process that vanished: work a worker really committed is adopted, and
- * everything else is retried or failed according to the step's retry budget.
+ * The artifacts of one run that are durable right now. An unreadable file is
+ * deliberately absent: an artifact the engine cannot read back is not evidence
+ * that a step produced it.
  */
-async function inspectInterruptedAttempt(
+async function durableArtifactIds(
+	artifacts: RecoveryArtifactReader,
+	runId: string,
+): Promise<Set<string>> {
+	const entries = await artifacts.scan(runId);
+	return new Set(
+		entries.flatMap((entry) =>
+			entry.kind === "artifact" ? [entry.artifact.id] : [],
+		),
+	);
+}
+
+function declaredArtifactIds(
+	step: StepDefinition,
+	attempt: WorkflowStepAttempt,
+): { output: string; artifactId?: string }[] {
+	return (step.outputs ?? []).map((output) => {
+		try {
+			return {
+				output,
+				artifactId: artifactIdFor({
+					stepId: step.id,
+					output,
+					attempt: attempt.number,
+				}),
+			};
+		} catch {
+			// An identity this run could never have written is simply not durable.
+			return { output };
+		}
+	});
+}
+
+/** Finds the commit an interrupted attempt left behind on its step branch. */
+async function interruptedAttemptCommit(
 	dependencies: WorkflowRecoveryDependencies,
 	state: WorkflowRunState,
 	attempt: WorkflowStepAttempt,
-): Promise<{ commit?: string; error?: string }> {
+): Promise<InterruptedAttemptDecision> {
 	if (!attempt.branch) {
 		return {};
 	}
@@ -73,8 +128,57 @@ async function inspectInterruptedAttempt(
 		);
 		return { commit: head };
 	} catch (error) {
-		return { error: `could not reconcile step branch: ${errorMessage(error)}` };
+		return {
+			blockedReason: `could not reconcile step branch: ${errorMessage(error)}`,
+		};
 	}
+}
+
+/**
+ * Decides an interrupted attempt from durable evidence rather than from the
+ * process that vanished.
+ *
+ * Work a worker really committed is adopted only when the artifacts that
+ * attempt declared are durable too. Adoption is final, and dependent steps
+ * resolve their inputs from stored artifacts, so adopting a producer whose
+ * outputs never reached storage would strand every dependent on a step the run
+ * reports as succeeded. Everything else runs again or fails by retry budget.
+ */
+async function inspectInterruptedAttempt(
+	dependencies: WorkflowRecoveryDependencies,
+	state: WorkflowRunState,
+	attempt: WorkflowStepAttempt,
+	durable: Set<string>,
+): Promise<InterruptedAttemptDecision> {
+	const decision = await interruptedAttemptCommit(dependencies, state, attempt);
+	if (decision.commit === undefined) {
+		return decision;
+	}
+	const step = requireStep(state, attempt.stepId).definition;
+	const declared = declaredArtifactIds(step, attempt);
+	if (declared.length > 0 && !dependencies.artifacts) {
+		return {
+			blockedReason: `no artifact store is configured to verify the declared output${
+				declared.length === 1 ? "" : "s"
+			} of ${step.id}`,
+		};
+	}
+	const missing = declared.filter(
+		(entry) => entry.artifactId === undefined || !durable.has(entry.artifactId),
+	);
+	if (missing.length > 0) {
+		return {
+			retryReason: `did not durably store the declared output${
+				missing.length === 1 ? "" : "s"
+			} of ${step.id}: ${missing.map((entry) => entry.output).join(", ")}`,
+		};
+	}
+	return {
+		commit: decision.commit,
+		artifactIds: declared.flatMap((entry) =>
+			entry.artifactId ? [entry.artifactId] : [],
+		),
+	};
 }
 
 /**
@@ -91,11 +195,14 @@ export async function recoverWorkflowRun(
 	const interrupted = loaded.attempts.filter((attempt) =>
 		isActiveAttemptState(attempt.state),
 	);
-	const decisions = new Map<string, { commit?: string; error?: string }>();
+	const durable = dependencies.artifacts
+		? await durableArtifactIds(dependencies.artifacts, runId)
+		: new Set<string>();
+	const decisions = new Map<string, InterruptedAttemptDecision>();
 	for (const attempt of interrupted) {
 		decisions.set(
 			attempt.id,
-			await inspectInterruptedAttempt(dependencies, loaded, attempt),
+			await inspectInterruptedAttempt(dependencies, loaded, attempt, durable),
 		);
 	}
 	const recovered: RecoveredAttempt[] = [];
@@ -110,10 +217,12 @@ export async function recoverWorkflowRun(
 			const record = requireStep(next, attempt.stepId);
 			const finishedAt = now();
 			if (decision.commit) {
+				const artifactIds = decision.artifactIds ?? [];
 				next = updateStepAttempt(next, attempt.id, {
 					state: "succeeded",
 					finishedAt,
 					commit: decision.commit,
+					...(artifactIds.length > 0 ? { artifactIds } : {}),
 				});
 				next = updateStep(next, attempt.stepId, { state: "succeeded" });
 				events.push({
@@ -127,12 +236,16 @@ export async function recoverWorkflowRun(
 					stepId: attempt.stepId,
 					outcome: "adopted_commit",
 					commit: decision.commit,
-					reason: "the worker's commit already existed on the step branch",
+					reason:
+						artifactIds.length > 0
+							? "the worker's commit and every declared artifact already existed"
+							: "the worker's commit already existed on the step branch",
 				});
 				continue;
 			}
-			const reason = decision.error
-				? `The run was interrupted and ${decision.error}`
+			const obstacle = decision.blockedReason ?? decision.retryReason;
+			const reason = obstacle
+				? `The run was interrupted and ${obstacle}`
 				: "The run was interrupted before this attempt settled";
 			next = updateStepAttempt(next, attempt.id, {
 				state: "interrupted",
@@ -140,7 +253,7 @@ export async function recoverWorkflowRun(
 				error: reason,
 			});
 			const budget = stepRetryPolicy(record.definition).maxAttempts;
-			const retry = !decision.error && attempt.number < budget;
+			const retry = !decision.blockedReason && attempt.number < budget;
 			next = updateStep(next, attempt.stepId, {
 				state: retry ? "ready" : "failed",
 				...(retry ? {} : { error: reason }),

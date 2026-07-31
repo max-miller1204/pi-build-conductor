@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { TaskDefinition } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
@@ -20,6 +20,7 @@ import type {
 	WorkerInstance,
 } from "../src/workers/backend.js";
 import { reviewResult } from "./helpers/review.js";
+import { waitForOrchestration } from "./helpers/wait.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -278,7 +279,7 @@ describe("sequential task integration", () => {
 
 		const launch = await orchestrator.approveAndLaunch(run, repository);
 		releaseSecond();
-		await vi.waitFor(async () => {
+		await waitForOrchestration(async () => {
 			expect((await store.load(run.id)).tasks.second?.state).toBe("succeeded");
 		});
 		expect(await git.branchHead(repositoryRoot, run.integrationBranch)).toBe(

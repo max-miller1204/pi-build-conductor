@@ -260,7 +260,7 @@ describe("independent review and repair lifecycle", () => {
 			integratedCommit: recoveredIntegratedCommit,
 		});
 		expect(recovered.reviewRounds).toHaveLength(2);
-	}, 10_000);
+	});
 
 	it("fails important findings outside the approved repair scope", async () => {
 		const { parent, repositoryRoot } = await createRepository();
