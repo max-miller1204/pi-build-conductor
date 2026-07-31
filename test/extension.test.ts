@@ -184,9 +184,10 @@ describe("run inspection extension commands", () => {
 		).rejects.toMatchObject({ code: "ENOENT" });
 
 		await commands.get("orchestrate-show")?.(fixture.runId, ctx);
-		expect(widgets.get("pi-orchestrator:inspect-run")?.join("\n")).toContain(
-			"Run inspect-run: Inspection fixture",
-		);
+		const overview = widgets.get("pi-orchestrator:inspect-run")?.join("\n");
+		expect(overview).toContain("Run inspect-run: Inspection fixture");
+		// A run with no workflow snapshot is read from the stored run itself.
+		expect(overview).toContain("Execution record: legacy");
 		expect(notifications).toContain("Showing run inspect-run");
 	});
 

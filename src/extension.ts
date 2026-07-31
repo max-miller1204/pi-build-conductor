@@ -8,7 +8,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { orchestratorConfigurationValue } from "./configuration.js";
 import { validateTaskPlan } from "./domain/dag.js";
-import { retryableRunWork } from "./domain/run-control.js";
 import {
 	MAX_CONCURRENT_WORKERS,
 	MIN_CONCURRENT_WORKERS,
@@ -19,14 +18,24 @@ import { StepWorkerRunner } from "./engine/steps/worker-runner.js";
 import { GitCli, type RepositoryInfo } from "./git/git.js";
 import { GitRepositoryReader } from "./git/repository-reader.js";
 import { GitWorktreeManager } from "./git/worktrees.js";
+import { retryableRunWork } from "./inspection/run-control.js";
+import {
+	loadRunView,
+	type RunViewSources,
+	runView,
+	scanRunViews,
+} from "./inspection/run-inspector.js";
 import {
 	latestWorkerAttempt,
 	renderAttemptDetails,
 	renderRunList,
 	renderRunOverview,
-	renderTaskDetails,
+	renderUnitDetails,
 	resolveRunAttempt,
+	reviewStateSummary,
+	unitStateSummary,
 } from "./inspection/run-presentation.js";
+import { legacyRunView, type RunView } from "./inspection/run-view.js";
 import {
 	type LaunchOptions,
 	type LaunchResult,
@@ -225,6 +234,39 @@ async function createStore(repository: RepositoryInfo): Promise<RunStore> {
 	);
 }
 
+function artifactStore(repository: RepositoryInfo): ArtifactStore {
+	return new ArtifactStore(
+		join(repository.commonDirectory, STORAGE_DIRECTORY_NAME, "artifacts"),
+	);
+}
+
+function workflowStateStore(
+	repository: RepositoryInfo,
+): FileWorkflowStateStore {
+	return new FileWorkflowStateStore(
+		join(
+			repository.commonDirectory,
+			STORAGE_DIRECTORY_NAME,
+			WORKFLOW_RUNS_DIRECTORY_NAME,
+		),
+	);
+}
+
+/**
+ * Everything the inspection and control commands read a run from. An
+ * engine-backed run is read from its workflow snapshot; a run that executed
+ * under the legacy orchestrator is read from the stored run itself.
+ */
+async function createViewSources(
+	repository: RepositoryInfo,
+): Promise<RunViewSources & { runs: RunStore }> {
+	return {
+		runs: await createStore(repository),
+		workflowStates: workflowStateStore(repository),
+		artifacts: artifactStore(repository),
+	};
+}
+
 async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const store = await createStore(repository);
 	const attemptLogs = new AttemptLogStore(join(store.directory, "output"));
@@ -248,16 +290,8 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		worktreeRoots(repository.root).root,
 		worktreeRoots(repository.root).legacyRoot,
 	);
-	const artifacts = new ArtifactStore(
-		join(repository.commonDirectory, STORAGE_DIRECTORY_NAME, "artifacts"),
-	);
-	const workflowStates = new FileWorkflowStateStore(
-		join(
-			repository.commonDirectory,
-			STORAGE_DIRECTORY_NAME,
-			WORKFLOW_RUNS_DIRECTORY_NAME,
-		),
-	);
+	const artifacts = artifactStore(repository);
+	const workflowStates = workflowStateStore(repository);
 	// Live change runs execute on the engine; the legacy orchestrator keeps the
 	// run store surface (creation, plan revisions, retry, prune) and still runs
 	// the runs that started under it before the engine took over.
@@ -292,6 +326,7 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 		orchestrator,
 		securityPolicy,
 		store,
+		views: { runs: store, workflowStates, artifacts } satisfies RunViewSources,
 		workers,
 	};
 }
@@ -328,8 +363,14 @@ async function readOnlyWorkflowRuntime(
 	};
 }
 
+/** The run identity every inspection and control surface shares. */
+type RunIdentity = Pick<
+	OrchestrationRun,
+	"id" | "repositoryRoot" | "baseBranch" | "baseCommit"
+>;
+
 function assertRunRepository(
-	run: OrchestrationRun,
+	run: Pick<RunIdentity, "id" | "repositoryRoot">,
 	repository: RepositoryInfo,
 ): void {
 	if (run.repositoryRoot !== repository.root) {
@@ -337,10 +378,7 @@ function assertRunRepository(
 	}
 }
 
-function assertRunBase(
-	run: OrchestrationRun,
-	repository: RepositoryInfo,
-): void {
+function assertRunBase(run: RunIdentity, repository: RepositoryInfo): void {
 	assertRunRepository(run, repository);
 	if (
 		!repository.isClean ||
@@ -454,12 +492,12 @@ function attemptLogText(entries: readonly AttemptLogEntry[]): string {
 
 async function followAttemptOutput(
 	ctx: ExtensionCommandContext,
-	store: RunStore,
+	sources: RunViewSources,
 	logs: AttemptLogStore,
 	runId: string,
 	attemptId: string,
 ): Promise<void> {
-	const initial = await store.load(runId);
+	const initial = await loadRunView(sources, runId);
 	const resolution = resolveRunAttempt(initial, attemptId);
 	if (resolution.kind === "final-validation" || !resolution.attempt.workerId) {
 		throw new Error(`Attempt ${attemptId} has no worker output stream`);
@@ -495,7 +533,7 @@ async function followAttemptOutput(
 				try {
 					const [entries, fresh] = await Promise.all([
 						logs.readTail(runId, attemptId),
-						store.load(runId),
+						loadRunView(sources, runId),
 					]);
 					output = attemptLogText(entries) || "No captured output yet.";
 					state = resolveRunAttempt(fresh, attemptId).attempt.state;
@@ -548,19 +586,19 @@ async function followAttemptOutput(
 
 async function inspectRunInteractively(
 	ctx: ExtensionCommandContext,
-	store: RunStore,
+	sources: RunViewSources,
 	logs: AttemptLogStore,
 	runId: string,
 ): Promise<void> {
 	for (;;) {
-		const run = await store.load(runId);
+		const run = await loadRunView(sources, runId);
 		ctx.ui.setWidget(runUiKey(run.id), renderRunOverview(run));
 		if (!ctx.hasUI) {
 			return;
 		}
 		const latest = latestWorkerAttempt(run);
 		const choice = await ctx.ui.select(`Run ${run.id}`, [
-			"Inspect task",
+			"Inspect step",
 			"Inspect attempt",
 			...(latest ? ["Follow latest worker output"] : []),
 			...(run.state === "failed" ? ["Prepare retry command"] : []),
@@ -594,28 +632,21 @@ async function inspectRunInteractively(
 		if (!choice || choice === "Close") {
 			return;
 		}
-		if (choice === "Inspect task") {
-			const taskId = await ctx.ui.select(
-				"Task",
-				run.plan.tasks.map(
-					(task) => `${task.id} | ${run.tasks[task.id]?.state ?? "missing"}`,
-				),
+		if (choice === "Inspect step") {
+			const unitId = await ctx.ui.select(
+				"Step",
+				run.units.map((unit) => `${unit.id} | ${unit.state}`),
 			);
-			if (taskId) {
+			if (unitId) {
 				ctx.ui.setWidget(
 					runUiKey(run.id),
-					renderTaskDetails(run, taskId.split(" | ")[0] ?? taskId),
+					renderUnitDetails(run, unitId.split(" | ")[0] ?? unitId),
 				);
 			}
 			continue;
 		}
 		if (choice === "Inspect attempt") {
-			const attempts = [
-				...run.attempts,
-				...run.reviewAttempts,
-				...run.repairAttempts,
-				...run.finalValidationAttempts,
-			];
+			const attempts = [...run.attempts, ...run.finalValidationAttempts];
 			if (attempts.length === 0) {
 				ctx.ui.notify("This run has no attempts yet", "info");
 				continue;
@@ -633,7 +664,7 @@ async function inspectRunInteractively(
 			continue;
 		}
 		if (choice === "Follow latest worker output" && latest) {
-			await followAttemptOutput(ctx, store, logs, run.id, latest.attempt.id);
+			await followAttemptOutput(ctx, sources, logs, run.id, latest.id);
 			continue;
 		}
 		const command =
@@ -783,58 +814,31 @@ function progressText(progress: WorkerLifecycleProgress): string | undefined {
 	}
 }
 
-function taskStateSummary(run: OrchestrationRun): string {
-	const counts = new Map<string, number>();
-	for (const task of Object.values(run.tasks)) {
-		counts.set(task.state, (counts.get(task.state) ?? 0) + 1);
-	}
-	return [
-		"running",
-		"validating",
-		"succeeded",
-		"ready",
-		"planned",
-		"blocked",
-		"failed",
-	]
-		.flatMap((state) => {
-			const count = counts.get(state);
-			return count ? [`${count} ${state}`] : [];
-		})
-		.join(", ");
-}
-
-function workerBlockSummary(run: OrchestrationRun): string {
-	if (run.blockedWorkers.length === 0) {
+function workerBlockSummary(view: RunView): string {
+	if (view.blockedWorkers.length === 0) {
 		return "Worker prompts: none";
 	}
-	return `Worker prompts: ${run.blockedWorkers
+	return `Worker prompts: ${view.blockedWorkers
 		.map((blocked) => `${blocked.attemptId} waiting on ${blocked.method}`)
 		.join(", ")}`;
 }
 
-function reviewStateSummary(run: OrchestrationRun): string {
-	if (run.reviewRounds.length === 0) {
-		return "Reviews: not started";
-	}
-	const round = run.reviewRounds.at(-1);
-	const attempts = run.reviewAttempts.filter(
-		(attempt) => attempt.round === round?.number,
+/** The live status and widget a run shows while it executes. */
+function showRunProgress(ctx: ExtensionCommandContext, view: RunView): void {
+	ctx.ui.setStatus(
+		runUiKey(view.id),
+		view.blockedWorkers.length > 0
+			? `${view.blockedWorkers.length} worker prompt(s) blocked`
+			: unitStateSummary(view),
 	);
-	const succeeded = attempts.filter(
-		(attempt) => attempt.state === "succeeded",
-	).length;
-	const findings = attempts.flatMap((attempt) => attempt.findings ?? []);
-	const repairRequired = findings.filter(
-		(finding) => finding.status === "repair_required",
-	).length;
-	const deferred = findings.filter(
-		(finding) => finding.status === "deferred",
-	).length;
-	const unresolved = findings.filter(
-		(finding) => finding.status === "unresolved",
-	).length;
-	return `Review round ${round?.number ?? 0}: ${succeeded}/5 reports received, ${repairRequired} repair-required, ${unresolved} unresolved, ${deferred} deferred`;
+	ctx.ui.setWidget(runUiKey(view.id), [
+		`Run ${view.id}`,
+		`Run: ${view.state}`,
+		`Steps: ${unitStateSummary(view)}`,
+		workerBlockSummary(view),
+		reviewStateSummary(view),
+		`Integration head: ${view.integrationHead.slice(0, 12)}`,
+	]);
 }
 
 /**
@@ -842,10 +846,9 @@ function reviewStateSummary(run: OrchestrationRun): string {
  * step progress instead of task attempts.
  */
 function engineLifecycleUi(ctx: ExtensionCommandContext): EngineLaunchOptions {
-	const ui = lifecycleUi(ctx);
 	return {
 		onProgress: (progress) => {
-			ui.onProgress?.({
+			const text = progressText({
 				runId: progress.runId,
 				kind: progress.kind === "implementation" ? "task" : progress.kind,
 				taskId: progress.stepId,
@@ -853,8 +856,11 @@ function engineLifecycleUi(ctx: ExtensionCommandContext): EngineLaunchOptions {
 				workerId: progress.workerId,
 				event: progress.event,
 			});
+			if (text) {
+				ctx.ui.setStatus(runUiKey(progress.runId), text);
+			}
 		},
-		...(ui.onRunUpdated ? { onRunUpdated: ui.onRunUpdated } : {}),
+		onRunUpdated: (view) => showRunProgress(ctx, view),
 	};
 }
 
@@ -866,55 +872,51 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 				ctx.ui.setStatus(runUiKey(progress.runId), text);
 			}
 		},
-		onRunUpdated: (run) => {
-			ctx.ui.setStatus(
-				runUiKey(run.id),
-				run.blockedWorkers.length > 0
-					? `${run.blockedWorkers.length} worker prompt(s) blocked`
-					: taskStateSummary(run),
-			);
-			ctx.ui.setWidget(runUiKey(run.id), [
-				`Run ${run.id}`,
-				`Run: ${run.state}`,
-				`Tasks: ${taskStateSummary(run)}`,
-				workerBlockSummary(run),
-				reviewStateSummary(run),
-				`Integration head: ${run.integrationHead.slice(0, 12)}`,
-			]);
-		},
+		onRunUpdated: (run) => showRunProgress(ctx, legacyRunView(run)),
 	};
 }
 
 function showCompletion(
 	ctx: ExtensionCommandContext,
 	_result: LaunchDisplay,
-	run: OrchestrationRun,
+	run: RunView,
 	store: RunStore,
 ): void {
-	const workerLines = run.attempts.map((attempt) => {
-		const passingChecks = attempt.evidence?.checks.filter(
-			(check) => check.passed,
-		).length;
-		const checks = attempt.evidence
-			? `, checks ${passingChecks}/${attempt.evidence.checks.length}`
-			: "";
-		const commit = attempt.commit
-			? `, commit ${attempt.commit.slice(0, 12)}`
-			: "";
-		const integratedCommit = run.tasks[attempt.taskId]?.integratedCommit;
-		const integrated = integratedCommit
-			? `, integrated ${integratedCommit.slice(0, 12)}`
-			: "";
-		return `${attempt.taskId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit}${integrated})`;
+	const workerLines = run.attempts
+		.filter((attempt) => attempt.role === "change")
+		.map((attempt) => {
+			const passingChecks = attempt.evidence?.checks.filter(
+				(check) => check.passed,
+			).length;
+			const checks = attempt.evidence
+				? `, checks ${passingChecks}/${attempt.evidence.checks.length}`
+				: "";
+			const commit = attempt.commit
+				? `, commit ${attempt.commit.slice(0, 12)}`
+				: "";
+			const integrated = attempt.integratedCommit
+				? `, integrated ${attempt.integratedCommit.slice(0, 12)}`
+				: "";
+			return `${attempt.unitId}: ${attempt.state} (${attempt.workerId ?? "not spawned"}${checks}${commit}${integrated})`;
+		});
+	const reviewLines = run.attempts.flatMap((attempt) => {
+		const review = run.units.find((unit) => unit.id === attempt.unitId)?.review;
+		return review
+			? [
+					`review ${review.round}/${review.category}: ${attempt.state}, findings ${attempt.findings?.length ?? 0}`,
+				]
+			: [];
 	});
-	const reviewLines = run.reviewAttempts.map(
-		(attempt) =>
-			`review ${attempt.round}/${attempt.category}: ${attempt.state}, findings ${attempt.findings?.length ?? 0}`,
-	);
-	const repairLines = run.repairAttempts.map(
-		(attempt) =>
-			`repair ${attempt.round}/${attempt.number}: ${attempt.state}${attempt.integratedCommit ? `, integrated ${attempt.integratedCommit.slice(0, 12)}` : ""}`,
-	);
+	const repairLines = run.attempts.flatMap((attempt) => {
+		const round = run.units.find(
+			(unit) => unit.id === attempt.unitId,
+		)?.repairRound;
+		return round === undefined
+			? []
+			: [
+					`repair ${round}/${attempt.number}: ${attempt.state}${attempt.integratedCommit ? `, integrated ${attempt.integratedCommit.slice(0, 12)}` : ""}`,
+				];
+	});
 	const evidence = run.mergeReadyEvidence;
 	const commitLines =
 		evidence?.commits.map(
@@ -948,7 +950,7 @@ function showCompletion(
 		`Plan revision: ${run.approvedPlanRevision ?? run.planRevision}`,
 		`Worker limit: ${run.maxConcurrentWorkers}`,
 		...securityPolicyLines(run.securityPolicy),
-		`Tasks: ${taskStateSummary(run)}`,
+		`Steps: ${unitStateSummary(run)}`,
 		reviewStateSummary(run),
 		...workerLines,
 		...reviewLines,
@@ -981,18 +983,7 @@ function showCompletion(
 		return;
 	}
 	const failure = run.attempts.find((attempt) => attempt.state === "failed");
-	const integrationFailure = Object.values(run.tasks).find(
-		(task) => task.integrationError,
-	);
-	const reviewFailure = run.reviewAttempts.find(
-		(attempt) => attempt.state === "failed",
-	)?.error;
-	const repairFailure = run.repairAttempts.find(
-		(attempt) => attempt.state === "failed",
-	)?.error;
-	const reviewRoundFailure = run.reviewRounds.find(
-		(round) => round.state === "failed",
-	)?.error;
+	const integrationFailure = run.units.find((unit) => unit.integrationError);
 	const finalValidationFailure = run.finalValidationAttempts.findLast(
 		(attempt) => attempt.state === "failed",
 	);
@@ -1000,18 +991,29 @@ function showCompletion(
 	ctx.ui.notify(
 		finalValidationFailure?.error ??
 			integrationFailure?.integrationError ??
-			repairFailure ??
-			reviewFailure ??
-			reviewRoundFailure ??
 			failure?.error ??
+			run.error ??
+			run.units.find((unit) => unit.error)?.error ??
 			`Run ${run.id} failed`,
 		"error",
 	);
 }
 
 /** What a launched or resumed run shows, from either execution path. */
-type LaunchDisplay = Omit<LaunchResult, "launches"> &
-	Partial<Pick<LaunchResult, "launches">>;
+interface LaunchDisplay {
+	run: RunView;
+	launches?: LaunchResult["launches"];
+	completion: Promise<RunView>;
+}
+
+/** Reads a legacy launch through the same view its engine equivalent uses. */
+function legacyLaunchDisplay(result: LaunchResult): LaunchDisplay {
+	return {
+		run: legacyRunView(result.run),
+		launches: result.launches,
+		completion: result.completion.then(legacyRunView),
+	};
+}
 
 function showLaunch(
 	ctx: ExtensionCommandContext,
@@ -1025,13 +1027,13 @@ function showLaunch(
 			`${task.id}: ${attempt.workerId ?? "starting"} in ${attempt.worktreePath}`,
 	);
 	ctx.ui.setStatus("pi-orchestrator", undefined);
-	ctx.ui.setStatus(key, taskStateSummary(result.run));
+	ctx.ui.setStatus(key, unitStateSummary(result.run));
 	ctx.ui.setWidget(key, [
 		`Run ${result.run.id}`,
 		`Run: ${result.run.state}`,
 		`Plan revision: ${result.run.approvedPlanRevision ?? result.run.planRevision}`,
 		`Worker limit: ${result.run.maxConcurrentWorkers}`,
-		`Tasks: ${taskStateSummary(result.run)}`,
+		`Steps: ${unitStateSummary(result.run)}`,
 		reviewStateSummary(result.run),
 		...launchLines,
 		`State file: ${store.directory}`,
@@ -1070,32 +1072,27 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = await createStore(repository);
-				const entries = await store.scan();
-				const runs = entries.flatMap((entry) =>
-					entry.kind === "run" && entry.run.repositoryRoot === repository.root
-						? [entry.run]
-						: [],
-				);
-				const unreadable = entries.flatMap((entry) =>
-					entry.kind === "unreadable"
-						? [`Unreadable ${entry.runId}: ${entry.error}`]
-						: [],
+				const sources = await createViewSources(repository);
+				const { views, unreadable } = await scanRunViews(
+					sources,
+					repository.root,
 				);
 				ctx.ui.setWidget("pi-orchestrator:runs", [
-					...renderRunList(runs),
-					...unreadable,
+					...renderRunList(views),
+					...unreadable.map(
+						(entry) => `Unreadable ${entry.runId}: ${entry.error}`,
+					),
 				]);
-				if (!ctx.hasUI || runs.length === 0) {
+				if (!ctx.hasUI || views.length === 0) {
 					ctx.ui.notify(
-						runs.length === 0
+						views.length === 0
 							? "No orchestration runs found"
-							: `Found ${runs.length} runs`,
+							: `Found ${views.length} runs`,
 						"info",
 					);
 					return;
 				}
-				const sorted = [...runs].sort(
+				const sorted = [...views].sort(
 					(left, right) =>
 						right.updatedAt.localeCompare(left.updatedAt) ||
 						left.id.localeCompare(right.id),
@@ -1103,8 +1100,8 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				const selected = await ctx.ui.select(
 					"Orchestration runs",
 					sorted.map(
-						(run) =>
-							`${run.id} | ${run.state} | ${run.plan.title} | ${run.updatedAt}`,
+						(view) =>
+							`${view.id} | ${view.state} | ${view.title} | ${view.updatedAt}`,
 					),
 				);
 				if (selected) {
@@ -1112,8 +1109,8 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					if (runId) {
 						await inspectRunInteractively(
 							ctx,
-							store,
-							new AttemptLogStore(join(store.directory, "output")),
+							sources,
+							new AttemptLogStore(join(sources.runs.directory, "output")),
 							runId,
 						);
 					}
@@ -1125,35 +1122,35 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 	});
 
 	registerWithLegacyAlias("orchestrate-show", "build-show", {
-		description: "Show run, task, or attempt details",
+		description: "Show run, step, or attempt details",
 		handler: async (args, ctx) => {
 			const [runId, subject, subjectId, ...extra] = args.trim().split(/\s+/);
 			if (!runId || extra.length > 0 || (subject && !subjectId)) {
 				ctx.ui.notify(
-					"Usage: /orchestrate-show <run-id> [task <task-id> | attempt <attempt-id>]",
+					"Usage: /orchestrate-show <run-id> [step <step-id> | attempt <attempt-id>]",
 					"error",
 				);
 				return;
 			}
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = await createStore(repository);
-				const run = await store.load(runId);
-				assertRunRepository(run, repository);
+				const sources = await createViewSources(repository);
+				const view = await loadRunView(sources, runId);
+				assertRunRepository(view, repository);
 				let lines: string[];
 				if (!subject) {
-					lines = renderRunOverview(run);
-				} else if (subject === "task" && subjectId) {
-					lines = renderTaskDetails(run, subjectId);
+					lines = renderRunOverview(view);
+				} else if ((subject === "step" || subject === "task") && subjectId) {
+					lines = renderUnitDetails(view, subjectId);
 				} else if (subject === "attempt" && subjectId) {
-					lines = renderAttemptDetails(run, subjectId);
+					lines = renderAttemptDetails(view, subjectId);
 				} else {
 					throw new Error(
-						"Detail selector must be 'task <task-id>' or 'attempt <attempt-id>'",
+						"Detail selector must be 'step <step-id>' or 'attempt <attempt-id>'",
 					);
 				}
-				ctx.ui.setWidget(runUiKey(run.id), lines);
-				ctx.ui.notify(`Showing run ${run.id}`, "info");
+				ctx.ui.setWidget(runUiKey(view.id), lines);
+				ctx.ui.notify(`Showing run ${view.id}`, "info");
 			} catch (error) {
 				ctx.ui.notify(errorMessage(error), "error");
 			}
@@ -1173,18 +1170,17 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 			}
 			try {
 				const repository = await new GitCli().inspect(ctx.cwd);
-				const store = await createStore(repository);
-				const run = await store.load(runId);
-				assertRunRepository(run, repository);
-				const attemptId =
-					requestedAttemptId ?? latestWorkerAttempt(run)?.attempt.id;
+				const sources = await createViewSources(repository);
+				const view = await loadRunView(sources, runId);
+				assertRunRepository(view, repository);
+				const attemptId = requestedAttemptId ?? latestWorkerAttempt(view)?.id;
 				if (!attemptId) {
 					throw new Error(`Run ${runId} has no worker attempts to follow`);
 				}
 				await followAttemptOutput(
 					ctx,
-					store,
-					new AttemptLogStore(join(store.directory, "output")),
+					sources,
+					new AttemptLogStore(join(sources.runs.directory, "output")),
 					runId,
 					attemptId,
 				);
@@ -1197,9 +1193,9 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 	registerWithLegacyAlias("orchestrate-retry", "build-retry", {
 		description: "Retry safe failed work while preserving attempt history",
 		handler: async (args, ctx) => {
-			const [runId, requestedTaskId, ...extra] = args.trim().split(/\s+/);
+			const [runId, requestedStepId, ...extra] = args.trim().split(/\s+/);
 			if (!runId || extra.length > 0) {
-				ctx.ui.notify("Usage: /orchestrate-retry <run-id> [task-id]", "error");
+				ctx.ui.notify("Usage: /orchestrate-retry <run-id> [step-id]", "error");
 				return;
 			}
 			ctx.ui.setStatus("pi-orchestrator", "preparing retry");
@@ -1209,24 +1205,24 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				const runtime = await createRuntime(git, repository);
 				const run = await runtime.store.load(runId);
 				assertRunBase(run, repository);
-				const assessment = retryableRunWork(run);
+				const assessment = retryableRunWork(await runView(runtime.views, run));
 				if (!assessment.retryable) {
 					throw new Error(assessment.reason);
 				}
 				if (
-					requestedTaskId &&
-					(assessment.phase !== "tasks" ||
-						!assessment.failedTaskIds.includes(requestedTaskId))
+					requestedStepId &&
+					(assessment.phase !== "steps" ||
+						!assessment.failedUnitIds.includes(requestedStepId))
 				) {
 					throw new Error(
-						`Task ${requestedTaskId} is not part of this run's retryable failed work`,
+						`Step ${requestedStepId} is not part of this run's retryable failed work`,
 					);
 				}
 				if (ctx.hasUI) {
 					const confirmed = await ctx.ui.confirm(
 						`Retry run ${run.id}?`,
-						assessment.phase === "tasks"
-							? `New attempts will be created for failed tasks: ${assessment.failedTaskIds.join(", ")}`
+						assessment.phase === "steps"
+							? `New attempts will be created for failed steps: ${assessment.failedUnitIds.join(", ")}`
 							: "A new final-validation attempt will run the approved complete suite.",
 					);
 					if (!confirmed) {
@@ -1242,11 +1238,13 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 							selectedWorkerModel(ctx),
 							engineLifecycleUi(ctx),
 						)
-					: await runtime.orchestrator.retryAndLaunch(
-							run.id,
-							repository,
-							selectedWorkerModel(ctx),
-							lifecycleUi(ctx),
+					: legacyLaunchDisplay(
+							await runtime.orchestrator.retryAndLaunch(
+								run.id,
+								repository,
+								selectedWorkerModel(ctx),
+								lifecycleUi(ctx),
+							),
 						);
 				showLaunch(ctx, result, runtime.store);
 			} catch (error) {
@@ -1577,29 +1575,34 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				const { orchestrator, store } = runtime;
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
+				const view = await runView(runtime.views, stored);
 				if (
-					!["completed", "failed", "cancelled"].includes(stored.state) &&
+					!["completed", "failed", "cancelled"].includes(view.state) &&
 					ctx.hasUI &&
 					!(await ctx.ui.confirm(
 						`Cancel run ${runId}?`,
-						`The run is ${stored.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
+						`The run is ${view.state}. Active workers and validation will be stopped. State, logs, and worktrees remain inspectable.`,
 					))
 				) {
 					ctx.ui.setStatus("pi-orchestrator", undefined);
 					ctx.ui.notify("Cancellation declined", "info");
 					return;
 				}
-				const cancelled = (await runtime.engine.hasWorkflowState(runId))
-					? await runtime.engine.cancel(stored, repository)
-					: await orchestrator.cancelRun(stored);
+				let result = view;
+				if (!["completed", "failed", "cancelled"].includes(view.state)) {
+					const cancelled = (await runtime.engine.hasWorkflowState(runId))
+						? await runtime.engine.cancel(stored, repository)
+						: await orchestrator.cancelRun(stored);
+					result = await runView(runtime.views, cancelled);
+				}
 				const key = runUiKey(runId);
 				ctx.ui.setStatus("pi-orchestrator", undefined);
-				ctx.ui.setStatus(key, `run ${runId}: ${cancelled.state}`);
-				ctx.ui.setWidget(key, renderRunOverview(cancelled));
+				ctx.ui.setStatus(key, `run ${runId}: ${result.state}`);
+				ctx.ui.setWidget(key, renderRunOverview(result));
 				ctx.ui.notify(
-					cancelled.state === "cancelled"
+					result.state === "cancelled"
 						? `Run ${runId} cancelled and workers stopped`
-						: `Run ${runId} was already ${cancelled.state}; no lifecycle work was changed`,
+						: `Run ${runId} was already ${result.state}; no lifecycle work was changed`,
 					"info",
 				);
 			} catch (error) {
@@ -1687,13 +1690,18 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				}
 				assertRunBase(recovered, freshRepository);
 				ctx.ui.setStatus("pi-orchestrator", "launching retries");
-				const result = await orchestrator.resumeAndLaunch(
-					recovered,
-					freshRepository,
-					selectedWorkerModel(ctx),
-					lifecycleUi(ctx),
+				showLaunch(
+					ctx,
+					legacyLaunchDisplay(
+						await orchestrator.resumeAndLaunch(
+							recovered,
+							freshRepository,
+							selectedWorkerModel(ctx),
+							lifecycleUi(ctx),
+						),
+					),
+					store,
 				);
-				showLaunch(ctx, result, store);
 			} catch (error) {
 				ctx.ui.setStatus("pi-orchestrator", "failed");
 				ctx.ui.notify(errorMessage(error), "error");

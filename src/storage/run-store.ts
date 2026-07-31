@@ -496,6 +496,9 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 		throw new Error("Every run attempt must be referenced by its task");
 	}
 	assertString(value.integrationHead, "run.integrationHead");
+	if (value.error !== undefined) {
+		assertString(value.error, "run.error");
+	}
 	if (!Array.isArray(value.reviewAttempts)) {
 		throw new Error("run.reviewAttempts must be an array");
 	}
@@ -624,6 +627,16 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 	}
 	const repairAttemptsById = new Map<string, Record<string, unknown>>();
 	const storedTasks = value.tasks as Record<string, unknown>;
+	// Which record proves this run's execution. A run that carries no legacy
+	// attempt executed on the engine, whose durable workflow snapshot is the
+	// execution record; the stored run then holds only the request, plan,
+	// approval, and the final-validation phase the runner owns itself.
+	const executionRecord: "legacy" | "engine" =
+		value.attempts.length > 0 ||
+		value.reviewAttempts.length > 0 ||
+		value.repairAttempts.length > 0
+			? "legacy"
+			: "engine";
 	let expectedIntegrationHead = topologicalTaskIds(plan).reduce(
 		(head, taskId) => {
 			const task = storedTasks[taskId];
@@ -787,7 +800,13 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 			throw new Error(`${path} must reference an active attempt`);
 		}
 	}
-	if (value.integrationHead !== expectedIntegrationHead) {
+	// An engine run's integration head is proved by its workflow snapshot, which
+	// validates the integrated topological prefix against it on every load; the
+	// stored run only records the head the run settled on.
+	if (
+		executionRecord === "legacy" &&
+		value.integrationHead !== expectedIntegrationHead
+	) {
 		throw new Error(
 			`run.integrationHead must match integrated task and repair commits (${expectedIntegrationHead})`,
 		);
@@ -883,7 +902,13 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 			}
 		}
 	}
-	if (["reviewed", "validating", "completed"].includes(String(value.state))) {
+	// An engine run's reviews are steps in its workflow snapshot rather than
+	// rounds on the stored run, and the engine only settles a run whose review
+	// steps all succeeded.
+	if (
+		executionRecord === "legacy" &&
+		["reviewed", "validating", "completed"].includes(String(value.state))
+	) {
 		const latestRound = value.reviewRounds.at(-1);
 		if (!isRecord(latestRound) || latestRound.state !== "succeeded") {
 			throw new Error("Reviewed run must have a succeeded final review round");
@@ -1044,6 +1069,9 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 				throw new Error(`run.mergeReadyEvidence.${field} must be an array`);
 			}
 		}
+		const evidenceCommits = mergeReady.commits as unknown[];
+		const evidenceFinalReviews = mergeReady.finalReviews as unknown[];
+		const evidenceRemainingRisks = mergeReady.remainingRisks as unknown[];
 		if (!isRecord(mergeReady.git)) {
 			throw new Error("run.mergeReadyEvidence.git must be an object");
 		}
@@ -1077,60 +1105,81 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 		if (!Array.isArray(mergeReady.git.commits)) {
 			throw new Error("run.mergeReadyEvidence.git.commits must be an array");
 		}
-		const storedAttempts = value.attempts as unknown[];
-		const expectedCommits = topologicalTaskIds(plan).map((taskId) => {
-			const task = storedTasks[taskId];
-			if (!isRecord(task)) {
-				throw new Error(`Missing persisted task ${taskId}`);
+		const claimedCommits = evidenceCommits.map((commit, index) => {
+			if (!isRecord(commit)) {
+				throw new Error(
+					`run.mergeReadyEvidence.commits[${index}] must be an object`,
+				);
 			}
-			const attemptIds = Array.isArray(task.attemptIds)
-				? new Set(task.attemptIds.map(String))
-				: new Set<string>();
-			const source = storedAttempts.findLast(
-				(attempt: unknown) =>
-					isRecord(attempt) &&
-					attemptIds.has(String(attempt.id)) &&
-					attempt.state === "succeeded" &&
-					typeof attempt.commit === "string",
+			assertString(
+				commit.integratedCommit,
+				`run.mergeReadyEvidence.commits[${index}].integratedCommit`,
 			);
-			if (!isRecord(source) || typeof source.commit !== "string") {
-				throw new Error(`Task ${taskId} lacks source commit evidence`);
-			}
-			return {
-				kind: "task",
-				id: taskId,
-				sourceCommit: source.commit,
-				integratedCommit: String(task.integratedCommit),
-			};
+			assertString(
+				commit.sourceCommit,
+				`run.mergeReadyEvidence.commits[${index}].sourceCommit`,
+			);
+			return commit;
 		});
-		for (const repair of value.repairAttempts) {
+		if (executionRecord === "legacy") {
+			const storedAttempts = value.attempts as unknown[];
+			const expectedCommits = topologicalTaskIds(plan).map((taskId) => {
+				const task = storedTasks[taskId];
+				if (!isRecord(task)) {
+					throw new Error(`Missing persisted task ${taskId}`);
+				}
+				const attemptIds = Array.isArray(task.attemptIds)
+					? new Set(task.attemptIds.map(String))
+					: new Set<string>();
+				const source = storedAttempts.findLast(
+					(attempt: unknown) =>
+						isRecord(attempt) &&
+						attemptIds.has(String(attempt.id)) &&
+						attempt.state === "succeeded" &&
+						typeof attempt.commit === "string",
+				);
+				if (!isRecord(source) || typeof source.commit !== "string") {
+					throw new Error(`Task ${taskId} lacks source commit evidence`);
+				}
+				return {
+					kind: "task",
+					id: taskId,
+					sourceCommit: source.commit,
+					integratedCommit: String(task.integratedCommit),
+				};
+			});
+			for (const repair of value.repairAttempts) {
+				if (
+					isRecord(repair) &&
+					repair.state === "succeeded" &&
+					typeof repair.commit === "string" &&
+					typeof repair.integratedCommit === "string"
+				) {
+					expectedCommits.push({
+						kind: "repair",
+						id: String(repair.id),
+						sourceCommit: repair.commit,
+						integratedCommit: repair.integratedCommit,
+					});
+				}
+			}
 			if (
-				isRecord(repair) &&
-				repair.state === "succeeded" &&
-				typeof repair.commit === "string" &&
-				typeof repair.integratedCommit === "string"
+				JSON.stringify(mergeReady.commits) !== JSON.stringify(expectedCommits)
 			) {
-				expectedCommits.push({
-					kind: "repair",
-					id: String(repair.id),
-					sourceCommit: repair.commit,
-					integratedCommit: repair.integratedCommit,
-				});
+				throw new Error(
+					"run.mergeReadyEvidence.commits must exactly match integrated task and repair order",
+				);
 			}
 		}
-		if (
-			JSON.stringify(mergeReady.commits) !== JSON.stringify(expectedCommits)
-		) {
-			throw new Error(
-				"run.mergeReadyEvidence.commits must exactly match integrated task and repair order",
-			);
-		}
-		const expectedGitCommits = expectedCommits.map((commit, index) => ({
-			hash: commit.integratedCommit,
+		// The chain is checked against the commits the evidence itself claims, so
+		// it holds for either execution record; a legacy run has already proved
+		// those claims against its own attempts above.
+		const expectedGitCommits = claimedCommits.map((commit, index) => ({
+			hash: String(commit.integratedCommit),
 			parent:
 				index === 0
 					? value.baseCommit
-					: expectedCommits[index - 1]?.integratedCommit,
+					: String(claimedCommits[index - 1]?.integratedCommit),
 		}));
 		if (
 			mergeReady.git.commits.length !== expectedGitCommits.length ||
@@ -1154,50 +1203,96 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 				"run.mergeReadyEvidence.git.commits must match the exact linear integration chain",
 			);
 		}
-		const latestRound = value.reviewRounds.at(-1);
-		if (!isRecord(latestRound) || typeof latestRound.number !== "number") {
-			throw new Error(
-				"run.mergeReadyEvidence requires a completed final review round",
-			);
-		}
-		const finalReviewAttempts = value.reviewAttempts.filter(
-			(attempt) =>
-				isRecord(attempt) &&
-				attempt.round === latestRound.number &&
-				attempt.state === "succeeded",
-		);
-		const expectedFinalReviews = REVIEW_CATEGORIES.map((category) => {
-			const attempt = finalReviewAttempts.find(
-				(item) => item.category === category,
-			);
-			if (!attempt || typeof attempt.summary !== "string") {
+		// Every category must have reported on the head being merged. A legacy
+		// run proves that against its own final review round; an engine run's
+		// reviews live in its workflow snapshot, where `finalizeWorkflowRun`
+		// withholds the evidence unless every category reviewed that exact head.
+		if (executionRecord === "legacy") {
+			const latestRound = value.reviewRounds.at(-1);
+			if (!isRecord(latestRound) || typeof latestRound.number !== "number") {
 				throw new Error(
-					`run.mergeReadyEvidence is missing the final ${category} review`,
+					"run.mergeReadyEvidence requires a completed final review round",
 				);
 			}
-			return { category, summary: attempt.summary };
-		});
-		if (
-			JSON.stringify(mergeReady.finalReviews) !==
-			JSON.stringify(expectedFinalReviews)
-		) {
-			throw new Error(
-				"run.mergeReadyEvidence.finalReviews must match the final review round",
+			const finalReviewAttempts = value.reviewAttempts.filter(
+				(attempt) =>
+					isRecord(attempt) &&
+					attempt.round === latestRound.number &&
+					attempt.state === "succeeded",
 			);
-		}
-		const expectedRemainingRisks = finalReviewAttempts
-			.flatMap((attempt) =>
-				Array.isArray(attempt.findings) ? attempt.findings : [],
-			)
-			.filter((finding) => isRecord(finding) && finding.status === "deferred")
-			.sort((left, right) => String(left.id).localeCompare(String(right.id)));
-		if (
-			JSON.stringify(mergeReady.remainingRisks) !==
-			JSON.stringify(expectedRemainingRisks)
-		) {
-			throw new Error(
-				"run.mergeReadyEvidence.remainingRisks must match deferred findings from the final review round",
-			);
+			const expectedFinalReviews = REVIEW_CATEGORIES.map((category) => {
+				const attempt = finalReviewAttempts.find(
+					(item) => item.category === category,
+				);
+				if (!attempt || typeof attempt.summary !== "string") {
+					throw new Error(
+						`run.mergeReadyEvidence is missing the final ${category} review`,
+					);
+				}
+				return { category, summary: attempt.summary };
+			});
+			if (
+				JSON.stringify(mergeReady.finalReviews) !==
+				JSON.stringify(expectedFinalReviews)
+			) {
+				throw new Error(
+					"run.mergeReadyEvidence.finalReviews must match the final review round",
+				);
+			}
+			const expectedRemainingRisks = finalReviewAttempts
+				.flatMap((attempt) =>
+					Array.isArray(attempt.findings) ? attempt.findings : [],
+				)
+				.filter((finding) => isRecord(finding) && finding.status === "deferred")
+				.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+			if (
+				JSON.stringify(mergeReady.remainingRisks) !==
+				JSON.stringify(expectedRemainingRisks)
+			) {
+				throw new Error(
+					"run.mergeReadyEvidence.remainingRisks must match deferred findings from the final review round",
+				);
+			}
+		} else {
+			if (
+				JSON.stringify(
+					evidenceFinalReviews.map((review) =>
+						isRecord(review) ? review.category : undefined,
+					),
+				) !== JSON.stringify([...REVIEW_CATEGORIES])
+			) {
+				throw new Error(
+					"run.mergeReadyEvidence.finalReviews must cover every review category in order",
+				);
+			}
+			for (const [index, review] of evidenceFinalReviews.entries()) {
+				assertString(
+					isRecord(review) ? review.summary : undefined,
+					`run.mergeReadyEvidence.finalReviews[${index}].summary`,
+				);
+			}
+			const riskIds = evidenceRemainingRisks.map((finding, index) => {
+				if (!isRecord(finding) || finding.status !== "deferred") {
+					throw new Error(
+						"run.mergeReadyEvidence.remainingRisks must contain only deferred findings",
+					);
+				}
+				assertString(
+					finding.id,
+					`run.mergeReadyEvidence.remainingRisks[${index}].id`,
+				);
+				return finding.id;
+			});
+			if (
+				JSON.stringify(riskIds) !==
+				JSON.stringify(
+					[...riskIds].sort((left, right) => left.localeCompare(right)),
+				)
+			) {
+				throw new Error(
+					"run.mergeReadyEvidence.remainingRisks must be sorted by finding id",
+				);
+			}
 		}
 		const successfulValidation = value.finalValidationAttempts.findLast(
 			(attempt) =>

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createOrchestrationRun } from "../src/domain/run.js";
-import type {
-	OrchestrationRun,
-	TaskPlan,
-	ValidationCheckEvidence,
+import {
+	type OrchestrationRun,
+	REVIEW_CATEGORIES,
+	type TaskPlan,
+	type ValidationCheckEvidence,
 } from "../src/domain/types.js";
 import {
 	latestFollowableWorkerAttempt,
@@ -11,11 +12,12 @@ import {
 	renderAttemptDetails,
 	renderRunList,
 	renderRunOverview,
-	renderTaskDetails,
+	renderUnitDetails,
 	resolveRunAttempt,
 	reviewStateSummary,
-	taskStateSummary,
+	unitStateSummary,
 } from "../src/inspection/run-presentation.js";
+import { legacyRunView, type RunView } from "../src/inspection/run-view.js";
 
 const plan: TaskPlan = {
 	version: 3,
@@ -206,19 +208,24 @@ function populatedRun(): OrchestrationRun {
 	};
 }
 
+/** A run that executed under the legacy orchestrator, as a reader sees it. */
+function populatedView(): RunView {
+	return legacyRunView(populatedRun());
+}
+
 describe("run inspection presentation", () => {
-	it("summarizes task and review state", () => {
-		const run = populatedRun();
-		expect(taskStateSummary(run)).toBe("1 blocked, 1 failed");
+	it("summarizes step and review state", () => {
+		const run = populatedView();
+		expect(unitStateSummary(run)).toBe("1 blocked, 1 failed");
 		expect(reviewStateSummary(run)).toBe(
 			"Review round 1: 1/5 reports received, 1 repair-required, 0 unresolved, 0 deferred",
 		);
 	});
 
 	it("sorts run list rows by updated time without changing the input", () => {
-		const older = populatedRun();
+		const older = populatedView();
 		const newer = {
-			...populatedRun(),
+			...populatedView(),
 			id: "newer",
 			updatedAt: "2026-02-01T00:00:00.000Z",
 		};
@@ -231,8 +238,8 @@ describe("run inspection presentation", () => {
 		expect(lines.at(-1)).toBe("Next: /orchestrate-show <run-id>");
 	});
 
-	it("renders run refs, timestamps, task progress, and next action", () => {
-		const output = renderRunOverview(populatedRun()).join("\n");
+	it("renders run refs, timestamps, step progress, and next action", () => {
+		const output = renderRunOverview(populatedView()).join("\n");
 		expect(output).toContain("Base: main @ base-commit");
 		expect(output).toContain(
 			"Integration: conductor/run-inspect/integration @ base-commit",
@@ -245,18 +252,59 @@ describe("run inspection presentation", () => {
 		expect(output).not.toContain("\u001b");
 	});
 
-	it("does not present a settled projected review round as in progress", () => {
+	it("recommends retry rather than resume for a failed engine run", () => {
+		const view = populatedView();
+		const engine = {
+			...view,
+			source: "engine" as const,
+			state: "failed" as const,
+			attempts: view.attempts.map((attempt) =>
+				attempt.state === "running"
+					? { ...attempt, state: "succeeded" as const }
+					: attempt,
+			),
+			blockedWorkers: [],
+		};
+
+		expect(renderRunOverview(engine).at(-1)).toBe(
+			"Next: /orchestrate-retry run-inspect",
+		);
+	});
+
+	it("does not present a settled review round as in progress", () => {
 		const run = populatedRun();
-		const output = renderRunOverview({
-			...run,
-			state: "completed",
-			reviewRounds: [
-				{
-					...required(run.reviewRounds[0], "review round"),
-					state: "succeeded",
-				},
-			],
-		}).join("\n");
+		const { finishedAt: _finishedAt, ...first } = required(
+			run.reviewAttempts[0],
+			"review attempt",
+		);
+		const { repairAttemptId: _repair, ...round } = required(
+			run.reviewRounds[0],
+			"review round",
+		);
+		// Every category reported and nothing needs repairing, so the round is
+		// settled even though no attempt recorded when the round itself ended.
+		const reviewAttempts = REVIEW_CATEGORIES.map((category) => ({
+			...first,
+			id: `review-${category}`,
+			category,
+			findings: [],
+		}));
+		const output = renderRunOverview(
+			legacyRunView({
+				...run,
+				state: "completed",
+				reviewAttempts,
+				reviewRounds: [
+					{
+						...round,
+						state: "succeeded",
+						attemptIds: reviewAttempts.map((attempt) => attempt.id),
+					},
+				],
+				repairAttempts: [],
+				blockedWorkers: [],
+			}),
+		).join("\n");
 		expect(output).toContain(
 			"Latest review round: succeeded; base task-integrated; 2026-01-01T00:10:00.000Z -> finished (time unavailable)",
 		);
@@ -265,50 +313,57 @@ describe("run inspection presentation", () => {
 		);
 	});
 
-	it("renders the full task authority and retry recommendation", () => {
-		const output = renderTaskDetails(populatedRun(), "core").join("\n");
+	it("renders the full step authority and retry recommendation", () => {
+		const output = renderUnitDetails(populatedView(), "core").join("\n");
 		expect(output).toContain("Description: Implement the core without");
 		expect(output).toContain("Allowed paths: src/core.ts");
 		expect(output).toContain("- npm test -- core");
 		expect(output).toContain("worker worker-task");
 		expect(output).toContain("Next: /orchestrate-retry run-inspect core");
-		expect(() => renderTaskDetails(populatedRun(), "unknown")).toThrow(
-			"Unknown task ID: unknown",
+		expect(() => renderUnitDetails(populatedView(), "unknown")).toThrow(
+			"Unknown step ID: unknown",
 		);
 	});
 
-	it("resolves every attempt kind and rejects unknown or ambiguous IDs", () => {
-		const run = populatedRun();
-		expect(resolveRunAttempt(run, "task-a").kind).toBe("task");
-		expect(resolveRunAttempt(run, "review-a").kind).toBe("review");
-		expect(resolveRunAttempt(run, "repair-a").kind).toBe("repair");
-		expect(resolveRunAttempt(run, "final-a").kind).toBe("final-validation");
-		expect(() => resolveRunAttempt(run, "unknown")).toThrow(
+	it("resolves every attempt role and rejects unknown or ambiguous IDs", () => {
+		const view = populatedView();
+		for (const [attemptId, role] of [
+			["task-a", "change"],
+			["review-a", "review"],
+			["repair-a", "repair"],
+		] as const) {
+			const resolved = resolveRunAttempt(view, attemptId);
+			expect(resolved.kind).toBe("step");
+			expect(resolved.kind === "step" && resolved.attempt.role).toBe(role);
+		}
+		expect(resolveRunAttempt(view, "final-a").kind).toBe("final-validation");
+		expect(() => resolveRunAttempt(view, "unknown")).toThrow(
 			"Unknown attempt ID: unknown",
 		);
+		const run = populatedRun();
 		const ambiguous: OrchestrationRun = {
 			...run,
-			reviewAttempts: [
-				{
-					...required(run.reviewAttempts[0], "review attempt"),
-					id: "task-a",
-				},
-			],
+			finalValidationAttempts: run.finalValidationAttempts.map((attempt) => ({
+				...attempt,
+				id: "task-a",
+			})),
 		};
-		expect(() => resolveRunAttempt(ambiguous, "task-a")).toThrow(
-			"Ambiguous attempt ID task-a: found task, review",
+		expect(() => resolveRunAttempt(legacyRunView(ambiguous), "task-a")).toThrow(
+			"Ambiguous attempt ID task-a: found change, final-validation",
 		);
 	});
 
 	it.each([
-		["task-a", "Task: core - Implement core", "Diff hash: diff-hash"],
+		["task-a", "Step: core - Implement core", "Diff hash: diff-hash"],
 		["review-a", "Review: round 1, category correctness", "finding-1"],
-		["repair-a", "Repair: round 1, findings finding-1", "worker-repair"],
+		["repair-a", "Repair: round 1", "worker-repair"],
 		["final-a", "Integration commit: final-head", "Final validation failed"],
 	])(
 		"renders %s attempt details",
 		(attemptId: string, detail: string, evidence: string) => {
-			const output = renderAttemptDetails(populatedRun(), attemptId).join("\n");
+			const output = renderAttemptDetails(populatedView(), attemptId).join(
+				"\n",
+			);
 			expect(output).toContain(detail);
 			expect(output).toContain(evidence);
 			expect(output).toContain("Next:");
@@ -319,8 +374,41 @@ describe("run inspection presentation", () => {
 		},
 	);
 
+	it("retries failed engine review steps but preserves the legacy restriction", () => {
+		const legacy = populatedView();
+		const attempts = legacy.attempts.map((attempt) =>
+			attempt.id === "review-a"
+				? { ...attempt, state: "failed" as const }
+				: attempt,
+		);
+		const engine = { ...legacy, source: "engine" as const, attempts };
+
+		expect(renderAttemptDetails(engine, "review-a").join("\n")).toContain(
+			"Next: /orchestrate-retry run-inspect review-1-correctness",
+		);
+		expect(
+			renderAttemptDetails({ ...legacy, attempts }, "review-a").join("\n"),
+		).toContain("Next: /orchestrate-resume run-inspect");
+	});
+
+	it("resumes interrupted attempts instead of retrying their step", () => {
+		const view = populatedView();
+		const interrupted = {
+			...view,
+			attempts: view.attempts.map((attempt) =>
+				attempt.id === "task-a"
+					? { ...attempt, state: "interrupted" as const }
+					: attempt,
+			),
+		};
+
+		expect(renderAttemptDetails(interrupted, "task-a").join("\n")).toContain(
+			"Next: /orchestrate-resume run-inspect",
+		);
+	});
+
 	it("bounds output tails and removes terminal control characters", () => {
-		const lines = renderAttemptDetails(populatedRun(), "task-a");
+		const lines = renderAttemptDetails(populatedView(), "task-a");
 		const output = lines.join("\n");
 		expect(output).toContain("stdout tail (truncated)");
 		expect(output).toContain("recent stdout [31m red");
@@ -334,9 +422,9 @@ describe("run inspection presentation", () => {
 
 	it("selects the latest worker and latest active followable worker", () => {
 		const run = populatedRun();
-		expect(latestWorkerAttempt(run)?.attempt.id).toBe("repair-a");
-		expect(latestFollowableWorkerAttempt(run)?.attempt.id).toBe("repair-a");
-		const stopped = {
+		expect(latestWorkerAttempt(populatedView())?.id).toBe("repair-a");
+		expect(latestFollowableWorkerAttempt(populatedView())?.id).toBe("repair-a");
+		const stopped = legacyRunView({
 			...run,
 			repairAttempts: [
 				{
@@ -344,7 +432,7 @@ describe("run inspection presentation", () => {
 					state: "succeeded" as const,
 				},
 			],
-		};
+		});
 		expect(latestFollowableWorkerAttempt(stopped)).toBeUndefined();
 	});
 
@@ -362,10 +450,12 @@ describe("run inspection presentation", () => {
 			startedAt: "2026-01-01T00:45:00.000Z",
 		};
 		expect(
-			latestWorkerAttempt({
-				...run,
-				reviewAttempts: [...run.reviewAttempts, adopted],
-			})?.attempt.id,
+			latestWorkerAttempt(
+				legacyRunView({
+					...run,
+					reviewAttempts: [...run.reviewAttempts, adopted],
+				}),
+			)?.id,
 		).toBe("repair-a");
 	});
 });

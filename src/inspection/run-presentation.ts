@@ -1,18 +1,21 @@
 import type {
 	FinalValidationAttempt,
 	FinalValidationEvidence,
-	OrchestrationRun,
-	RepairAttempt,
-	ReviewAttempt,
-	RunTask,
-	TaskAttempt,
-	TaskDefinition,
 	TaskValidationEvidence,
 	ValidationCheckEvidence,
+	WorkerRole,
 } from "../domain/types.js";
-import { REVIEW_CATEGORIES } from "../domain/types.js";
 import { formatCommand } from "../planning/plan-presentation.js";
 import { securityPolicyLines, workerLaunchPolicy } from "../security/policy.js";
+import { recommendedRunAction } from "./run-control.js";
+import {
+	type RunAttemptView,
+	type RunUnitRole,
+	type RunUnitView,
+	type RunView,
+	reviewRoundViews,
+	workUnits,
+} from "./run-view.js";
 
 const MAX_INLINE_LENGTH = 500;
 const MAX_OUTPUT_LENGTH = 2_000;
@@ -20,15 +23,8 @@ const MAX_OUTPUT_LINES = 12;
 const MAX_OUTPUT_LINE_LENGTH = 300;
 
 export type RunAttemptResolution =
-	| { kind: "task"; attempt: TaskAttempt }
-	| { kind: "review"; attempt: ReviewAttempt }
-	| { kind: "repair"; attempt: RepairAttempt }
+	| { kind: "step"; attempt: RunAttemptView }
 	| { kind: "final-validation"; attempt: FinalValidationAttempt };
-
-export type WorkerAttemptResolution = Exclude<
-	RunAttemptResolution,
-	{ kind: "final-validation" }
->;
 
 function isUnsafeTerminalCharacter(character: string): boolean {
 	const codePoint = character.codePointAt(0) ?? 0;
@@ -58,7 +54,7 @@ function display(value: string | undefined, fallback = "none"): string {
 		: safeInline(value);
 }
 
-function displayList(values: string[], fallback = "none"): string {
+function displayList(values: readonly string[], fallback = "none"): string {
 	return values.length > 0
 		? safeInline(values.map((value) => safeInline(value, 200)).join(", "))
 		: fallback;
@@ -120,9 +116,9 @@ function renderEvidence(
 		return ["Evidence: none recorded"];
 	}
 	const passed = evidence.checks.filter((check) => check.passed).length;
-	const taskLines: string[] = [];
+	const unitLines: string[] = [];
 	if ("changedFiles" in evidence) {
-		taskLines.push(
+		unitLines.push(
 			`Diff hash: ${display(evidence.diffHash)}`,
 			`Changed files: ${changedFileText(evidence)}`,
 		);
@@ -130,14 +126,15 @@ function renderEvidence(
 	return [
 		`Evidence: ${evidence.passed ? "passed" : "failed"}, checks ${passed}/${evidence.checks.length}`,
 		`Evidence time: ${display(evidence.startedAt)} -> ${display(evidence.finishedAt)}`,
-		...taskLines,
+		...unitLines,
 		...evidence.checks.flatMap(renderCheck),
 	];
 }
 
-export function taskStateSummary(run: OrchestrationRun): string {
-	const counts = Object.values(run.tasks).reduce((result, task) => {
-		result.set(task.state, (result.get(task.state) ?? 0) + 1);
+/** How the run's own work is progressing, ignoring its reviews of that work. */
+export function unitStateSummary(view: RunView): string {
+	const counts = workUnits(view).reduce((result, unit) => {
+		result.set(unit.state, (result.get(unit.state) ?? 0) + 1);
 		return result;
 	}, new Map<string, number>());
 	const summary = [
@@ -158,97 +155,27 @@ export function taskStateSummary(run: OrchestrationRun): string {
 	return summary || "none";
 }
 
-export function reviewStateSummary(run: OrchestrationRun): string {
-	if (run.reviewRounds.length === 0) {
+export function reviewStateSummary(view: RunView): string {
+	const round = latestStartedReviewRound(view);
+	if (!round) {
 		return "Reviews: not started";
 	}
-	const roundNumber = run.reviewRounds.at(-1)?.number ?? 0;
-	let succeeded = 0;
-	let repairRequired = 0;
-	let deferred = 0;
-	let unresolved = 0;
-	for (const attempt of run.reviewAttempts) {
-		if (attempt.round !== roundNumber) {
-			continue;
-		}
-		if (attempt.state === "succeeded") {
-			succeeded += 1;
-		}
-		for (const finding of attempt.findings ?? []) {
-			switch (finding.status) {
-				case "repair_required":
-					repairRequired += 1;
-					break;
-				case "deferred":
-					deferred += 1;
-					break;
-				case "unresolved":
-					unresolved += 1;
-					break;
-				default:
-					break;
-			}
-		}
-	}
-	return `Review round ${roundNumber}: ${succeeded}/${REVIEW_CATEGORIES.length} reports received, ${repairRequired} repair-required, ${unresolved} unresolved, ${deferred} deferred`;
+	return `Review round ${round.number}: ${round.reported}/${round.categories} reports received, ${round.findings.repair_required} repair-required, ${round.findings.unresolved} unresolved, ${round.findings.deferred} deferred`;
 }
 
-function nextRunAction(run: OrchestrationRun): string {
-	if (run.state === "completed" || run.state === "cancelled") {
-		return `/orchestrate-prune ${safeInline(run.id)}`;
-	}
-	if (
-		run.state === "running" ||
-		run.state === "reviewing" ||
-		run.state === "repairing"
-	) {
-		const followable = latestFollowableWorkerAttempt(run);
-		if (followable) {
-			return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(followable.attempt.id)}`;
-		}
-		return `/orchestrate-cancel ${safeInline(run.id)}`;
-	}
-	return `/orchestrate-resume ${safeInline(run.id)}`;
-}
-
-export function renderRunList(runs: readonly OrchestrationRun[]): string[] {
-	if (runs.length === 0) {
-		return [
-			"No orchestration runs found.",
-			"Next: /orchestrate <request-file>",
-		];
-	}
-	const sorted = [...runs].sort(
-		(left, right) =>
-			right.updatedAt.localeCompare(left.updatedAt) ||
-			left.id.localeCompare(right.id),
-	);
-	return [
-		`Orchestration runs (${runs.length}), newest first:`,
-		...sorted.map(
-			(run) =>
-				`${display(run.updatedAt)} | ${safeInline(run.id)} | ${run.state} | ${taskStateSummary(run)} | ${safeInline(run.plan.title)}`,
+function latestStartedReviewRound(view: RunView) {
+	const started = new Set(
+		view.units.flatMap((unit) =>
+			unit.review && unit.attemptIds.length > 0 ? [unit.review.round] : [],
 		),
-		"Next: /orchestrate-show <run-id>",
-	];
+	);
+	return reviewRoundViews(view)
+		.filter((round) => started.has(round.number))
+		.at(-1);
 }
 
-function renderRunTaskOverview(
-	definition: TaskDefinition,
-	task: RunTask | undefined,
-): string {
-	let details = `- ${safeInline(definition.id)} [${task?.state ?? "missing"}] ${safeInline(definition.title)}; dependencies: ${displayList(definition.dependencies)}; attempts: ${task?.attemptIds.length ?? 0}`;
-	if (task?.integratedCommit) {
-		details += `; integrated ${display(task.integratedCommit)}`;
-	}
-	if (task?.integrationError) {
-		details += `; error: ${safeInline(task.integrationError)}`;
-	}
-	return details;
-}
-
-function latestReviewRoundLines(run: OrchestrationRun): string[] {
-	const round = run.reviewRounds.at(-1);
+function latestReviewRoundLines(view: RunView): string[] {
+	const round = latestStartedReviewRound(view);
 	if (!round) {
 		return [];
 	}
@@ -267,13 +194,94 @@ function latestReviewRoundLines(run: OrchestrationRun): string[] {
 	return [line];
 }
 
-function blockedWorkerLines(
-	run: OrchestrationRun,
-	attemptId?: string,
-): string[] {
+function isFollowableAttempt(attempt: RunAttemptView): boolean {
+	return (
+		attempt.workerId !== undefined &&
+		["launched", "running"].includes(attempt.state)
+	);
+}
+
+function byRecency(left: RunAttemptView, right: RunAttemptView): number {
+	return (
+		right.startedAt.localeCompare(left.startedAt) || right.number - left.number
+	);
+}
+
+export function latestWorkerAttempt(view: RunView): RunAttemptView | undefined {
+	return view.attempts
+		.filter((attempt) => attempt.workerId !== undefined)
+		.sort(byRecency)[0];
+}
+
+export function latestFollowableWorkerAttempt(
+	view: RunView,
+): RunAttemptView | undefined {
+	return view.attempts.filter(isFollowableAttempt).sort(byRecency)[0];
+}
+
+function nextRunAction(view: RunView): string {
+	if (view.state === "completed" || view.state === "cancelled") {
+		return `/orchestrate-prune ${safeInline(view.id)}`;
+	}
+	if (view.state === "failed") {
+		const recommended = recommendedRunAction(view);
+		if (recommended.action === "retry") {
+			return `/orchestrate-retry ${safeInline(view.id)}`;
+		}
+		if (recommended.action === "resume") {
+			return `/orchestrate-resume ${safeInline(view.id)}`;
+		}
+		return `/orchestrate-show ${safeInline(view.id)}`;
+	}
+	if (
+		["running", "integrating", "reviewing", "repairing"].includes(view.state)
+	) {
+		const followable = latestFollowableWorkerAttempt(view);
+		if (followable) {
+			return `/orchestrate-follow ${safeInline(view.id)} ${safeInline(followable.id)}`;
+		}
+		return `/orchestrate-cancel ${safeInline(view.id)}`;
+	}
+	return `/orchestrate-resume ${safeInline(view.id)}`;
+}
+
+export function renderRunList(views: readonly RunView[]): string[] {
+	if (views.length === 0) {
+		return [
+			"No orchestration runs found.",
+			"Next: /orchestrate <request-file>",
+		];
+	}
+	const sorted = [...views].sort(
+		(left, right) =>
+			right.updatedAt.localeCompare(left.updatedAt) ||
+			left.id.localeCompare(right.id),
+	);
+	return [
+		`Orchestration runs (${views.length}), newest first:`,
+		...sorted.map(
+			(view) =>
+				`${display(view.updatedAt)} | ${safeInline(view.id)} | ${view.state} | ${unitStateSummary(view)} | ${safeInline(view.title)}`,
+		),
+		"Next: /orchestrate-show <run-id>",
+	];
+}
+
+function renderUnitOverview(unit: RunUnitView): string {
+	let details = `- ${safeInline(unit.id)} [${unit.state}] ${safeInline(unit.title)}; dependencies: ${displayList(unit.dependencies)}; attempts: ${unit.attemptIds.length}`;
+	if (unit.integratedCommit) {
+		details += `; integrated ${display(unit.integratedCommit)}`;
+	}
+	if (unit.integrationError) {
+		details += `; error: ${safeInline(unit.integrationError)}`;
+	}
+	return details;
+}
+
+function blockedWorkerLines(view: RunView, attemptId?: string): string[] {
 	const blockedWorkers = attemptId
-		? run.blockedWorkers.filter((blocked) => blocked.attemptId === attemptId)
-		: run.blockedWorkers;
+		? view.blockedWorkers.filter((blocked) => blocked.attemptId === attemptId)
+		: view.blockedWorkers;
 	if (blockedWorkers.length === 0) {
 		return [attemptId ? "Worker prompts: none" : "Blocked workers: none"];
 	}
@@ -288,8 +296,8 @@ function blockedWorkerLines(
 	];
 }
 
-function finalValidationLines(run: OrchestrationRun): string[] {
-	const attempt = run.finalValidationAttempts.at(-1);
+function finalValidationLines(view: RunView): string[] {
+	const attempt = view.finalValidationAttempts.at(-1);
 	if (!attempt) {
 		return ["Final validation: not started"];
 	}
@@ -306,49 +314,59 @@ function finalValidationLines(run: OrchestrationRun): string[] {
 	return [line];
 }
 
-export function renderRunOverview(run: OrchestrationRun): string[] {
+function attemptCountLine(view: RunView): string {
+	const counts = new Map<RunUnitRole, number>();
+	for (const attempt of view.attempts) {
+		counts.set(attempt.role, (counts.get(attempt.role) ?? 0) + 1);
+	}
+	const parts = [...counts]
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([role, count]) => `${count} ${role}`);
+	return `Attempts: ${[...parts, `${view.finalValidationAttempts.length} final validation`].join(", ")}`;
+}
+
+export function renderRunOverview(view: RunView): string[] {
 	return [
-		`Run ${safeInline(run.id)}: ${safeInline(run.plan.title)}`,
-		`State: ${run.state} | Snapshot revision: ${run.revision} | Schema: ${run.schemaVersion}`,
-		`Created: ${display(run.createdAt)} | Updated: ${display(run.updatedAt)} | Approved: ${display(run.approvedAt, "not approved")}`,
-		`Repository: ${display(run.repositoryRoot)}`,
-		`Base: ${display(run.baseBranch)} @ ${display(run.baseCommit)}`,
-		`Integration: ${display(run.integrationBranch)} @ ${display(run.integrationHead)}`,
-		`Plan revision: ${run.planRevision}${run.approvedPlanRevision ? ` (approved ${run.approvedPlanRevision})` : ""} | Worker limit: ${run.maxConcurrentWorkers}`,
-		`Request: ${display(run.request.sourcePath)}`,
+		`Run ${safeInline(view.id)}: ${safeInline(view.title)}`,
+		`State: ${view.state} | Execution record: ${view.source} | Snapshot revision: ${view.revision} | Schema: ${view.schemaVersion}`,
+		`Created: ${display(view.createdAt)} | Updated: ${display(view.updatedAt)} | Approved: ${display(view.approvedAt, "not approved")}`,
+		`Repository: ${display(view.repositoryRoot)}`,
+		`Base: ${display(view.baseBranch)} @ ${display(view.baseCommit)}`,
+		`Integration: ${display(view.integrationBranch)} @ ${display(view.integrationHead)}`,
+		`Plan revision: ${view.planRevision}${view.approvedPlanRevision ? ` (approved ${view.approvedPlanRevision})` : ""} | Worker limit: ${view.maxConcurrentWorkers}`,
+		`Request: ${display(view.requestPath)}`,
 		"Security boundary:",
-		...securityPolicyLines(run.securityPolicy).map((line) => safeInline(line)),
-		`Tasks: ${taskStateSummary(run)}`,
-		...run.plan.tasks.map((definition) =>
-			renderRunTaskOverview(definition, run.tasks[definition.id]),
-		),
-		reviewStateSummary(run),
-		...latestReviewRoundLines(run),
-		`Attempts: ${run.attempts.length} task, ${run.reviewAttempts.length} review, ${run.repairAttempts.length} repair, ${run.finalValidationAttempts.length} final validation`,
-		...blockedWorkerLines(run),
-		...finalValidationLines(run),
-		`Merge-ready evidence: ${run.mergeReadyEvidence ? `generated ${display(run.mergeReadyEvidence.generatedAt)}` : "none"}`,
-		`Next: ${nextRunAction(run)}`,
+		...securityPolicyLines(view.securityPolicy).map((line) => safeInline(line)),
+		`Steps: ${unitStateSummary(view)}`,
+		...workUnits(view).map(renderUnitOverview),
+		reviewStateSummary(view),
+		...latestReviewRoundLines(view),
+		attemptCountLine(view),
+		...blockedWorkerLines(view),
+		...finalValidationLines(view),
+		`Merge-ready evidence: ${view.mergeReadyEvidence ? `generated ${display(view.mergeReadyEvidence.generatedAt)}` : "none"}`,
+		...(view.error ? [`Run error: ${safeInline(view.error)}`] : []),
+		`Next: ${nextRunAction(view)}`,
 	];
 }
 
-function bulletLines(values: string[]): string[] {
+function bulletLines(values: readonly string[]): string[] {
 	if (values.length === 0) {
 		return ["- none"];
 	}
 	return values.map((value) => `- ${safeInline(value)}`);
 }
 
-function taskAttemptHistoryLines(
-	run: OrchestrationRun,
-	attemptIds: string[],
-): { lines: string[]; latest: TaskAttempt | undefined } {
+function attemptHistoryLines(
+	view: RunView,
+	attemptIds: readonly string[],
+): { lines: string[]; latest: RunAttemptView | undefined } {
 	if (attemptIds.length === 0) {
 		return { lines: ["- none"], latest: undefined };
 	}
-	let latest: TaskAttempt | undefined;
+	let latest: RunAttemptView | undefined;
 	const lines = attemptIds.flatMap((attemptId) => {
-		const attempt = run.attempts.find(
+		const attempt = view.attempts.find(
 			(candidate) => candidate.id === attemptId,
 		);
 		if (!attempt) {
@@ -357,7 +375,7 @@ function taskAttemptHistoryLines(
 		latest = attempt;
 		const attemptLines = [
 			`- #${attempt.number} ${safeInline(attempt.id)}: ${attempt.state}, worker ${display(attempt.workerId, "not assigned")}, ${display(attempt.startedAt)} -> ${display(attempt.finishedAt, "in progress")}`,
-			`  branch ${display(attempt.branch)} | worktree ${display(attempt.worktreePath)}`,
+			`  branch ${display(attempt.branch)} | workspace ${display(attempt.workspacePath)}`,
 			`  base ${display(attempt.baseCommit)} | commit ${display(attempt.commit)}`,
 		];
 		if (attempt.evidence) {
@@ -376,238 +394,187 @@ function taskAttemptHistoryLines(
 	return { lines, latest };
 }
 
-function nextTaskAction(
-	run: OrchestrationRun,
-	taskId: string,
-	task: RunTask,
-	latest: TaskAttempt | undefined,
+function nextUnitAction(
+	view: RunView,
+	unit: RunUnitView,
+	latest: RunAttemptView | undefined,
 ): string {
-	if (latest && isFollowableWorkerAttempt({ kind: "task", attempt: latest })) {
-		return `/orchestrate-follow ${safeInline(run.id)} ${safeInline(latest.id)}`;
+	if (latest && isFollowableAttempt(latest)) {
+		return `/orchestrate-follow ${safeInline(view.id)} ${safeInline(latest.id)}`;
 	}
 	if (
-		task.state === "failed" ||
+		unit.state === "failed" ||
 		latest?.state === "failed" ||
 		latest?.state === "interrupted"
 	) {
-		return `/orchestrate-retry ${safeInline(run.id)} ${safeInline(taskId)}`;
+		return `/orchestrate-retry ${safeInline(view.id)} ${safeInline(unit.id)}`;
 	}
 	if (latest) {
-		return `/orchestrate-show ${safeInline(run.id)} attempt ${safeInline(latest.id)}`;
+		return `/orchestrate-show ${safeInline(view.id)} attempt ${safeInline(latest.id)}`;
 	}
-	return `/orchestrate-show ${safeInline(run.id)}`;
+	return `/orchestrate-show ${safeInline(view.id)}`;
 }
 
-export function renderTaskDetails(
-	run: OrchestrationRun,
-	taskId: string,
-): string[] {
-	const task = run.tasks[taskId];
-	if (!task) {
-		throw new Error(`Unknown task ID: ${safeInline(taskId)}`);
+export function renderUnitDetails(view: RunView, unitId: string): string[] {
+	const unit = view.units.find((candidate) => candidate.id === unitId);
+	if (!unit) {
+		throw new Error(`Unknown step ID: ${safeInline(unitId)}`);
 	}
-	const definition = task.definition;
-	const history = taskAttemptHistoryLines(run, task.attemptIds);
+	const history = attemptHistoryLines(view, unit.attemptIds);
 	return [
-		`Task ${safeInline(definition.id)}: ${safeInline(definition.title)}`,
-		`State: ${task.state} | Attempts: ${task.attemptIds.length}`,
-		`Description: ${safeInline(definition.description)}`,
-		`Dependencies: ${displayList(definition.dependencies)}`,
-		`Allowed paths: ${displayList(definition.allowedPaths)}`,
+		`Step ${safeInline(unit.id)} (${unit.role}): ${safeInline(unit.title)}`,
+		`State: ${unit.state} | Attempts: ${unit.attemptIds.length}`,
+		`Description: ${safeInline(unit.description)}`,
+		`Dependencies: ${displayList(unit.dependencies)}`,
+		`Allowed paths: ${displayList(unit.allowedPaths)}`,
 		"Acceptance criteria:",
-		...bulletLines(definition.acceptanceCriteria),
+		...bulletLines(unit.acceptanceCriteria),
 		"Validation commands:",
-		...bulletLines(definition.validationCommands.map(formatCommand)),
-		`Integrated commit: ${display(task.integratedCommit)}`,
-		`Integration error: ${display(task.integrationError)}`,
+		...bulletLines(unit.validationCommands.map(formatCommand)),
+		`Integrated commit: ${display(unit.integratedCommit)}`,
+		`Integration error: ${display(unit.integrationError)}`,
 		"Attempt history:",
 		...history.lines,
-		`Next: ${nextTaskAction(run, taskId, task, history.latest)}`,
+		`Next: ${nextUnitAction(view, unit, history.latest)}`,
 	];
 }
 
 export function resolveRunAttempt(
-	run: OrchestrationRun,
+	view: RunView,
 	attemptId: string,
 ): RunAttemptResolution {
-	const matches: RunAttemptResolution[] = [];
-	for (const attempt of run.attempts) {
-		if (attempt.id === attemptId) {
-			matches.push({ kind: "task", attempt });
-		}
-	}
-	for (const attempt of run.reviewAttempts) {
-		if (attempt.id === attemptId) {
-			matches.push({ kind: "review", attempt });
-		}
-	}
-	for (const attempt of run.repairAttempts) {
-		if (attempt.id === attemptId) {
-			matches.push({ kind: "repair", attempt });
-		}
-	}
-	for (const attempt of run.finalValidationAttempts) {
-		if (attempt.id === attemptId) {
-			matches.push({ kind: "final-validation", attempt });
-		}
-	}
-	if (matches.length === 0) {
-		throw new Error(`Unknown attempt ID: ${safeInline(attemptId)}`);
-	}
-	if (matches.length > 1) {
-		throw new Error(
-			`Ambiguous attempt ID ${safeInline(attemptId)}: found ${matches.map((match) => match.kind).join(", ")}`,
-		);
-	}
+	const matches: RunAttemptResolution[] = [
+		...view.attempts.flatMap((attempt): RunAttemptResolution[] =>
+			attempt.id === attemptId ? [{ kind: "step", attempt }] : [],
+		),
+		...view.finalValidationAttempts.flatMap(
+			(attempt): RunAttemptResolution[] =>
+				attempt.id === attemptId ? [{ kind: "final-validation", attempt }] : [],
+		),
+	];
 	const match = matches[0];
 	if (!match) {
 		throw new Error(`Unknown attempt ID: ${safeInline(attemptId)}`);
 	}
+	if (matches.length > 1) {
+		throw new Error(
+			`Ambiguous attempt ID ${safeInline(attemptId)}: found ${matches
+				.map((candidate) =>
+					candidate.kind === "step" ? candidate.attempt.role : candidate.kind,
+				)
+				.join(", ")}`,
+		);
+	}
 	return match;
 }
 
-function workerAttempts(run: OrchestrationRun): WorkerAttemptResolution[] {
-	return [
-		...run.attempts.map(
-			(attempt): WorkerAttemptResolution => ({ kind: "task", attempt }),
-		),
-		...run.reviewAttempts.map(
-			(attempt): WorkerAttemptResolution => ({ kind: "review", attempt }),
-		),
-		...run.repairAttempts.map(
-			(attempt): WorkerAttemptResolution => ({ kind: "repair", attempt }),
-		),
-	];
+function workerRoleOf(role: RunUnitRole): WorkerRole | undefined {
+	switch (role) {
+		case "change":
+			return "implementation";
+		case "review":
+			return "review";
+		case "repair":
+			return "repair";
+		default:
+			return undefined;
+	}
 }
 
-export function latestWorkerAttempt(
-	run: OrchestrationRun,
-): WorkerAttemptResolution | undefined {
-	return workerAttempts(run)
-		.filter((resolution) => resolution.attempt.workerId !== undefined)
-		.sort(
-			(left, right) =>
-				right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
-				right.attempt.number - left.attempt.number,
-		)[0];
-}
-
-function isFollowableWorkerAttempt(resolution: RunAttemptResolution): boolean {
-	return (
-		resolution.kind !== "final-validation" &&
-		resolution.attempt.workerId !== undefined &&
-		["launched", "running"].includes(resolution.attempt.state)
-	);
-}
-
-export function latestFollowableWorkerAttempt(
-	run: OrchestrationRun,
-): WorkerAttemptResolution | undefined {
-	return workerAttempts(run)
-		.filter(isFollowableWorkerAttempt)
-		.sort(
-			(left, right) =>
-				right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
-				right.attempt.number - left.attempt.number,
-		)[0];
-}
-
-export function renderAttemptDetails(
-	run: OrchestrationRun,
-	attemptId: string,
+function stepAttemptDetailLines(
+	view: RunView,
+	attempt: RunAttemptView,
 ): string[] {
-	const resolution = resolveRunAttempt(run, attemptId);
-	const { attempt } = resolution;
-	const workerRole =
-		resolution.kind === "task"
-			? "implementation"
-			: resolution.kind === "review"
-				? "review"
-				: resolution.kind === "repair"
-					? "repair"
-					: undefined;
-	const launchPolicy = workerRole
-		? workerLaunchPolicy(run.securityPolicy, workerRole)
-		: undefined;
-	const common = [
-		`Attempt ${safeInline(attempt.id)} (${resolution.kind})`,
-		`State: ${attempt.state} | Number: ${attempt.number}`,
-		`Started: ${display(attempt.startedAt)} | Finished: ${display(attempt.finishedAt, "in progress")}`,
-		...(workerRole
-			? [
-					`Worker authority: ${workerRole}; tools ${launchPolicy?.tools.join(", ") ?? "legacy unrestricted"}; resources ${run.securityPolicy.workers.resourceDiscovery}`,
-				]
-			: [
-					`Validation authority: ${run.securityPolicy.validation.sandbox} sandbox; ${run.securityPolicy.validation.network} network; ${run.securityPolicy.validation.environment}`,
-				]),
+	const unit = view.units.find((candidate) => candidate.id === attempt.unitId);
+	const lines = [
+		`Step: ${safeInline(attempt.unitId)}${unit ? ` - ${safeInline(unit.title)}` : " (missing definition)"}`,
+		`Worker: ${display(attempt.workerId, "not assigned")}`,
+		`Branch: ${display(attempt.branch)}`,
+		`Workspace: ${display(attempt.workspacePath)}`,
+		`Base commit: ${display(attempt.baseCommit)}`,
+		`Commit: ${display(attempt.commit)}`,
+		`Integrated commit: ${display(attempt.integratedCommit)}`,
 	];
-	let details: string[];
-	let evidence: TaskValidationEvidence | FinalValidationEvidence | undefined;
-	if (resolution.kind === "task") {
-		const task = run.tasks[resolution.attempt.taskId];
-		details = [
-			`Task: ${safeInline(resolution.attempt.taskId)}${task ? ` - ${safeInline(task.definition.title)}` : " (missing definition)"}`,
-			`Worker: ${display(resolution.attempt.workerId, "not assigned")}`,
-			`Branch: ${display(resolution.attempt.branch)}`,
-			`Worktree: ${display(resolution.attempt.worktreePath)}`,
-			`Base commit: ${display(resolution.attempt.baseCommit)}`,
-			`Commit: ${display(resolution.attempt.commit)}`,
-		];
-		evidence = resolution.attempt.evidence;
-	} else if (resolution.kind === "review") {
-		details = [
-			`Review: round ${resolution.attempt.round}, category ${resolution.attempt.category}`,
-			`Worker: ${display(resolution.attempt.workerId, "not assigned")}`,
-			`Branch: ${display(resolution.attempt.branch)}`,
-			`Worktree: ${display(resolution.attempt.worktreePath)}`,
-			`Base commit: ${display(resolution.attempt.baseCommit)}`,
-			`Summary: ${display(resolution.attempt.summary)}`,
-			`Findings: ${resolution.attempt.findings?.length ?? 0}`,
-			...(resolution.attempt.findings ?? []).flatMap((finding) => [
+	if (unit?.review) {
+		lines.unshift(
+			`Review: round ${unit.review.round}, category ${unit.review.category}`,
+		);
+	}
+	if (unit?.repairRound !== undefined) {
+		lines.unshift(`Repair: round ${unit.repairRound}`);
+	}
+	if (attempt.summary !== undefined) {
+		lines.push(`Summary: ${display(attempt.summary)}`);
+	}
+	if (attempt.findings) {
+		lines.push(
+			`Findings: ${attempt.findings.length}`,
+			...attempt.findings.flatMap((finding) => [
 				`- ${safeInline(finding.id)} [${finding.severity}/${finding.confidence}/${finding.status}] ${safeInline(finding.title)}; paths: ${displayList(finding.paths)}`,
 				`  Description: ${safeInline(finding.description)}`,
 				`  Recommendation: ${safeInline(finding.recommendation)}`,
 			]),
-		];
-	} else if (resolution.kind === "repair") {
-		details = [
-			`Repair: round ${resolution.attempt.round}, findings ${displayList(resolution.attempt.findingIds)}`,
-			`Worker: ${display(resolution.attempt.workerId, "not assigned")}`,
-			`Branch: ${display(resolution.attempt.branch)}`,
-			`Worktree: ${display(resolution.attempt.worktreePath)}`,
-			`Base commit: ${display(resolution.attempt.baseCommit)}`,
-			`Source commit: ${display(resolution.attempt.commit)}`,
-			`Integrated commit: ${display(resolution.attempt.integratedCommit)}`,
-		];
-		evidence = resolution.attempt.evidence;
-	} else {
-		details = [
-			`Integration commit: ${display(resolution.attempt.integrationCommit)}`,
-			`Worktree: ${display(resolution.attempt.worktreePath)}`,
-		];
-		evidence = resolution.attempt.evidence;
+		);
 	}
+	if (attempt.artifactIds && attempt.artifactIds.length > 0) {
+		lines.push(`Artifacts: ${displayList(attempt.artifactIds)}`);
+	}
+	return lines;
+}
+
+export function renderAttemptDetails(
+	view: RunView,
+	attemptId: string,
+): string[] {
+	const resolution = resolveRunAttempt(view, attemptId);
+	const workerRole =
+		resolution.kind === "step"
+			? workerRoleOf(resolution.attempt.role)
+			: undefined;
+	const launchPolicy = workerRole
+		? workerLaunchPolicy(view.securityPolicy, workerRole)
+		: undefined;
+	const common = [
+		`Attempt ${safeInline(resolution.attempt.id)} (${resolution.kind === "step" ? resolution.attempt.role : "final-validation"})`,
+		`State: ${resolution.attempt.state} | Number: ${resolution.attempt.number}`,
+		`Started: ${display(resolution.attempt.startedAt)} | Finished: ${display(resolution.attempt.finishedAt, "in progress")}`,
+		...(workerRole
+			? [
+					`Worker authority: ${workerRole}; tools ${launchPolicy?.tools.join(", ") ?? "legacy unrestricted"}; resources ${view.securityPolicy.workers.resourceDiscovery}`,
+				]
+			: [
+					`Validation authority: ${view.securityPolicy.validation.sandbox} sandbox; ${view.securityPolicy.validation.network} network; ${view.securityPolicy.validation.environment}`,
+				]),
+	];
+	const details =
+		resolution.kind === "step"
+			? stepAttemptDetailLines(view, resolution.attempt)
+			: [
+					`Integration commit: ${display(resolution.attempt.integrationCommit)}`,
+					`Workspace: ${display(resolution.attempt.worktreePath)}`,
+				];
 	let next: string;
-	if (isFollowableWorkerAttempt(resolution)) {
-		next = `/orchestrate-follow ${safeInline(run.id)} ${safeInline(attempt.id)}`;
-	} else if (
-		attempt.state === "failed" ||
-		attempt.state === "interrupted" ||
-		attempt.state === "cancelled"
-	) {
+	if (resolution.kind === "step" && isFollowableAttempt(resolution.attempt)) {
+		next = `/orchestrate-follow ${safeInline(view.id)} ${safeInline(resolution.attempt.id)}`;
+	} else if (resolution.attempt.state === "failed") {
 		next =
-			resolution.kind === "task"
-				? `/orchestrate-retry ${safeInline(run.id)} ${safeInline(resolution.attempt.taskId)}`
-				: `/orchestrate-resume ${safeInline(run.id)}`;
+			resolution.kind === "step" &&
+			(view.source === "engine" || resolution.attempt.role === "change")
+				? `/orchestrate-retry ${safeInline(view.id)} ${safeInline(resolution.attempt.unitId)}`
+				: resolution.kind === "final-validation"
+					? `/orchestrate-retry ${safeInline(view.id)}`
+					: `/orchestrate-resume ${safeInline(view.id)}`;
+	} else if (resolution.attempt.state === "interrupted") {
+		next = `/orchestrate-resume ${safeInline(view.id)}`;
 	} else {
-		next = `/orchestrate-show ${safeInline(run.id)}`;
+		next = `/orchestrate-show ${safeInline(view.id)}`;
 	}
 	return [
 		...common,
 		...details,
-		...blockedWorkerLines(run, attempt.id),
-		`Error: ${display(attempt.error)}`,
-		...renderEvidence(evidence),
+		...blockedWorkerLines(view, resolution.attempt.id),
+		`Error: ${display(resolution.attempt.error)}`,
+		...renderEvidence(resolution.attempt.evidence),
 		`Next: ${next}`,
 	];
 }
