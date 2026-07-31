@@ -79,7 +79,7 @@
 		"@types/proper-lockfile": "^4.1.4",
 		"markdownlint-cli2": "0.23.2",
 		"semver": "7.8.5",
-		"typescript": "5.9.3",
+		"typescript": "7.0.2",
 		"vite-node": "^3.2.4",
 		"vitest": "3.2.7"
 	},
