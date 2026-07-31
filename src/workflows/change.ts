@@ -7,7 +7,7 @@ import {
 } from "../domain/types.js";
 import type { StepHandler } from "../engine/handlers.js";
 import { ChangeStepHandler } from "../engine/steps/change.js";
-import { RepairStepHandler } from "../engine/steps/repair.js";
+import { RepairStepHandler, repairStepId } from "../engine/steps/repair.js";
 import { ReviewStepHandler, reviewStepId } from "../engine/steps/review.js";
 import type { StepWorkerRunner } from "../engine/steps/worker-runner.js";
 import type { GitClient } from "../git/git.js";
@@ -23,11 +23,7 @@ export const REPAIR_EVIDENCE_OUTPUT = "evidence";
  */
 export const CHANGE_WORKFLOW_REPAIR_ROUNDS = 2;
 
-export function repairStepId(round: number): string {
-	return `repair-${round}`;
-}
-
-export { reviewStepId };
+export { repairStepId, reviewStepId };
 
 function reviewRoundStepIds(round: number): string[] {
 	return REVIEW_CATEGORIES.map((category) => reviewStepId(round, category));

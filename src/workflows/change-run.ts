@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { approveRun } from "../domain/run.js";
-import { stepProfileName } from "../domain/steps.js";
 import type {
 	FinalValidationAttempt,
-	MergeReadyEvidence,
 	OrchestrationRun,
 	RunSecurityPolicy,
 	WorkerRole,
@@ -35,6 +33,8 @@ import {
 import { defaultWorkspaceProviders } from "../engine/workspaces.js";
 import type { GitClient, RepositoryInfo } from "../git/git.js";
 import type { WorktreeManager } from "../git/worktrees.js";
+import { readReviewFindings } from "../inspection/run-inspector.js";
+import { engineRunView, type RunView } from "../inspection/run-view.js";
 import { defaultCapabilityProfiles } from "../security/capabilities.js";
 import { workerLaunchPolicy } from "../security/policy.js";
 import type { ArtifactStore } from "../storage/artifact-store.js";
@@ -48,10 +48,6 @@ import {
 	buildChangeWorkflowPlan,
 	changeWorkflowStepHandlers,
 } from "./change.js";
-import {
-	alignMergeReadyEvidence,
-	projectChangeRun,
-} from "./change-projection.js";
 
 export interface EngineChangeRunDependencies {
 	store: RunStore;
@@ -76,14 +72,14 @@ export interface WorkerModelSelection {
 
 export interface EngineLaunchOptions {
 	onProgress?: (progress: StepWorkerProgress & { kind: WorkerRole }) => void;
-	onRunUpdated?: (run: OrchestrationRun) => void;
+	onRunUpdated?: (view: RunView) => void;
 	signal?: AbortSignal;
 }
 
 export interface EngineLaunchResult {
-	run: OrchestrationRun;
-	/** Settles with the stored run once the workflow and finalization finish. */
-	completion: Promise<OrchestrationRun>;
+	run: RunView;
+	/** Settles once the workflow and its finalization finish. */
+	completion: Promise<RunView>;
 }
 
 interface ActiveEngineExecution {
@@ -186,8 +182,8 @@ export function hasLegacyExecutionState(run: OrchestrationRun): boolean {
  */
 export class EngineChangeRunner {
 	private readonly now: () => string;
-	private readonly findings = new Map<string, ReviewFindingsPayload>();
-	private projections: Promise<unknown> = Promise.resolve();
+	private findings: ReadonlyMap<string, ReviewFindingsPayload> = new Map();
+	private views: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly dependencies: EngineChangeRunDependencies) {
 		this.now = dependencies.now ?? (() => new Date().toISOString());
@@ -241,7 +237,6 @@ export class EngineChangeRunner {
 				);
 			} catch (error) {
 				approved = await this.fail(approved.id);
-				options.onRunUpdated?.(approved);
 				throw error;
 			}
 			return this.launch(approved, repository, model, options, execution);
@@ -304,10 +299,11 @@ export class EngineChangeRunner {
 				state,
 				recovered,
 			);
-			const projected = await this.project(run.id, relaunched);
+			await this.markExecuting(run.id);
 			if (relaunched.state !== "running") {
+				const view = await this.loadView(run.id, relaunched);
 				const completion = this.settle(
-					projected,
+					run,
 					relaunched,
 					repository,
 					options,
@@ -319,9 +315,9 @@ export class EngineChangeRunner {
 						execution,
 					);
 				});
-				return { run: projected, completion };
+				return { run: view, completion };
 			}
-			return this.launch(projected, repository, model, options, execution);
+			return this.launch(run, repository, model, options, execution);
 		} catch (error) {
 			await releaseExecution(
 				this.dependencies.workflowStates.directory,
@@ -473,9 +469,10 @@ export class EngineChangeRunner {
 			);
 			if (reset.length === 0) {
 				if (retryFinalization) {
-					const projected = await this.project(run.id, state);
+					await this.markExecuting(run.id);
+					const view = await this.loadView(run.id, state);
 					const completion = this.settle(
-						projected,
+						run,
 						state,
 						repository,
 						options,
@@ -487,17 +484,12 @@ export class EngineChangeRunner {
 							execution,
 						);
 					});
-					return { run: projected, completion };
+					return { run: view, completion };
 				}
 				throw new Error(`Run ${run.id} has no failed steps to retry`);
 			}
-			return this.launch(
-				await this.project(run.id, state),
-				repository,
-				model,
-				options,
-				execution,
-			);
+			await this.markExecuting(run.id);
+			return this.launch(run, repository, model, options, execution);
 		} catch (error) {
 			await releaseExecution(
 				this.dependencies.workflowStates.directory,
@@ -526,16 +518,10 @@ export class EngineChangeRunner {
 		executing?.controller.abort(new Error("The run was cancelled"));
 		const engine =
 			executing?.engine ?? this.engineFor(run, repository, undefined, {});
-		const state = await engine.cancel(run.id);
-		await this.drainProjections();
-		const current = await this.dependencies.store.load(run.id);
-		if (current.state === "validating") {
-			return this.cancelStoredRun(run.id);
-		}
-		const projected = await this.project(run.id, state);
-		if (projected.state === "cancelled") {
-			return projected;
-		}
+		await engine.cancel(run.id);
+		await this.drainViewUpdates();
+		// The engine settles its own steps; the stored run stops claiming the
+		// lifecycle is open, whichever phase the cancellation interrupted.
 		return this.cancelStoredRun(run.id);
 	}
 
@@ -606,8 +592,8 @@ export class EngineChangeRunner {
 						updatedAt: this.now(),
 					}),
 				);
-				this.scheduleProjection(run.id, state, options);
-				await this.drainProjections();
+				this.scheduleViewUpdate(run.id, state, options);
+				await this.drainViewUpdates();
 			},
 		});
 		return new WorkflowEngine({
@@ -632,7 +618,7 @@ export class EngineChangeRunner {
 			integrator: new GitStepIntegrator(this.dependencies.git),
 			now: this.now,
 			onStateChanged: (state) => {
-				this.scheduleProjection(run.id, state, options);
+				this.scheduleViewUpdate(run.id, state, options);
 			},
 		});
 	}
@@ -645,22 +631,22 @@ export class EngineChangeRunner {
 				: "repair";
 	}
 
-	private launch(
+	private async launch(
 		run: OrchestrationRun,
 		repository: RepositoryInfo,
 		model: WorkerModelSelection | undefined,
 		options: EngineLaunchOptions,
 		execution: ActiveEngineExecution,
-	): EngineLaunchResult {
+	): Promise<EngineLaunchResult> {
 		const engine = this.engineFor(run, repository, model, options);
 		execution.engine = engine;
+		const view = await this.loadView(run.id);
 		const completion = engine
 			.run(run.id, { signal: execution.controller.signal })
 			.then(async (state) => {
-				await this.drainProjections();
-				const projected = await this.project(run.id, state);
+				await this.drainViewUpdates();
 				return this.settle(
-					projected,
+					run,
 					state,
 					repository,
 					options,
@@ -674,7 +660,7 @@ export class EngineChangeRunner {
 					execution,
 				);
 			});
-		return { run, completion };
+		return { run: view, completion };
 	}
 
 	/**
@@ -688,7 +674,7 @@ export class EngineChangeRunner {
 		repository: RepositoryInfo,
 		options: EngineLaunchOptions,
 		signal: AbortSignal,
-	): Promise<OrchestrationRun> {
+	): Promise<RunView> {
 		if (state.state !== "completed") {
 			// The failure itself is already recorded step by step; the stored run
 			// only has to stop claiming the lifecycle is still open.
@@ -700,13 +686,15 @@ export class EngineChangeRunner {
 						: {
 								...stored,
 								state: state.state === "cancelled" ? "cancelled" : "failed",
+								...(state.error ? { error: state.error } : {}),
 								updatedAt: this.now(),
 							},
 			);
-			options.onRunUpdated?.(settled);
-			return settled;
+			return this.publish(settled, state, options);
 		}
-		const attemptNumber = run.finalValidationAttempts.length + 1;
+		const attemptNumber =
+			(await this.dependencies.store.load(run.id)).finalValidationAttempts
+				.length + 1;
 		const startedAt = this.now();
 		const attempt: FinalValidationAttempt = {
 			id: `final-${attemptNumber}-${randomUUID().slice(0, 8)}`,
@@ -745,6 +733,9 @@ export class EngineChangeRunner {
 									: {
 											...stored,
 											state: "validating",
+											// The head under validation is the head this run
+											// settles on, and its evidence must match it.
+											integrationHead: state.integrationHead,
 											finalValidationAttempts: [
 												...stored.finalValidationAttempts,
 												attempt,
@@ -764,13 +755,14 @@ export class EngineChangeRunner {
 								`Final validation attempt ${attempt.id} did not start`,
 							);
 						}
-						options.onRunUpdated?.(validating);
+						await this.publish(validating, state, options);
 					},
 				},
 			);
 		} catch (error) {
 			return this.settleFinalizationException(
 				run.id,
+				state,
 				attempt,
 				attemptStarted,
 				signal,
@@ -779,7 +771,12 @@ export class EngineChangeRunner {
 			);
 		}
 		if (result.evidenceGap) {
-			return this.settleReviewFailure(run.id, result.evidenceGap, options);
+			return this.settleReviewFailure(
+				run.id,
+				state,
+				result.evidenceGap,
+				options,
+			);
 		}
 		const cancelled = signal.aborted;
 		const finishedAt = this.now();
@@ -789,9 +786,7 @@ export class EngineChangeRunner {
 				if (stored.state === "cancelled") {
 					return stored;
 				}
-				const mergeReady: MergeReadyEvidence | undefined = result.mergeReady
-					? alignMergeReadyEvidence(result.mergeReady, stored)
-					: undefined;
+				const mergeReady = result.mergeReady;
 				return {
 					...stored,
 					state: cancelled ? "cancelled" : mergeReady ? "completed" : "failed",
@@ -817,64 +812,52 @@ export class EngineChangeRunner {
 					...(!cancelled && mergeReady
 						? { mergeReadyEvidence: mergeReady }
 						: {}),
+					...(cancelled || mergeReady
+						? {}
+						: { error: "Final validation failed" }),
 					updatedAt: finishedAt,
 				};
 			},
 		);
-		options.onRunUpdated?.(settled);
-		return settled;
+		return this.publish(settled, state, options);
 	}
 
+	/**
+	 * Records a failure that belongs to no attempt: the reviews backing this
+	 * head are incomplete, so the run never spends a final validation attempt.
+	 */
 	private async settleReviewFailure(
 		runId: string,
+		state: WorkflowRunState,
 		error: string,
 		options: EngineLaunchOptions,
-	): Promise<OrchestrationRun> {
+	): Promise<RunView> {
 		const finishedAt = this.now();
 		const settled = await this.dependencies.store.transaction(
 			runId,
-			(stored) => {
-				if (stored.state === "cancelled") {
-					return stored;
-				}
-				const finalRound = stored.reviewRounds.at(-1);
-				return {
-					...stored,
-					state: "failed",
-					reviewRounds: stored.reviewRounds.map((round) =>
-						round.number === finalRound?.number
-							? {
-									...round,
-									state: "failed" as const,
-									finishedAt,
-									error,
-								}
-							: round,
-					),
-					updatedAt: finishedAt,
-				};
-			},
+			(stored) =>
+				stored.state === "cancelled"
+					? stored
+					: { ...stored, state: "failed", error, updatedAt: finishedAt },
 		);
-		options.onRunUpdated?.(settled);
-		return settled;
+		return this.publish(settled, state, options);
 	}
 
 	private async settleFinalizationException(
 		runId: string,
+		state: WorkflowRunState,
 		attempt: FinalValidationAttempt,
 		attemptStarted: boolean,
 		signal: AbortSignal,
 		error: unknown,
 		options: EngineLaunchOptions,
-	): Promise<OrchestrationRun> {
+	): Promise<RunView> {
 		const message = error instanceof Error ? error.message : String(error);
 		if (!attemptStarted) {
 			if (signal.aborted) {
-				const cancelled = await this.cancelStoredRun(runId);
-				options.onRunUpdated?.(cancelled);
-				return cancelled;
+				return this.publish(await this.cancelStoredRun(runId), state, options);
 			}
-			return this.settleReviewFailure(runId, message, options);
+			return this.settleReviewFailure(runId, state, message, options);
 		}
 		const finishedAt = this.now();
 		const settled = await this.dependencies.store.transaction(
@@ -904,8 +887,7 @@ export class EngineChangeRunner {
 				};
 			},
 		);
-		options.onRunUpdated?.(settled);
-		return settled;
+		return this.publish(settled, state, options);
 	}
 
 	private async interruptStaleFinalValidation(
@@ -932,6 +914,27 @@ export class EngineChangeRunner {
 				),
 				updatedAt: finishedAt,
 			};
+		});
+	}
+
+	/**
+	 * Records that the run is executing again.
+	 *
+	 * A resumed or retried run is no longer settled, and the failure that
+	 * settled it is no longer the run's answer, so neither may be left behind
+	 * for a reader to find. A cancelled run stays cancelled: only the user
+	 * reopens it, by starting a new run.
+	 */
+	private async markExecuting(runId: string): Promise<OrchestrationRun> {
+		return this.dependencies.store.transaction(runId, (stored) => {
+			if (
+				stored.state === "cancelled" ||
+				(stored.state === "running" && stored.error === undefined)
+			) {
+				return stored;
+			}
+			const { error: _error, ...retained } = stored;
+			return { ...retained, state: "running", updatedAt: this.now() };
 		});
 	}
 
@@ -967,58 +970,64 @@ export class EngineChangeRunner {
 		}));
 	}
 
-	private scheduleProjection(
+	/**
+	 * Tells a watcher what the run looks like now.
+	 *
+	 * The engine snapshot is the execution record, so a view that cannot be
+	 * built must never stop the run that produced it.
+	 */
+	private scheduleViewUpdate(
 		runId: string,
 		state: WorkflowRunState,
 		options: EngineLaunchOptions,
 	): void {
-		this.projections = this.projections.then(async () => {
+		if (!options.onRunUpdated) {
+			return;
+		}
+		this.views = this.views.then(async () => {
 			try {
-				options.onRunUpdated?.(await this.project(runId, state));
+				options.onRunUpdated?.(await this.loadView(runId, state));
 			} catch {
-				// The engine snapshot is the execution record; a projection that
-				// cannot be written must never stop the run that produced it.
+				// Reported through the run's own lifecycle instead.
 			}
 		});
 	}
 
-	private async drainProjections(): Promise<void> {
-		await this.projections;
+	private async drainViewUpdates(): Promise<void> {
+		await this.views;
 	}
 
-	/** Reads every review step's published findings once and caches them. */
-	private async readFindings(state: WorkflowRunState): Promise<void> {
-		for (const [stepId, record] of Object.entries(state.steps)) {
-			if (
-				stepProfileName(record.definition) !== "review" ||
-				record.state !== "succeeded" ||
-				this.findings.has(stepId)
-			) {
-				continue;
-			}
-			for (const output of record.definition.outputs ?? []) {
-				const artifact = await this.dependencies.artifacts.latest(
-					state.id,
-					stepId,
-					output,
-				);
-				if (artifact) {
-					this.findings.set(
-						stepId,
-						JSON.parse(artifact.payload) as ReviewFindingsPayload,
-					);
-				}
-			}
-		}
-	}
-
-	private async project(
-		runId: string,
+	private async publish(
+		run: OrchestrationRun,
 		state: WorkflowRunState,
-	): Promise<OrchestrationRun> {
-		await this.readFindings(state);
-		return this.dependencies.store.transaction(runId, (stored) =>
-			projectChangeRun(stored, { state, findings: this.findings }, this.now()),
+		options: EngineLaunchOptions,
+	): Promise<RunView> {
+		const view = await this.viewOf(run, state);
+		options.onRunUpdated?.(view);
+		return view;
+	}
+
+	/** How this run reads, from the engine snapshot that is executing it. */
+	private async viewOf(
+		run: OrchestrationRun,
+		state: WorkflowRunState,
+	): Promise<RunView> {
+		this.findings = await readReviewFindings(
+			this.dependencies.artifacts,
+			state,
+			this.findings,
 		);
+		return engineRunView(run, state, this.findings);
+	}
+
+	private async loadView(
+		runId: string,
+		state?: WorkflowRunState,
+	): Promise<RunView> {
+		const [run, current] = await Promise.all([
+			this.dependencies.store.load(runId),
+			state ?? this.dependencies.workflowStates.load(runId),
+		]);
+		return this.viewOf(run, current);
 	}
 }

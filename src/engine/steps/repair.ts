@@ -23,6 +23,11 @@ import type { ReviewFindingsPayload } from "./review.js";
  */
 export const REPAIR_STEP_OUTPUTS = ["evidence"] as const;
 
+/** The step that repairs one review round's findings. */
+export function repairStepId(round: number): string {
+	return `repair-${round}`;
+}
+
 export interface RepairStepHandlerOptions extends ValidatedChangeOptions {
 	requestText?: string;
 }

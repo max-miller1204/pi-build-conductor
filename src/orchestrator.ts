@@ -7,7 +7,6 @@ import {
 	restoreRunPlanRevision,
 	reviseRunPlan,
 } from "./domain/run.js";
-import { prepareFailedRunRetry } from "./domain/run-control.js";
 import {
 	getLaunchableTaskIds,
 	reconcileTaskStates,
@@ -44,6 +43,7 @@ import type {
 	ResourceReconciliationReport,
 	WorktreeManager,
 } from "./git/worktrees.js";
+import { prepareFailedRunRetry } from "./inspection/run-control.js";
 import { buildRepairPrompt, buildReviewerPrompt } from "./review/prompts.js";
 import { prioritizeFindings } from "./review/review-policy.js";
 import {

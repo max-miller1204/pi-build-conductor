@@ -141,33 +141,33 @@
       "id": "goal-mry8o2km-9e209bd0",
       "title": "Generalize tasks into workflow steps",
       "description": "Replace implementation-only task assumptions with typed investigation, change, command, and approval steps that declare dependencies, capabilities, path or resource locks, validation, outputs, timeouts, and retry policies.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.174Z",
-      "updatedAt": "2026-07-25T20:54:37.205Z"
+      "updatedAt": "2026-07-31T07:22:25.993Z"
     },
     {
       "id": "goal-mry8o2kt-abdd9d8e",
       "title": "Make artifacts first-class outputs",
       "description": "Persist typed reports, decisions, findings, test evidence, patches, commits, and merge candidates so dependent steps coordinate through explicit inspectable artifacts instead of only integrated Git changes.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.181Z",
-      "updatedAt": "2026-07-25T21:05:46.670Z"
+      "updatedAt": "2026-07-31T07:22:26.220Z"
     },
     {
       "id": "goal-mry8o2lg-797b80b6",
       "title": "Build a reusable workflow engine",
       "description": "Decompose the fixed BuildConductor lifecycle into a generic run state machine, scheduler, step handlers, executors, workspace providers, artifact storage, quality gates, event timelines, and conflict-aware resource scheduling.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.204Z",
-      "updatedAt": "2026-07-31T01:16:44.459Z"
+      "updatedAt": "2026-07-31T07:22:26.441Z"
     },
     {
       "id": "goal-mry8o2lj-6361b2b1",
       "title": "Provide built-in orchestration workflows",
       "description": "Recast the current strict build lifecycle as a change workflow and add investigate and plan-only workflows while preserving approval, isolation, review, repair, validation, recovery, and evidence guarantees where applicable.",
-      "status": "active",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.207Z",
-      "updatedAt": "2026-07-31T01:16:44.459Z"
+      "updatedAt": "2026-07-31T07:22:26.875Z"
     },
     {
       "id": "goal-mry8o2lk-50778d73",
@@ -181,17 +181,17 @@
       "id": "goal-mry8o2ll-fd9d991a",
       "title": "Define generalized orchestration safety",
       "description": "Preserve immutable approval and least-authority execution, introduce capability profiles for each step type, expose sandbox policy during approval, and keep deployment, publishing, cloud administration, and other external mutations disabled until safely supported.",
-      "status": "open",
+      "status": "done",
       "createdAt": "2026-07-24T01:05:43.209Z",
-      "updatedAt": "2026-07-29T18:02:25.642Z"
+      "updatedAt": "2026-07-31T07:22:26.658Z"
     },
     {
       "id": "goal-mry8o2lm-a8c5a52c",
       "title": "Rename and migrate the product surface",
       "description": "Adopt neutral package, command, type, configuration, storage, and documentation naming centered on orchestration, provide /orchestrate as the main interface, and retain temporary /build aliases plus readers for existing run schemas.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-24T01:05:43.210Z",
-      "updatedAt": "2026-07-25T20:41:49.029Z"
+      "updatedAt": "2026-07-31T07:22:38.317Z"
     },
     {
       "id": "goal-mry8o2lo-4cca8faf",
@@ -258,5 +258,5 @@
       "updatedAt": "2026-07-24T18:31:12.552Z"
     }
   ],
-  "revision": 10
+  "revision": 16
 }

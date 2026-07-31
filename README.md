@@ -132,11 +132,11 @@ The orchestrator persists restart-safe metadata and valid plan revisions, but do
 | `/orchestrate-investigate <request-file>` | Investigate repository questions and synthesize a read-only report |
 | `/orchestrate-list` | List repository-scoped runs and open the interactive inspector |
 | `/orchestrate-show <run-id>` | Show the run summary and merge-ready evidence |
-| `/orchestrate-show <run-id> task <task-id>` | Show one task and its attempts |
+| `/orchestrate-show <run-id> step <step-id>` | Show one workflow step and its attempts |
 | `/orchestrate-show <run-id> attempt <attempt-id>` | Show one attempt, its Git state, checks, and bounded output tail |
 | `/orchestrate-follow <run-id> [attempt-id]` | Replay or follow a worker activity journal |
 | `/orchestrate-resume <run-id>` | Reconcile and continue an interrupted run |
-| `/orchestrate-retry <run-id> [task-id]` | Retry safe failed task work or failed final validation |
+| `/orchestrate-retry <run-id> [step-id]` | Retry safe failed step work or failed final validation |
 | `/orchestrate-cancel <run-id>` | Stop active work and retain inspectable state |
 | `/orchestrate-prune <run-id>` | Remove only proven-clean disposable resources from a terminal run |
 
@@ -146,9 +146,12 @@ Use `/orchestrate-resume`, not `/orchestrate-retry`, after a process or daemon i
 Resume first reconciles durable attempts, commits, artifacts, branches, and worktrees before launching new work.
 An interrupted engine step is adopted only when its commit, declared outputs, and required passing validation evidence can be proved; otherwise resume runs that step and its blocked descendants again.
 
-Task-phase retry creates new attempts for all failed tasks in the retry set and their blocked descendants while preserving history.
+Step-phase retry creates new attempts for all failed steps in the retry set and their blocked descendants while preserving history.
 Final-validation retry creates a new detached attempt for the already approved complete suite.
-Review or repair policy failures require a new approved run because retrying them could change the approved authority boundary.
+
+Inspection reads a run from whichever record executed it.
+A run started by the workflow engine is read from its durable workflow snapshot, so its steps, review rounds, findings, and attempts are the engine's own record rather than a copy of it; `step <step-id>` names an engine step such as `implementation`, `review-2-security`, or `repair-1`, and `task <task-id>` still resolves for habit.
+A run that executed under the legacy orchestrator is read from the stored run and keeps the same vocabulary, but its review and repair phases cannot be retried, because restarting one needs round coordination that lifecycle never had.
 
 Cancellation is idempotent.
 Pruning retains the integration branch, source-evidence branches, snapshots, journals, dirty worktrees, and any resource whose commit cannot be proven safe to remove.
@@ -293,8 +296,9 @@ Worker journals are stored below the same run directory in `output/` and are cap
 A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new location automatically the first time a command touches run storage.
 Immutable workflow artifacts are stored by run below `<git-common-dir>/pi-orchestrator/artifacts/`.
 Workflow engine runs, including new `/orchestrate` change runs, execute from versioned snapshots below `<git-common-dir>/pi-orchestrator/workflow-runs/`, which are the authoritative execution record and allow recovery after a restart.
-For change runs, the corresponding `runs/` record retains approval and plan history and receives a best-effort projection for the existing inspection and control commands.
-Runs with legacy execution state and no workflow snapshot remain on the legacy execution path.
+For change runs, the corresponding `runs/` record holds only what the snapshot does not: the request, plan history, approval, security policy, final-validation attempts, and the run's terminal outcome and merge-ready evidence.
+No execution state is copied onto it, so a step, attempt, review round, or finding is read from the engine snapshot and exists in exactly one place.
+Runs with legacy execution state and no workflow snapshot remain on the legacy execution path and are read from the stored run itself.
 Orchestrator worktrees are stored at:
 
 ```text

@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { approveRun, createOrchestrationRun } from "../src/domain/run.js";
 import {
-	prepareFailedRunRetry,
-	RunRetryError,
-	recommendedRunAction,
-	retryableRunWork,
-} from "../src/domain/run-control.js";
-import {
 	type OrchestrationRun,
 	REVIEW_CATEGORIES,
 	type RunTask,
 	type TaskDefinition,
 	type TaskPlan,
 } from "../src/domain/types.js";
+import {
+	prepareFailedRunRetry,
+	RunRetryError,
+	recommendedRunAction,
+	retryableRunWork,
+} from "../src/inspection/run-control.js";
+import { legacyRunView } from "../src/inspection/run-view.js";
 import { validateStoredRun } from "../src/storage/run-store.js";
 
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
@@ -200,15 +201,15 @@ describe("failed run retry control", () => {
 	it("identifies task work and every blocked descendant", () => {
 		const run = taskFailureRun();
 
-		expect(retryableRunWork(run)).toEqual({
+		expect(retryableRunWork(legacyRunView(run))).toEqual({
 			retryable: true,
-			phase: "tasks",
-			failedTaskIds: ["failed"],
-			resetTaskIds: ["failed", "child", "grandchild"],
+			phase: "steps",
+			failedUnitIds: ["failed"],
+			resetUnitIds: ["failed", "child", "grandchild"],
 		});
-		expect(recommendedRunAction(run)).toMatchObject({
+		expect(recommendedRunAction(legacyRunView(run))).toMatchObject({
 			action: "retry",
-			work: { phase: "tasks", failedTaskIds: ["failed"] },
+			work: { phase: "steps", failedUnitIds: ["failed"] },
 		});
 	});
 
@@ -267,7 +268,7 @@ describe("failed run retry control", () => {
 		const finalAttempts = run.finalValidationAttempts;
 		const reviewAttempts = run.reviewAttempts;
 
-		expect(retryableRunWork(run)).toEqual({
+		expect(retryableRunWork(legacyRunView(run))).toEqual({
 			retryable: true,
 			phase: "final-validation",
 			attemptId: "retry-run-final-1",
@@ -296,7 +297,7 @@ describe("failed run retry control", () => {
 		});
 		runTask(run, "other").attemptIds.push("other-1");
 
-		expect(recommendedRunAction(run)).toMatchObject({
+		expect(recommendedRunAction(legacyRunView(run))).toMatchObject({
 			action: "resume",
 			reason: expect.stringContaining("resume the run instead of retrying"),
 		});
@@ -321,7 +322,7 @@ describe("failed run retry control", () => {
 		});
 		runTask(run, "implementation").attemptIds.push("implementation-1");
 
-		expect(recommendedRunAction(run)).toMatchObject({
+		expect(recommendedRunAction(legacyRunView(run))).toMatchObject({
 			action: "resume",
 			reason: expect.stringContaining("interrupted attempts"),
 		});
@@ -350,9 +351,9 @@ describe("failed run retry control", () => {
 		);
 		runTask(run, "failed").attemptIds.unshift("failed-interrupted");
 
-		expect(recommendedRunAction(run)).toMatchObject({
+		expect(recommendedRunAction(legacyRunView(run))).toMatchObject({
 			action: "retry",
-			work: { phase: "tasks" },
+			work: { phase: "steps" },
 		});
 	});
 
@@ -420,7 +421,7 @@ describe("failed run retry control", () => {
 	])("rejects retry while a $name attempt is active", ({ addActive }) => {
 		const run = taskFailureRun();
 		addActive(run);
-		const assessment = retryableRunWork(run);
+		const assessment = retryableRunWork(legacyRunView(run));
 		expect(assessment).toMatchObject({
 			retryable: false,
 			reasonCode: "active-attempts",
@@ -456,7 +457,7 @@ describe("failed run retry control", () => {
 			error: "review failed",
 		});
 
-		expect(retryableRunWork(run)).toMatchObject({
+		expect(retryableRunWork(legacyRunView(run))).toMatchObject({
 			retryable: false,
 			reasonCode: "review-phase-unsupported",
 			reason: expect.stringContaining("review-round coordination"),
@@ -480,7 +481,7 @@ describe("failed run retry control", () => {
 			error: "repair failed",
 		});
 
-		expect(retryableRunWork(run)).toMatchObject({
+		expect(retryableRunWork(legacyRunView(run))).toMatchObject({
 			retryable: false,
 			reasonCode: "repair-phase-unsupported",
 			reason: expect.stringContaining("review-round coordination"),
@@ -489,7 +490,7 @@ describe("failed run retry control", () => {
 
 	it("rejects an unapproved failed run with an actionable reason", () => {
 		const run = { ...createRun(), state: "failed" as const };
-		const assessment = retryableRunWork(run);
+		const assessment = retryableRunWork(legacyRunView(run));
 		expect(assessment).toMatchObject({
 			retryable: false,
 			reasonCode: "run-not-approved",
@@ -501,7 +502,9 @@ describe("failed run retry control", () => {
 		"rejects a %s run because it is not failed",
 		(state) => {
 			const run = { ...approvedRun(), state };
-			expect(recommendedRunAction(run)).toMatchObject({ action: "none" });
+			expect(recommendedRunAction(legacyRunView(run))).toMatchObject({
+				action: "none",
+			});
 			try {
 				prepareFailedRunRetry(run, RETRIED_AT);
 				expect.unreachable("Expected retry preparation to fail");
@@ -515,7 +518,7 @@ describe("failed run retry control", () => {
 
 	it("rejects a failed run whose failure phase cannot be identified", () => {
 		const run = { ...approvedRun(), state: "failed" as const };
-		expect(retryableRunWork(run)).toMatchObject({
+		expect(retryableRunWork(legacyRunView(run))).toMatchObject({
 			retryable: false,
 			reasonCode: "no-retryable-failure",
 			reason: expect.stringContaining("inspect the run failure"),

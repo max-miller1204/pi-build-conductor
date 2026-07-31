@@ -452,6 +452,12 @@ export interface OrchestrationRun {
 	blockedWorkers: BlockedWorkerState[];
 	finalValidationAttempts: FinalValidationAttempt[];
 	mergeReadyEvidence?: MergeReadyEvidence;
+	/**
+	 * Why the run stopped, when the reason belongs to no single attempt. The
+	 * legacy lifecycle always had an owning attempt or review round; an engine
+	 * run can also fail between its workflow and its final validation.
+	 */
+	error?: string;
 	maxConcurrentWorkers: number;
 	createdAt: string;
 	updatedAt: string;

@@ -4,15 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { retryableRunWork } from "../src/domain/run-control.js";
 import {
-	type OrchestrationRun,
 	REVIEW_CATEGORIES,
 	type ReviewSeverity,
 	type TaskPlan,
 } from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
+import { retryableRunWork } from "../src/inspection/run-control.js";
+import { loadRunView } from "../src/inspection/run-inspector.js";
+import {
+	type RunUnitRole,
+	type RunView,
+	reviewRoundViews,
+} from "../src/inspection/run-view.js";
 import { Orchestrator } from "../src/orchestrator.js";
 import { readSecurityPolicy } from "../src/security/policy.js";
 import { ArtifactStore } from "../src/storage/artifact-store.js";
@@ -167,35 +172,55 @@ async function createHarness(
 		dependencies,
 		run: created,
 		runner: new EngineChangeRunner(dependencies),
+		/** The run as every inspection and control surface reads it. */
+		view: () =>
+			loadRunView(
+				{
+					runs: store,
+					workflowStates: dependencies.workflowStates,
+					artifacts: dependencies.artifacts,
+				},
+				created.id,
+			),
 	};
 }
 
-function findingsOf(run: OrchestrationRun) {
-	return run.reviewAttempts.flatMap((attempt) => attempt.findings ?? []);
+function findingsOf(view: RunView) {
+	return view.attempts.flatMap((attempt) => attempt.findings ?? []);
+}
+
+function attemptsOfRole(view: RunView, role: RunUnitRole) {
+	return view.attempts.filter((attempt) => attempt.role === role);
+}
+
+function unitOf(view: RunView, unitId: string) {
+	return view.units.find((unit) => unit.id === unitId);
 }
 
 describe("live /orchestrate change runs on the engine", () => {
 	it("implements, reviews, repairs, verifies, and records merge-ready evidence", async () => {
 		const harness = await createHarness();
-		const updates: OrchestrationRun[] = [];
+		const updates: RunView[] = [];
 
 		const launch = await harness.runner.approveAndLaunch(
 			harness.run,
 			harness.repository,
 			undefined,
-			{ onRunUpdated: (run) => updates.push(run) },
+			{ onRunUpdated: (view) => updates.push(view) },
 		);
 		const completed = await launch.completion;
 
 		expect(completed.state).toBe("completed");
+		expect(completed.source).toBe("engine");
 		expect(completed.approvedPlanRevision).toBe(1);
-		expect(completed.tasks.implementation?.state).toBe("succeeded");
-		expect(completed.tasks.implementation?.integratedCommit).toEqual(
-			expect.any(String),
-		);
-		expect(completed.attempts).toEqual([
+		expect(unitOf(completed, "implementation")).toMatchObject({
+			role: "change",
+			state: "succeeded",
+			integratedCommit: expect.any(String),
+		});
+		expect(attemptsOfRole(completed, "change")).toEqual([
 			expect.objectContaining({
-				taskId: "implementation",
+				unitId: "implementation",
 				state: "succeeded",
 				commit: expect.any(String),
 				evidence: expect.objectContaining({ passed: true }),
@@ -203,14 +228,18 @@ describe("live /orchestrate change runs on the engine", () => {
 		]);
 
 		// The finding the first round raised was repaired, and the round after
-		// the repair reviewed the repaired head with fresh reviewers.
-		expect(completed.repairAttempts).toEqual([
-			expect.objectContaining({
-				round: 1,
-				state: "succeeded",
-				commit: expect.any(String),
-				integratedCommit: expect.any(String),
-			}),
+		// the repair reviewed the repaired head with fresh reviewers. The second
+		// repair round had nothing left to repair and committed nothing.
+		const repairs = attemptsOfRole(completed, "repair");
+		expect(repairs[0]).toMatchObject({
+			unitId: "repair-1",
+			state: "succeeded",
+			commit: expect.any(String),
+			integratedCommit: expect.any(String),
+		});
+		expect(repairs.map((attempt) => [attempt.unitId, attempt.commit])).toEqual([
+			["repair-1", expect.any(String)],
+			["repair-2", undefined],
 		]);
 		expect(
 			findingsOf(completed).find(
@@ -218,14 +247,16 @@ describe("live /orchestrate change runs on the engine", () => {
 			),
 		).toMatchObject({
 			status: "repaired",
-			repairAttemptId: completed.repairAttempts[0]?.id,
+			repairAttemptId: repairs[0]?.id,
 		});
-		expect(completed.reviewRounds.map((round) => round.state)).toEqual([
+		expect(reviewRoundViews(completed).map((round) => round.state)).toEqual([
 			"succeeded",
 			"succeeded",
 			"succeeded",
 		]);
-		expect(completed.reviewAttempts).toHaveLength(REVIEW_CATEGORIES.length * 3);
+		expect(attemptsOfRole(completed, "review")).toHaveLength(
+			REVIEW_CATEGORIES.length * 3,
+		);
 		// Round 3 reviewed a head nothing changed, so it cost no workers.
 		expect(
 			harness.workers.prompts.filter((prompt) =>
@@ -256,9 +287,19 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(repository.head).toBe(harness.repository.head);
 		expect(completed.integrationHead).not.toBe(harness.repository.head);
 
-		// The stored run stayed inspectable throughout, not only at the end.
+		// The run stayed inspectable throughout, not only at the end.
 		expect(updates.length).toBeGreaterThan(0);
-		expect(await harness.store.load(harness.run.id)).toEqual(completed);
+		expect(await harness.view()).toEqual(completed);
+
+		// The stored run keeps only what it owns: no execution record is
+		// duplicated onto it now that the engine holds one.
+		const stored = await harness.store.load(harness.run.id);
+		expect(stored.attempts).toEqual([]);
+		expect(stored.reviewAttempts).toEqual([]);
+		expect(stored.repairAttempts).toEqual([]);
+		expect(stored.reviewRounds).toEqual([]);
+		expect(stored.state).toBe("completed");
+		expect(stored.mergeReadyEvidence).toBeDefined();
 	});
 
 	it("resumes an interrupted run from durable state alone", async () => {
@@ -325,9 +366,9 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(completed.state).toBe("completed");
 		// The interrupted attempt was adopted with the checks that justified it,
 		// rather than repeating work that was already durable.
-		expect(completed.attempts).toEqual([
+		expect(attemptsOfRole(completed, "change")).toEqual([
 			expect.objectContaining({
-				taskId: "implementation",
+				unitId: "implementation",
 				number: 1,
 				state: "succeeded",
 				evidence: expect.objectContaining({ passed: true }),
@@ -419,8 +460,10 @@ describe("live /orchestrate change runs on the engine", () => {
 
 		// The step ran again instead of adopting an unjustified commit.
 		expect(completed.state).toBe("completed");
-		expect(completed.attempts.map((attempt) => attempt.number)).toEqual([1, 2]);
-		expect(completed.attempts.at(-1)).toMatchObject({
+		expect(
+			attemptsOfRole(completed, "change").map((attempt) => attempt.number),
+		).toEqual([1, 2]);
+		expect(attemptsOfRole(completed, "change").at(-1)).toMatchObject({
 			state: "succeeded",
 			evidence: expect.objectContaining({ passed: true }),
 		});
@@ -434,19 +477,23 @@ describe("live /orchestrate change runs on the engine", () => {
 		).completion;
 
 		expect(completed.state).toBe("completed");
-		for (const attempt of [
-			...completed.attempts,
-			...completed.repairAttempts,
-		]) {
+		for (const attempt of attemptsOfRole(completed, "change")) {
 			expect(attempt.workerId).toEqual(expect.any(String));
 		}
 		// Rounds 1 and 2 ran real reviewers; round 3 adopted round 2 over an
 		// unchanged head and so had no worker of its own to follow.
-		for (const attempt of completed.reviewAttempts.filter(
-			(review) => review.round < 3,
+		for (const attempt of attemptsOfRole(completed, "review").filter(
+			(review) => (unitOf(completed, review.unitId)?.review?.round ?? 0) < 3,
 		)) {
 			expect(attempt.workerId).toEqual(expect.any(String));
 		}
+		// A repair with findings to apply ran a worker; a repair round with
+		// nothing to do never started one, so it has no output to follow.
+		expect(
+			attemptsOfRole(completed, "repair").map(
+				(attempt) => attempt.workerId !== undefined,
+			),
+		).toEqual([true, false]);
 	}, 120_000);
 
 	it("cancels a running run and stops its workers", async () => {
@@ -485,7 +532,7 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(settled.state).toBe("cancelled");
 		expect(settled.mergeReadyEvidence).toBeUndefined();
 		// Nothing was reviewed, and every worker this run started was stopped.
-		expect(settled.reviewAttempts).toEqual([]);
+		expect(attemptsOfRole(settled, "review")).toEqual([]);
 		expect(
 			[...harness.workers.workers.values()].every(
 				(worker) => worker.status === "stopped",
@@ -526,9 +573,10 @@ describe("live /orchestrate change runs on the engine", () => {
 
 	it("allows only one concurrent resume to own the run lifecycle", async () => {
 		const harness = await createHarness(undefined, "high", true);
-		const failed = await (
+		await (
 			await harness.runner.approveAndLaunch(harness.run, harness.repository)
 		).completion;
+		const failed = await harness.store.load(harness.run.id);
 		let enteredHas = () => {};
 		const hasStarted = new Promise<void>((resolve) => {
 			enteredHas = resolve;
@@ -652,13 +700,14 @@ describe("live /orchestrate change runs on the engine", () => {
 
 		expect(failed.state).toBe("failed");
 		expect(failed.finalValidationAttempts).toEqual([]);
-		expect(failed.reviewRounds.at(-1)).toMatchObject({
-			state: "failed",
-			error: expect.stringContaining("Review evidence is unavailable"),
-		});
+		// The gap belongs to no attempt, so the run itself carries the reason.
+		expect(failed.error).toEqual(
+			expect.stringContaining("Review evidence is unavailable"),
+		);
+		// Every step succeeded, so nothing identifies safe work to run again.
 		expect(retryableRunWork(failed)).toMatchObject({
 			retryable: false,
-			reasonCode: "review-phase-unsupported",
+			reasonCode: "no-retryable-failure",
 		});
 	}, 120_000);
 
@@ -679,7 +728,7 @@ describe("live /orchestrate change runs on the engine", () => {
 			state: "failed",
 			error: "Final validator crashed",
 		});
-		expect(await harness.store.load(harness.run.id)).toEqual(failed);
+		expect(await harness.view()).toEqual(failed);
 	}, 120_000);
 
 	it("interrupts stale final validation before resuming", async () => {
@@ -718,17 +767,23 @@ describe("live /orchestrate change runs on the engine", () => {
 			await harness.runner.approveAndLaunch(harness.run, harness.repository)
 		).completion;
 		expect(failed.state).toBe("failed");
-		expect(failed.tasks.implementation?.state).toBe("failed");
+		expect(unitOf(failed, "implementation")?.state).toBe("failed");
 		expect(failed.mergeReadyEvidence).toBeUndefined();
 
 		const completed = await (
-			await harness.runner.retry(failed, harness.repository)
+			await harness.runner.retry(
+				await harness.store.load(harness.run.id),
+				harness.repository,
+			)
 		).completion;
 
 		expect(completed.state).toBe("completed");
 		// The first attempt is still on the record; the retry is the next one.
 		expect(
-			completed.attempts.map((attempt) => [attempt.number, attempt.state]),
+			attemptsOfRole(completed, "change").map((attempt) => [
+				attempt.number,
+				attempt.state,
+			]),
 		).toEqual([
 			[1, "failed"],
 			[2, "succeeded"],
@@ -750,7 +805,10 @@ describe("live /orchestrate change runs on the engine", () => {
 		]);
 
 		const completed = await (
-			await harness.runner.retry(failed, harness.repository)
+			await harness.runner.retry(
+				await harness.store.load(harness.run.id),
+				harness.repository,
+			)
 		).completion;
 
 		expect(completed.state).toBe("completed");
@@ -763,10 +821,48 @@ describe("live /orchestrate change runs on the engine", () => {
 			[1, "failed"],
 			[2, "succeeded"],
 		]);
-		expect(completed.attempts).toHaveLength(1);
+		expect(attemptsOfRole(completed, "change")).toHaveLength(1);
 		expect(
 			harness.workers.prompts.filter((prompt) => prompt.includes("reviewer")),
 		).toHaveLength(REVIEW_CATEGORIES.length * 2);
+		// The failure that settled the run is not left behind on the run that
+		// succeeded after it.
+		expect(completed.error).toBeUndefined();
+		expect((await harness.store.load(harness.run.id)).error).toBeUndefined();
+	}, 120_000);
+
+	it("reads a retried run as executing rather than as the run it settled as", async () => {
+		const harness = await createHarness();
+		harness.workers.failNextChange = true;
+		let workerStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			workerStarted = resolve;
+		});
+		let releaseWorker = () => {};
+		const held = new Promise<void>((resolve) => {
+			releaseWorker = resolve;
+		});
+
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		expect(failed.state).toBe("failed");
+
+		harness.workers.onChangeWorker = async () => {
+			workerStarted();
+			await held;
+		};
+		const retry = await harness.runner.retry(
+			await harness.store.load(harness.run.id),
+			harness.repository,
+		);
+		await started;
+
+		expect((await harness.view()).state).toBe("running");
+		expect(retry.run.state).toBe("running");
+
+		releaseWorker();
+		expect((await retry.completion).state).toBe("completed");
 	}, 120_000);
 
 	it("re-keys deferred findings adopted by later review rounds", async () => {
@@ -788,7 +884,18 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(deferred.every((finding) => finding.status === "deferred")).toBe(
 			true,
 		);
-		expect(completed.repairAttempts).toEqual([]);
+		// Both repair rounds ran and both committed nothing, because no finding
+		// the review policy defers is ever repaired automatically.
+		expect(
+			attemptsOfRole(completed, "repair").map((attempt) => [
+				attempt.unitId,
+				attempt.state,
+				attempt.commit,
+			]),
+		).toEqual([
+			["repair-1", "succeeded", undefined],
+			["repair-2", "succeeded", undefined],
+		]);
 	}, 120_000);
 
 	it("leaves a run that executed under the legacy orchestrator alone", async () => {
@@ -827,14 +934,14 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(settled.mergeReadyEvidence).toBeUndefined();
 		// The repair refused the work rather than giving a worker authority it
 		// could not legally use, and the run records why.
-		expect(settled.repairAttempts).toEqual([
+		expect(attemptsOfRole(settled, "repair")).toEqual([
 			expect.objectContaining({
-				round: 1,
+				unitId: "repair-1",
 				state: "failed",
 				error: expect.stringContaining("outside approved paths"),
 			}),
 		]);
-		expect(settled.repairAttempts[0]?.commit).toBeUndefined();
+		expect(attemptsOfRole(settled, "repair")[0]?.commit).toBeUndefined();
 		expect(
 			harness.workers.prompts.some((prompt) =>
 				prompt.includes("You are the repair worker"),
