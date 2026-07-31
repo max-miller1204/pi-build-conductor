@@ -1,9 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-	ReviewCategory,
-	ReviewSeverity,
-} from "../../src/domain/types.js";
+import type { ReviewCategory, ReviewSeverity } from "../../src/domain/types.js";
 import { reviewStepId } from "../../src/engine/steps/review.js";
 import {
 	REVIEW_REPORT_END,

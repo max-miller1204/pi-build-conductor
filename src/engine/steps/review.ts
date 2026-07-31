@@ -11,10 +11,10 @@ import { CATEGORY_GUIDANCE } from "../../review/prompts.js";
 import {
 	materializeReviewFindings,
 	parseReviewReport,
-	reviewFindingId,
 	REVIEW_REPORT_END,
 	REVIEW_REPORT_START,
 	REVIEW_REPORT_VERSION,
+	reviewFindingId,
 } from "../../review/review-report.js";
 import {
 	CapabilityViolationError,

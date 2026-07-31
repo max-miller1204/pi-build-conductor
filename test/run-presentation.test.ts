@@ -245,6 +245,26 @@ describe("run inspection presentation", () => {
 		expect(output).not.toContain("\u001b");
 	});
 
+	it("does not present a settled projected review round as in progress", () => {
+		const run = populatedRun();
+		const output = renderRunOverview({
+			...run,
+			state: "completed",
+			reviewRounds: [
+				{
+					...required(run.reviewRounds[0], "review round"),
+					state: "succeeded",
+				},
+			],
+		}).join("\n");
+		expect(output).toContain(
+			"Latest review round: succeeded; base task-integrated; 2026-01-01T00:10:00.000Z -> finished (time unavailable)",
+		);
+		expect(output).not.toContain(
+			"succeeded; base task-integrated; 2026-01-01T00:10:00.000Z -> in progress",
+		);
+	});
+
 	it("renders the full task authority and retry recommendation", () => {
 		const output = renderTaskDetails(populatedRun(), "core").join("\n");
 		expect(output).toContain("Description: Implement the core without");

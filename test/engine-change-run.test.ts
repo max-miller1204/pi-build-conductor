@@ -422,10 +422,9 @@ describe("live /orchestrate change runs on the engine", () => {
 		const heldHas = new Promise<void>((resolve) => {
 			releaseHas = resolve;
 		});
-		const originalHas =
-			harness.dependencies.workflowStates.has.bind(
-				harness.dependencies.workflowStates,
-			);
+		const originalHas = harness.dependencies.workflowStates.has.bind(
+			harness.dependencies.workflowStates,
+		);
 		let hasCalls = 0;
 		harness.dependencies.workflowStates.has = async (runId) => {
 			hasCalls += 1;
@@ -547,17 +546,15 @@ describe("live /orchestrate change runs on the engine", () => {
 		const stale = await harness.store.transaction(failed.id, (stored) => ({
 			...stored,
 			state: "validating",
-			finalValidationAttempts: stored.finalValidationAttempts.map(
-				(attempt) => {
-					const {
-						error: _error,
-						evidence: _evidence,
-						finishedAt: _finishedAt,
-						...retained
-					} = attempt;
-					return { ...retained, state: "running" as const };
-				},
-			),
+			finalValidationAttempts: stored.finalValidationAttempts.map((attempt) => {
+				const {
+					error: _error,
+					evidence: _evidence,
+					finishedAt: _finishedAt,
+					...retained
+				} = attempt;
+				return { ...retained, state: "running" as const };
+			}),
 		}));
 
 		const resumed = await harness.runner.resume(stale, harness.repository);
@@ -644,7 +641,9 @@ describe("live /orchestrate change runs on the engine", () => {
 			"review-2-security-001",
 			"review-3-security-001",
 		]);
-		expect(deferred.every((finding) => finding.status === "deferred")).toBe(true);
+		expect(deferred.every((finding) => finding.status === "deferred")).toBe(
+			true,
+		);
 		expect(completed.repairAttempts).toEqual([]);
 	}, 120_000);
 

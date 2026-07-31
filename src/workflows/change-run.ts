@@ -11,7 +11,10 @@ import type {
 import { WorkflowEngine } from "../engine/engine.js";
 import { appendWorkflowEvents } from "../engine/events.js";
 import { StepExecutor } from "../engine/executor.js";
-import { finalizeWorkflowRun } from "../engine/finalization.js";
+import {
+	finalizeWorkflowRun,
+	type WorkflowFinalizationResult,
+} from "../engine/finalization.js";
 import { StepHandlerRegistry } from "../engine/handlers.js";
 import { GitStepIntegrator } from "../engine/integration.js";
 import { recoverWorkflowRun } from "../engine/recovery.js";
@@ -224,13 +227,7 @@ export class EngineChangeRunner {
 				options.onRunUpdated?.(approved);
 				throw error;
 			}
-			return this.launch(
-				approved,
-				repository,
-				model,
-				options,
-				execution,
-			);
+			return this.launch(approved, repository, model, options, execution);
 		} catch (error) {
 			releaseExecution(
 				this.dependencies.workflowStates.directory,
@@ -301,13 +298,7 @@ export class EngineChangeRunner {
 				});
 				return { run: projected, completion };
 			}
-			return this.launch(
-				projected,
-				repository,
-				model,
-				options,
-				execution,
-			);
+			return this.launch(projected, repository, model, options, execution);
 		} catch (error) {
 			releaseExecution(
 				this.dependencies.workflowStates.directory,
@@ -617,15 +608,14 @@ export class EngineChangeRunner {
 			number: attemptNumber,
 			state: "running",
 			integrationCommit: state.integrationHead,
-			worktreePath:
-				this.dependencies.worktrees.finalValidationWorktreePath(
-					run.id,
-					attemptNumber,
-				),
+			worktreePath: this.dependencies.worktrees.finalValidationWorktreePath(
+				run.id,
+				attemptNumber,
+			),
 			startedAt,
 		};
 		let attemptStarted = false;
-		let result;
+		let result: WorkflowFinalizationResult;
 		try {
 			result = await finalizeWorkflowRun(
 				{
@@ -684,11 +674,7 @@ export class EngineChangeRunner {
 			);
 		}
 		if (result.evidenceGap) {
-			return this.settleReviewFailure(
-				run.id,
-				result.evidenceGap,
-				options,
-			);
+			return this.settleReviewFailure(run.id, result.evidenceGap, options);
 		}
 		const cancelled = signal.aborted;
 		const finishedAt = this.now();
@@ -704,25 +690,24 @@ export class EngineChangeRunner {
 				return {
 					...stored,
 					state: cancelled ? "cancelled" : mergeReady ? "completed" : "failed",
-					finalValidationAttempts: stored.finalValidationAttempts.map(
-						(item) =>
-							item.id === attempt.id && item.state === "running"
-								? {
-										...item,
-										state: cancelled
-											? ("cancelled" as const)
-											: mergeReady
-												? ("succeeded" as const)
-												: ("failed" as const),
-										finishedAt,
-										...(cancelled
-											? { error: signalError(signal) }
-											: result.evidenceGap
-												? { error: result.evidenceGap }
-												: {}),
-										...(result.evidence ? { evidence: result.evidence } : {}),
-									}
-								: item,
+					finalValidationAttempts: stored.finalValidationAttempts.map((item) =>
+						item.id === attempt.id && item.state === "running"
+							? {
+									...item,
+									state: cancelled
+										? ("cancelled" as const)
+										: mergeReady
+											? ("succeeded" as const)
+											: ("failed" as const),
+									finishedAt,
+									...(cancelled
+										? { error: signalError(signal) }
+										: result.evidenceGap
+											? { error: result.evidenceGap }
+											: {}),
+									...(result.evidence ? { evidence: result.evidence } : {}),
+								}
+							: item,
 					),
 					...(!cancelled && mergeReady
 						? { mergeReadyEvidence: mergeReady }

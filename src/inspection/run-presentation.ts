@@ -252,7 +252,12 @@ function latestReviewRoundLines(run: OrchestrationRun): string[] {
 	if (!round) {
 		return [];
 	}
-	let line = `Latest review round: ${round.state}; base ${display(round.baseCommit)}; ${display(round.startedAt)} -> ${display(round.finishedAt, "in progress")}`;
+	const finished = round.finishedAt
+		? display(round.finishedAt)
+		: round.state === "running" || round.state === "repairing"
+			? "in progress"
+			: "finished (time unavailable)";
+	let line = `Latest review round: ${round.state}; base ${display(round.baseCommit)}; ${display(round.startedAt)} -> ${finished}`;
 	if (round.repairAttemptId) {
 		line += `; repair ${display(round.repairAttemptId)}`;
 	}
