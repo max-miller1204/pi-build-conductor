@@ -381,8 +381,36 @@ describe("workflow recovery", () => {
 			harness.initial.id,
 		);
 
-		// Retry budget remains, but no retry can produce evidence a store that
-		// is not configured could ever confirm.
+		expect(recovery.recovered).toEqual([
+			{
+				attemptId: interrupted,
+				stepId: "api",
+				outcome: "retry_scheduled",
+				reason: expect.stringContaining(
+					"no artifact store is configured to verify the declared output of api",
+				),
+			},
+		]);
+		expect(recovery.state.steps.api?.state).toBe("ready");
+	});
+
+	it("fails unverified declared outputs when no retry budget remains", async () => {
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"], { outputs: ["report"] }),
+		]);
+		const harness = await createWorkflowHarness(plan, [
+			handlerOf("change", async (context) => {
+				await writeAndCommit(context);
+				return { status: "failed", error: "process crashed" };
+			}),
+		]);
+		const interrupted = await interruptAfterFirstCommit(harness);
+
+		const recovery = await recoverWorkflowRun(
+			{ store: harness.store, git: new GitCli() },
+			harness.initial.id,
+		);
+
 		expect(recovery.recovered).toEqual([
 			{
 				attemptId: interrupted,
@@ -393,6 +421,7 @@ describe("workflow recovery", () => {
 				),
 			},
 		]);
+		expect(recovery.state.state).toBe("failed");
 		expect(recovery.state.steps.api?.state).toBe("failed");
 	});
 

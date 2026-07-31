@@ -95,6 +95,12 @@ function assertOptionalString(value: unknown, path: string): void {
 	}
 }
 
+function assertOptionalText(value: unknown, path: string): void {
+	if (value !== undefined && typeof value !== "string") {
+		throw new Error(`${path} must be a string when present`);
+	}
+}
+
 function assertPositiveInteger(value: unknown, path: string): void {
 	if (!Number.isSafeInteger(value) || (value as number) < 1) {
 		throw new Error(`${path} must be a positive safe integer`);
@@ -275,12 +281,12 @@ function validateStoredSteps(
 		if (new Set(attemptIds).size !== attemptIds.length) {
 			throw new Error(`${path}.attemptIds must be unique`);
 		}
-		for (const field of [
-			"integratedCommit",
-			"integrationError",
-			"error",
-		] as const) {
-			assertOptionalString(record[field], `${path}.${field}`);
+		assertOptionalString(
+			record.integratedCommit,
+			`${path}.integratedCommit`,
+		);
+		for (const field of ["integrationError", "error"] as const) {
+			assertOptionalText(record[field], `${path}.${field}`);
 		}
 		if (
 			record.integratedCommit !== undefined &&
@@ -324,15 +330,11 @@ function validateStoredAttempts(
 		for (const field of ["id", "stepId", "baseCommit", "startedAt"] as const) {
 			assertString(attempt[field], `${path}.${field}`);
 		}
-		for (const field of [
-			"branch",
-			"finishedAt",
-			"summary",
-			"error",
-			"commit",
-			"workspaceReleaseError",
-		] as const) {
+		for (const field of ["branch", "finishedAt", "commit"] as const) {
 			assertOptionalString(attempt[field], `${path}.${field}`);
+		}
+		for (const field of ["summary", "error", "workspaceReleaseError"] as const) {
+			assertOptionalText(attempt[field], `${path}.${field}`);
 		}
 		if (!definitions.has(attempt.stepId as string)) {
 			throw new Error(`${path}.stepId references an unknown step`);
@@ -534,7 +536,7 @@ export function validateStoredWorkflowRun(value: unknown): StoredWorkflowRun {
 	] as const) {
 		assertString(run[field], `run.${field}`);
 	}
-	assertOptionalString(run.error, "run.error");
+	assertOptionalText(run.error, "run.error");
 	const plan = validateWorkflowPlan(run.plan);
 	const profiles: unknown = run.capabilityProfiles;
 	assertCapabilityProfiles(profiles, "run.capabilityProfiles");

@@ -229,6 +229,21 @@ describe("durable workflow state", () => {
 
 		expect(validateStoredWorkflowRun(stored)).toEqual(stored);
 		expect(validateStoredWorkflowRun(withAttempt)).toEqual(withAttempt);
+		expect(
+			validateStoredWorkflowRun({
+				...withAttempt,
+				run: {
+					...withAttempt.run,
+					attempts: [{ ...attempt, error: "" }],
+				},
+			}),
+		).toEqual({
+			...withAttempt,
+			run: {
+				...withAttempt.run,
+				attempts: [{ ...attempt, error: "" }],
+			},
+		});
 		// A step may only ever have run in the workspace its frozen profile
 		// approves, so a downgraded requirement is rejected rather than trusted.
 		expect(() =>

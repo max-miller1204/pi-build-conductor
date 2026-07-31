@@ -26,7 +26,7 @@ export interface RecoveryArtifactReader {
 export interface WorkflowRecoveryDependencies {
 	store: WorkflowStateStore;
 	git: Pick<GitClient, "branchHead" | "verifyTaskCommit">;
-	/** Required to recover any step that declares outputs. */
+	/** Used to verify declared outputs before adopting an interrupted attempt. */
 	artifacts?: RecoveryArtifactReader;
 	now?: () => string;
 	onStateChanged?: (state: WorkflowRunState) => void;
@@ -54,7 +54,7 @@ interface InterruptedAttemptDecision {
 	artifactIds?: string[];
 	/** Why the attempt cannot be adopted, though it may still run again. */
 	retryReason?: string;
-	/** Why the attempt can neither be adopted nor safely run again. */
+	/** Why the attempt's step branch could not be safely reconciled. */
 	blockedReason?: string;
 }
 
@@ -158,7 +158,7 @@ async function inspectInterruptedAttempt(
 	const declared = declaredArtifactIds(step, attempt);
 	if (declared.length > 0 && !dependencies.artifacts) {
 		return {
-			blockedReason: `no artifact store is configured to verify the declared output${
+			retryReason: `no artifact store is configured to verify the declared output${
 				declared.length === 1 ? "" : "s"
 			} of ${step.id}`,
 		};
