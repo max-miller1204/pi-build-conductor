@@ -18,6 +18,7 @@ import { ArtifactStore } from "../src/storage/artifact-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { FileWorkflowStateStore } from "../src/storage/workflow-state-store.js";
 import {
+	FinalValidationError,
 	type FinalValidator,
 	LocalFinalValidator,
 } from "../src/validation/final-validator.js";
@@ -395,6 +396,96 @@ describe("live /orchestrate change runs on the engine", () => {
 
 		releaseWorker();
 		expect((await launch.completion).state).toBe("completed");
+	}, 120_000);
+
+	it("allows only one concurrent resume to own the run lifecycle", async () => {
+		const harness = await createHarness(undefined, "high", true);
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		let enteredHas = () => {};
+		const hasStarted = new Promise<void>((resolve) => {
+			enteredHas = resolve;
+		});
+		let releaseHas = () => {};
+		const heldHas = new Promise<void>((resolve) => {
+			releaseHas = resolve;
+		});
+		const originalHas =
+			harness.dependencies.workflowStates.has.bind(
+				harness.dependencies.workflowStates,
+			);
+		let hasCalls = 0;
+		harness.dependencies.workflowStates.has = async (runId) => {
+			hasCalls += 1;
+			if (hasCalls === 1) {
+				enteredHas();
+				await heldHas;
+			}
+			return originalHas(runId);
+		};
+
+		const first = harness.runner.resume(failed, harness.repository);
+		await hasStarted;
+		await expect(
+			harness.runner.resume(failed, harness.repository),
+		).rejects.toThrow(/active lifecycle work/);
+		releaseHas();
+
+		const resumed = await first;
+		expect((await resumed.completion).state).toBe("completed");
+	}, 120_000);
+
+	it("keeps a run cancelled when final validation is aborted", async () => {
+		const harness = await createHarness();
+		let validationStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			validationStarted = resolve;
+		});
+		harness.dependencies.finalValidator = {
+			validate(input) {
+				validationStarted();
+				return new Promise<never>((_resolve, reject) => {
+					const abort = () => {
+						const now = new Date().toISOString();
+						reject(
+							new FinalValidationError("Final validation aborted", {
+								startedAt: now,
+								finishedAt: now,
+								passed: false,
+								checks: [],
+							}),
+						);
+					};
+					if (input.signal?.aborted) {
+						abort();
+					} else {
+						input.signal?.addEventListener("abort", abort, { once: true });
+					}
+				});
+			},
+		};
+
+		const launch = await harness.runner.approveAndLaunch(
+			harness.run,
+			harness.repository,
+		);
+		await started;
+		const validating = await harness.store.load(harness.run.id);
+		expect(validating.state).toBe("validating");
+		expect(validating.finalValidationAttempts.at(-1)?.state).toBe("running");
+
+		const cancelled = await harness.runner.cancel(
+			validating,
+			harness.repository,
+		);
+		expect(cancelled.state).toBe("cancelled");
+		expect(cancelled.finalValidationAttempts.at(-1)?.state).toBe("cancelled");
+
+		const settled = await launch.completion;
+		expect(settled.state).toBe("cancelled");
+		expect(settled.mergeReadyEvidence).toBeUndefined();
+		expect((await harness.store.load(harness.run.id)).state).toBe("cancelled");
 	}, 120_000);
 
 	it("retries the failed work of a settled run without losing its history", async () => {

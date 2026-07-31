@@ -77,15 +77,62 @@ export interface EngineLaunchResult {
 	completion: Promise<OrchestrationRun>;
 }
 
-/**
- * The engines executing runs in this process, keyed by state directory and run
- * id. A cancel arrives through its own command and its own runner, so the
- * execution it has to stop can only be found through shared state.
- */
-const executingEngines = new Map<string, WorkflowEngine>();
+interface ActiveEngineExecution {
+	controller: AbortController;
+	detachSignal: () => void;
+	engine?: WorkflowEngine;
+}
+
+const executingEngines = new Map<string, ActiveEngineExecution>();
 
 function executionKey(directory: string, runId: string): string {
 	return `${directory}\u0000${runId}`;
+}
+
+function claimExecution(
+	directory: string,
+	runId: string,
+	action: string,
+	signal: AbortSignal | undefined,
+): ActiveEngineExecution {
+	const key = executionKey(directory, runId);
+	if (executingEngines.has(key)) {
+		throw new Error(
+			`Cannot ${action} run ${runId} while it has active lifecycle work`,
+		);
+	}
+	const controller = new AbortController();
+	const forwardAbort = () => {
+		controller.abort(signal?.reason);
+	};
+	signal?.addEventListener("abort", forwardAbort, { once: true });
+	if (signal?.aborted) {
+		forwardAbort();
+	}
+	const execution: ActiveEngineExecution = {
+		controller,
+		detachSignal: () => signal?.removeEventListener("abort", forwardAbort),
+	};
+	executingEngines.set(key, execution);
+	return execution;
+}
+
+function releaseExecution(
+	directory: string,
+	runId: string,
+	execution: ActiveEngineExecution,
+): void {
+	const key = executionKey(directory, runId);
+	if (executingEngines.get(key) === execution) {
+		executingEngines.delete(key);
+		execution.detachSignal();
+	}
+}
+
+function signalError(signal: AbortSignal): string {
+	return signal.reason instanceof Error
+		? signal.reason.message
+		: "The run was cancelled";
 }
 
 /** The historical worker role a step's profile reports progress under. */
@@ -138,37 +185,60 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		if (
-			!repository.isClean ||
-			repository.root !== run.repositoryRoot ||
-			repository.currentBranch !== run.baseBranch ||
-			repository.head !== run.baseCommit
-		) {
-			throw new Error(
-				"Repository must be clean and match the recorded plan base before approval",
-			);
-		}
-		await this.preflightWorkerPolicies(run);
-		let approved = await this.dependencies.store.transaction(run.id, (stored) =>
-			approveRun(stored, this.now(), run.planRevision),
+		const execution = claimExecution(
+			this.dependencies.workflowStates.directory,
+			run.id,
+			"start",
+			options.signal,
 		);
 		try {
-			const branch = await this.dependencies.worktrees.prepareIntegrationBranch(
-				repository,
-				run.id,
-			);
-			if (branch !== approved.integrationBranch) {
-				throw new Error(`Unexpected integration branch: ${branch}`);
+			if (
+				!repository.isClean ||
+				repository.root !== run.repositoryRoot ||
+				repository.currentBranch !== run.baseBranch ||
+				repository.head !== run.baseCommit
+			) {
+				throw new Error(
+					"Repository must be clean and match the recorded plan base before approval",
+				);
 			}
-			await this.dependencies.workflowStates.create(
-				this.initialState(approved, this.now()),
+			await this.preflightWorkerPolicies(run);
+			let approved = await this.dependencies.store.transaction(
+				run.id,
+				(stored) => approveRun(stored, this.now(), run.planRevision),
+			);
+			try {
+				const branch =
+					await this.dependencies.worktrees.prepareIntegrationBranch(
+						repository,
+						run.id,
+					);
+				if (branch !== approved.integrationBranch) {
+					throw new Error(`Unexpected integration branch: ${branch}`);
+				}
+				await this.dependencies.workflowStates.create(
+					this.initialState(approved, this.now()),
+				);
+			} catch (error) {
+				approved = await this.fail(approved.id);
+				options.onRunUpdated?.(approved);
+				throw error;
+			}
+			return this.launch(
+				approved,
+				repository,
+				model,
+				options,
+				execution,
 			);
 		} catch (error) {
-			approved = await this.fail(approved.id);
-			options.onRunUpdated?.(approved);
+			releaseExecution(
+				this.dependencies.workflowStates.directory,
+				run.id,
+				execution,
+			);
 			throw error;
 		}
-		return this.launch(approved, repository, model, options);
 	}
 
 	/**
@@ -181,47 +251,70 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		if (
-			executingEngines.has(
-				executionKey(this.dependencies.workflowStates.directory, run.id),
-			)
-		) {
-			throw new Error(
-				`Cannot resume run ${run.id} while it has active lifecycle work`,
-			);
-		}
-		if (!(await this.hasWorkflowState(run.id))) {
-			// The run was approved but its snapshot never reached disk. Nothing
-			// has executed, so the workflow simply starts from the approved plan.
-			if (hasLegacyExecutionState(run)) {
-				throw new Error(
-					`Run ${run.id} executed under the legacy orchestrator and has no engine snapshot to resume`,
+		const execution = claimExecution(
+			this.dependencies.workflowStates.directory,
+			run.id,
+			"resume",
+			options.signal,
+		);
+		try {
+			if (!(await this.hasWorkflowState(run.id))) {
+				// The run was approved but its snapshot never reached disk. Nothing
+				// has executed, so the workflow simply starts from the approved plan.
+				if (hasLegacyExecutionState(run)) {
+					throw new Error(
+						`Run ${run.id} executed under the legacy orchestrator and has no engine snapshot to resume`,
+					);
+				}
+				await this.dependencies.worktrees.prepareIntegrationBranch(
+					repository,
+					run.id,
+				);
+				await this.dependencies.workflowStates.create(
+					this.initialState(run, this.now()),
 				);
 			}
-			await this.dependencies.worktrees.prepareIntegrationBranch(
-				repository,
+			const { state } = await recoverWorkflowRun(
+				{
+					store: this.dependencies.workflowStates,
+					git: this.dependencies.git,
+					artifacts: this.dependencies.artifacts,
+					now: this.now,
+				},
 				run.id,
 			);
-			await this.dependencies.workflowStates.create(
-				this.initialState(run, this.now()),
+			const projected = await this.project(run.id, state);
+			if (state.state !== "running") {
+				const completion = this.settle(
+					projected,
+					state,
+					repository,
+					options,
+					execution.controller.signal,
+				).finally(() => {
+					releaseExecution(
+						this.dependencies.workflowStates.directory,
+						run.id,
+						execution,
+					);
+				});
+				return { run: projected, completion };
+			}
+			return this.launch(
+				projected,
+				repository,
+				model,
+				options,
+				execution,
 			);
+		} catch (error) {
+			releaseExecution(
+				this.dependencies.workflowStates.directory,
+				run.id,
+				execution,
+			);
+			throw error;
 		}
-		const { state } = await recoverWorkflowRun(
-			{
-				store: this.dependencies.workflowStates,
-				git: this.dependencies.git,
-				artifacts: this.dependencies.artifacts,
-				now: this.now,
-			},
-			run.id,
-		);
-		const projected = await this.project(run.id, state);
-		if (state.state !== "running") {
-			// Nothing is left to execute; settle the stored run from the snapshot.
-			const settled = await this.settle(projected, state, repository, options);
-			return { run: settled, completion: Promise.resolve(settled) };
-		}
-		return this.launch(projected, repository, model, options);
 	}
 
 	/**
@@ -237,75 +330,101 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		const reset: string[] = [];
-		let retryFinalization = false;
-		const state = await this.dependencies.workflowStates.transaction(
+		const execution = claimExecution(
+			this.dependencies.workflowStates.directory,
 			run.id,
-			(current) => {
-				if (current.state === "cancelled") {
-					throw new Error(`Cancelled run ${run.id} cannot be retried`);
-				}
-				let next = current;
-				for (const [stepId, record] of Object.entries(current.steps)) {
-					if (record.state !== "failed" && record.state !== "blocked") {
-						continue;
+			"retry",
+			options.signal,
+		);
+		try {
+			const reset: string[] = [];
+			let retryFinalization = false;
+			const state = await this.dependencies.workflowStates.transaction(
+				run.id,
+				(current) => {
+					if (current.state === "cancelled") {
+						throw new Error(`Cancelled run ${run.id} cannot be retried`);
 					}
-					reset.push(stepId);
-					const {
-						error: _error,
-						integrationError: _integrationError,
-						...retained
-					} = record;
-					next = {
-						...next,
-						steps: {
-							...next.steps,
-							[stepId]: { ...retained, state: "planned" },
-						},
-					};
+					let next = current;
+					for (const [stepId, record] of Object.entries(current.steps)) {
+						if (record.state !== "failed" && record.state !== "blocked") {
+							continue;
+						}
+						reset.push(stepId);
+						const {
+							error: _error,
+							integrationError: _integrationError,
+							...retained
+						} = record;
+						next = {
+							...next,
+							steps: {
+								...next.steps,
+								[stepId]: { ...retained, state: "planned" },
+							},
+						};
+					}
+					if (reset.length === 0) {
+						retryFinalization =
+							current.state === "completed" &&
+							run.state === "failed" &&
+							run.finalValidationAttempts.at(-1)?.state === "failed";
+						return current;
+					}
+					const { error: _settled, ...rest } = next;
+					return appendWorkflowEvents(
+						reconcileWorkflowSteps({
+							...rest,
+							state: "running",
+							updatedAt: this.now(),
+						}),
+						reset.map((stepId) => ({
+							kind: "step_retry_scheduled" as const,
+							stepId,
+							attemptId: current.steps[stepId]?.attemptIds.at(-1) ?? "",
+							nextAttemptNumber:
+								(current.steps[stepId]?.attemptIds.length ?? 0) + 1,
+							reason: "the user retried the failed work of this run",
+						})),
+						this.now(),
+					);
+				},
+			);
+			if (reset.length === 0) {
+				if (retryFinalization) {
+					const projected = await this.project(run.id, state);
+					const completion = this.settle(
+						projected,
+						state,
+						repository,
+						options,
+						execution.controller.signal,
+					).finally(() => {
+						releaseExecution(
+							this.dependencies.workflowStates.directory,
+							run.id,
+							execution,
+						);
+					});
+					return { run: projected, completion };
 				}
-				if (reset.length === 0) {
-					retryFinalization =
-						current.state === "completed" &&
-						run.state === "failed" &&
-						run.finalValidationAttempts.at(-1)?.state === "failed";
-					return current;
-				}
-				const { error: _settled, ...rest } = next;
-				return appendWorkflowEvents(
-					reconcileWorkflowSteps({
-						...rest,
-						state: "running",
-						updatedAt: this.now(),
-					}),
-					reset.map((stepId) => ({
-						kind: "step_retry_scheduled" as const,
-						stepId,
-						attemptId: current.steps[stepId]?.attemptIds.at(-1) ?? "",
-						nextAttemptNumber:
-							(current.steps[stepId]?.attemptIds.length ?? 0) + 1,
-						reason: "the user retried the failed work of this run",
-					})),
-					this.now(),
-				);
-			},
-		);
-		if (reset.length === 0) {
-			if (retryFinalization) {
-				const projected = await this.project(run.id, state);
-				return {
-					run: projected,
-					completion: this.settle(projected, state, repository, options),
-				};
+				throw new Error(`Run ${run.id} has no failed steps to retry`);
 			}
-			throw new Error(`Run ${run.id} has no failed steps to retry`);
+			return this.launch(
+				await this.project(run.id, state),
+				repository,
+				model,
+				options,
+				execution,
+			);
+		} catch (error) {
+			releaseExecution(
+				this.dependencies.workflowStates.directory,
+				run.id,
+				execution,
+			);
+			throw error;
 		}
-		return this.launch(
-			await this.project(run.id, state),
-			repository,
-			model,
-			options,
-		);
 	}
 
 	/**
@@ -323,21 +442,20 @@ export class EngineChangeRunner {
 		const executing = executingEngines.get(
 			executionKey(this.dependencies.workflowStates.directory, run.id),
 		);
-		const engine = executing ?? this.engineFor(run, repository, undefined, {});
+		executing?.controller.abort(new Error("The run was cancelled"));
+		const engine =
+			executing?.engine ?? this.engineFor(run, repository, undefined, {});
 		const state = await engine.cancel(run.id);
 		await this.drainProjections();
+		const current = await this.dependencies.store.load(run.id);
+		if (current.state === "validating") {
+			return this.cancelStoredRun(run.id);
+		}
 		const projected = await this.project(run.id, state);
 		if (projected.state === "cancelled") {
 			return projected;
 		}
-		// A run this process is executing stops when its steps notice the
-		// cancellation, which is not something the user has to wait for: the
-		// decision is already final, so the stored run states it now.
-		return this.dependencies.store.transaction(run.id, (stored) =>
-			["completed", "failed", "cancelled"].includes(stored.state)
-				? stored
-				: { ...stored, state: "cancelled", updatedAt: this.now() },
-		);
+		return this.cancelStoredRun(run.id);
 	}
 
 	/** The engine run an approved orchestration run starts as. */
@@ -435,22 +553,29 @@ export class EngineChangeRunner {
 		repository: RepositoryInfo,
 		model: WorkerModelSelection | undefined,
 		options: EngineLaunchOptions,
+		execution: ActiveEngineExecution,
 	): EngineLaunchResult {
 		const engine = this.engineFor(run, repository, model, options);
-		const key = executionKey(
-			this.dependencies.workflowStates.directory,
-			run.id,
-		);
-		executingEngines.set(key, engine);
+		execution.engine = engine;
 		const completion = engine
-			.run(run.id, { ...(options.signal ? { signal: options.signal } : {}) })
+			.run(run.id, { signal: execution.controller.signal })
 			.then(async (state) => {
 				await this.drainProjections();
 				const projected = await this.project(run.id, state);
-				return this.settle(projected, state, repository, options);
+				return this.settle(
+					projected,
+					state,
+					repository,
+					options,
+					execution.controller.signal,
+				);
 			})
 			.finally(() => {
-				executingEngines.delete(key);
+				releaseExecution(
+					this.dependencies.workflowStates.directory,
+					run.id,
+					execution,
+				);
 			});
 		return { run, completion };
 	}
@@ -465,23 +590,59 @@ export class EngineChangeRunner {
 		state: WorkflowRunState,
 		repository: RepositoryInfo,
 		options: EngineLaunchOptions,
+		signal: AbortSignal,
 	): Promise<OrchestrationRun> {
 		if (state.state !== "completed") {
 			// The failure itself is already recorded step by step; the stored run
 			// only has to stop claiming the lifecycle is still open.
 			const settled = await this.dependencies.store.transaction(
 				run.id,
-				(stored) => ({
-					...stored,
-					state: state.state === "cancelled" ? "cancelled" : "failed",
-					updatedAt: this.now(),
-				}),
+				(stored) =>
+					stored.state === "cancelled"
+						? stored
+						: {
+								...stored,
+								state: state.state === "cancelled" ? "cancelled" : "failed",
+								updatedAt: this.now(),
+							},
 			);
 			options.onRunUpdated?.(settled);
 			return settled;
 		}
 		const attemptNumber = run.finalValidationAttempts.length + 1;
 		const startedAt = this.now();
+		const attempt: FinalValidationAttempt = {
+			id: `final-${attemptNumber}-${randomUUID().slice(0, 8)}`,
+			number: attemptNumber,
+			state: "running",
+			integrationCommit: state.integrationHead,
+			worktreePath:
+				this.dependencies.worktrees.finalValidationWorktreePath(
+					run.id,
+					attemptNumber,
+				),
+			startedAt,
+		};
+		const validating = await this.dependencies.store.transaction(
+			run.id,
+			(stored) =>
+				stored.state === "cancelled"
+					? stored
+					: {
+							...stored,
+							state: "validating",
+							finalValidationAttempts: [
+								...stored.finalValidationAttempts,
+								attempt,
+							],
+							updatedAt: this.now(),
+						},
+		);
+		if (validating.state === "cancelled") {
+			options.onRunUpdated?.(validating);
+			return validating;
+		}
+		options.onRunUpdated?.(validating);
 		const result = await finalizeWorkflowRun(
 			{
 				finalValidator: this.dependencies.finalValidator,
@@ -495,40 +656,76 @@ export class EngineChangeRunner {
 				state,
 				repository,
 				attemptNumber,
-				...(options.signal ? { signal: options.signal } : {}),
+				signal,
 			},
 		);
-		const attempt: FinalValidationAttempt = {
-			id: `final-${attemptNumber}-${randomUUID().slice(0, 8)}`,
-			number: attemptNumber,
-			state: result.mergeReady ? "succeeded" : "failed",
-			integrationCommit: state.integrationHead,
-			worktreePath: result.worktreePath ?? "",
-			startedAt,
-			finishedAt: this.now(),
-			...(result.evidenceGap ? { error: result.evidenceGap } : {}),
-			...(result.evidence ? { evidence: result.evidence } : {}),
-		};
+		const cancelled = signal.aborted;
+		const finishedAt = this.now();
 		const settled = await this.dependencies.store.transaction(
 			run.id,
 			(stored) => {
+				if (stored.state === "cancelled") {
+					return stored;
+				}
 				const mergeReady: MergeReadyEvidence | undefined = result.mergeReady
 					? alignMergeReadyEvidence(result.mergeReady, stored)
 					: undefined;
 				return {
 					...stored,
-					state: mergeReady ? "completed" : "failed",
-					finalValidationAttempts: [
-						...stored.finalValidationAttempts,
-						...(attempt.worktreePath ? [attempt] : []),
-					],
-					...(mergeReady ? { mergeReadyEvidence: mergeReady } : {}),
-					updatedAt: this.now(),
+					state: cancelled ? "cancelled" : mergeReady ? "completed" : "failed",
+					finalValidationAttempts: stored.finalValidationAttempts.map(
+						(item) =>
+							item.id === attempt.id && item.state === "running"
+								? {
+										...item,
+										state: cancelled
+											? ("cancelled" as const)
+											: mergeReady
+												? ("succeeded" as const)
+												: ("failed" as const),
+										finishedAt,
+										...(cancelled
+											? { error: signalError(signal) }
+											: result.evidenceGap
+												? { error: result.evidenceGap }
+												: {}),
+										...(result.evidence ? { evidence: result.evidence } : {}),
+									}
+								: item,
+					),
+					...(!cancelled && mergeReady
+						? { mergeReadyEvidence: mergeReady }
+						: {}),
+					updatedAt: finishedAt,
 				};
 			},
 		);
 		options.onRunUpdated?.(settled);
 		return settled;
+	}
+
+	private async cancelStoredRun(runId: string): Promise<OrchestrationRun> {
+		const finishedAt = this.now();
+		return this.dependencies.store.transaction(runId, (stored) =>
+			["completed", "failed", "cancelled"].includes(stored.state)
+				? stored
+				: {
+						...stored,
+						state: "cancelled",
+						finalValidationAttempts: stored.finalValidationAttempts.map(
+							(attempt) =>
+								attempt.state === "running"
+									? {
+											...attempt,
+											state: "cancelled" as const,
+											finishedAt,
+											error: "The run was cancelled",
+										}
+									: attempt,
+						),
+						updatedAt: finishedAt,
+					},
+		);
 	}
 
 	private async fail(runId: string): Promise<OrchestrationRun> {
