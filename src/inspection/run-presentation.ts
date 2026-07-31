@@ -483,11 +483,13 @@ function workerAttempts(run: OrchestrationRun): WorkerAttemptResolution[] {
 export function latestWorkerAttempt(
 	run: OrchestrationRun,
 ): WorkerAttemptResolution | undefined {
-	return workerAttempts(run).sort(
-		(left, right) =>
-			right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
-			right.attempt.number - left.attempt.number,
-	)[0];
+	return workerAttempts(run)
+		.filter((resolution) => resolution.attempt.workerId !== undefined)
+		.sort(
+			(left, right) =>
+				right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
+				right.attempt.number - left.attempt.number,
+		)[0];
 }
 
 function isFollowableWorkerAttempt(resolution: RunAttemptResolution): boolean {

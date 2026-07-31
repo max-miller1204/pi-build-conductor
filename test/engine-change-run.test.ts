@@ -338,7 +338,7 @@ describe("live /orchestrate change runs on the engine", () => {
 		);
 	}, 120_000);
 
-	it("refuses to adopt an interrupted commit whose evidence is unreadable", async () => {
+	it("refuses to adopt an interrupted commit whose evidence is malformed", async () => {
 		const parent = await mkdtemp(join(tmpdir(), "pi-orchestrator-evidence-"));
 		directories.push(parent);
 		const repositoryRoot = join(parent, "repository");
@@ -386,10 +386,14 @@ describe("live /orchestrate change runs on the engine", () => {
 			throw new Error("the fixture published no evidence artifact");
 		}
 		const corrupt = new (class extends ArtifactStore {
-			override read(runId: string, artifactId: string) {
-				return artifactId === evidence.id
-					? Promise.reject(new Error("unreadable evidence"))
-					: super.read(runId, artifactId);
+			override async read(runId: string, artifactId: string) {
+				if (artifactId !== evidence.id) {
+					return super.read(runId, artifactId);
+				}
+				return {
+					...(await super.read(runId, artifactId)),
+					payload: '{"passed":true}',
+				};
 			}
 		})(artifactDirectory);
 
@@ -465,6 +469,10 @@ describe("live /orchestrate change runs on the engine", () => {
 			harness.repository,
 		);
 		await started;
+		expect(
+			(await harness.dependencies.workflowStates.load(harness.run.id)).attempts[0]
+				?.workerId,
+		).toEqual(expect.any(String));
 		const cancelled = await harness.runner.cancel(
 			await harness.store.load(harness.run.id),
 			harness.repository,
@@ -551,6 +559,35 @@ describe("live /orchestrate change runs on the engine", () => {
 
 		const resumed = await first;
 		expect((await resumed.completion).state).toBe("completed");
+	}, 120_000);
+
+	it("holds the durable lifecycle lease until execution settles", async () => {
+		const harness = await createHarness();
+		let workerStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			workerStarted = resolve;
+		});
+		let releaseWorker = () => {};
+		const held = new Promise<void>((resolve) => {
+			releaseWorker = resolve;
+		});
+		harness.workers.onChangeWorker = async () => {
+			workerStarted();
+			await held;
+		};
+
+		const launch = await harness.runner.approveAndLaunch(
+			harness.run,
+			harness.repository,
+		);
+		await started;
+		await expect(
+			harness.store.acquireLifecycleLease(harness.run.id),
+		).rejects.toThrow(/lifecycle lock/);
+		releaseWorker();
+		await launch.completion;
+		const release = await harness.store.acquireLifecycleLease(harness.run.id);
+		await release();
 	}, 120_000);
 
 	it("keeps a run cancelled when final validation is aborted", async () => {

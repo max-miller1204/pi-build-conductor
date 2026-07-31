@@ -347,4 +347,22 @@ describe("run inspection presentation", () => {
 		};
 		expect(latestFollowableWorkerAttempt(stopped)).toBeUndefined();
 	});
+
+	it("skips a newer workerless adoption when selecting output", () => {
+		const run = populatedRun();
+		const adopted = {
+			...required(run.reviewAttempts[0], "review attempt"),
+			id: "review-adopted",
+			number: 2,
+			round: 2,
+			workerId: undefined,
+			startedAt: "2026-01-01T00:45:00.000Z",
+		};
+		expect(
+			latestWorkerAttempt({
+				...run,
+				reviewAttempts: [...run.reviewAttempts, adopted],
+			})?.attempt.id,
+		).toBe("repair-a");
+	});
 });

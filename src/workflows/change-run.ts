@@ -30,6 +30,7 @@ import {
 import {
 	createWorkflowRunState,
 	type WorkflowRunState,
+	updateStepAttempt,
 } from "../engine/workflow-state.js";
 import { defaultWorkspaceProviders } from "../engine/workspaces.js";
 import type { GitClient, RepositoryInfo } from "../git/git.js";
@@ -88,6 +89,7 @@ export interface EngineLaunchResult {
 interface ActiveEngineExecution {
 	controller: AbortController;
 	detachSignal: () => void;
+	releaseLease?: () => Promise<void>;
 	engine?: WorkflowEngine;
 }
 
@@ -97,12 +99,13 @@ function executionKey(directory: string, runId: string): string {
 	return `${directory}\u0000${runId}`;
 }
 
-function claimExecution(
+async function claimExecution(
+	store: RunStore,
 	directory: string,
 	runId: string,
 	action: string,
 	signal: AbortSignal | undefined,
-): ActiveEngineExecution {
+): Promise<ActiveEngineExecution> {
 	const key = executionKey(directory, runId);
 	if (executingEngines.has(key)) {
 		throw new Error(
@@ -122,18 +125,26 @@ function claimExecution(
 		detachSignal: () => signal?.removeEventListener("abort", forwardAbort),
 	};
 	executingEngines.set(key, execution);
-	return execution;
+	try {
+		execution.releaseLease = await store.acquireLifecycleLease(runId);
+		return execution;
+	} catch (error) {
+		executingEngines.delete(key);
+		execution.detachSignal();
+		throw error;
+	}
 }
 
-function releaseExecution(
+async function releaseExecution(
 	directory: string,
 	runId: string,
 	execution: ActiveEngineExecution,
-): void {
+): Promise<void> {
 	const key = executionKey(directory, runId);
 	if (executingEngines.get(key) === execution) {
 		executingEngines.delete(key);
 		execution.detachSignal();
+		await execution.releaseLease?.();
 	}
 }
 
@@ -193,7 +204,8 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		const execution = claimExecution(
+		const execution = await claimExecution(
+			this.dependencies.store,
 			this.dependencies.workflowStates.directory,
 			run.id,
 			"start",
@@ -234,7 +246,7 @@ export class EngineChangeRunner {
 			}
 			return this.launch(approved, repository, model, options, execution);
 		} catch (error) {
-			releaseExecution(
+			await releaseExecution(
 				this.dependencies.workflowStates.directory,
 				run.id,
 				execution,
@@ -253,7 +265,8 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		const execution = claimExecution(
+		const execution = await claimExecution(
+			this.dependencies.store,
 			this.dependencies.workflowStates.directory,
 			run.id,
 			"resume",
@@ -299,8 +312,8 @@ export class EngineChangeRunner {
 					repository,
 					options,
 					execution.controller.signal,
-				).finally(() => {
-					releaseExecution(
+				).finally(async () => {
+					await releaseExecution(
 						this.dependencies.workflowStates.directory,
 						run.id,
 						execution,
@@ -310,7 +323,7 @@ export class EngineChangeRunner {
 			}
 			return this.launch(projected, repository, model, options, execution);
 		} catch (error) {
-			releaseExecution(
+			await releaseExecution(
 				this.dependencies.workflowStates.directory,
 				run.id,
 				execution,
@@ -397,7 +410,8 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
-		const execution = claimExecution(
+		const execution = await claimExecution(
+			this.dependencies.store,
 			this.dependencies.workflowStates.directory,
 			run.id,
 			"retry",
@@ -466,8 +480,8 @@ export class EngineChangeRunner {
 						repository,
 						options,
 						execution.controller.signal,
-					).finally(() => {
-						releaseExecution(
+					).finally(async () => {
+						await releaseExecution(
 							this.dependencies.workflowStates.directory,
 							run.id,
 							execution,
@@ -485,7 +499,7 @@ export class EngineChangeRunner {
 				execution,
 			);
 		} catch (error) {
-			releaseExecution(
+			await releaseExecution(
 				this.dependencies.workflowStates.directory,
 				run.id,
 				execution,
@@ -582,6 +596,19 @@ export class EngineChangeRunner {
 					kind: progressRole(this.profileOf(run, progress.stepId)),
 				});
 			},
+			onSpawn: async (spawn) => {
+				const state = await this.dependencies.workflowStates.transaction(
+					spawn.runId,
+					(current) => ({
+						...updateStepAttempt(current, spawn.attemptId, {
+							workerId: spawn.workerId,
+						}),
+						updatedAt: this.now(),
+					}),
+				);
+				this.scheduleProjection(run.id, state, options);
+				await this.drainProjections();
+			},
 		});
 		return new WorkflowEngine({
 			store: this.dependencies.workflowStates,
@@ -640,8 +667,8 @@ export class EngineChangeRunner {
 					execution.controller.signal,
 				);
 			})
-			.finally(() => {
-				releaseExecution(
+			.finally(async () => {
+				await releaseExecution(
 					this.dependencies.workflowStates.directory,
 					run.id,
 					execution,

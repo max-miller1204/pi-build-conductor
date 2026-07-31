@@ -6,6 +6,7 @@ import {
 } from "../domain/types.js";
 import type { GitClient } from "../git/git.js";
 import type { StoredArtifactEntry } from "../storage/artifact-store.js";
+import { validateStoredEvidence } from "../storage/file-storage.js";
 import {
 	appendWorkflowEvents,
 	blockedStepEvents,
@@ -229,7 +230,9 @@ async function adoptedEvidence(
 				attempt: attempt.number,
 			}),
 		);
-		const evidence = JSON.parse(record.payload) as TaskValidationEvidence;
+		const parsed: unknown = JSON.parse(record.payload);
+		validateStoredEvidence(parsed, `artifact ${record.id}`);
+		const evidence = parsed as TaskValidationEvidence;
 		return evidence.passed === true ? evidence : undefined;
 	} catch {
 		return undefined;
