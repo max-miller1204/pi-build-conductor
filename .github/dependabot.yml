@@ -10,9 +10,27 @@ updates:
       day: monday
       time: "06:17"
       timezone: Etc/UTC
+    # The Pi packages are not an ordinary dependency. They are one leg of a
+    # three-way compatibility pin together with the
+    # conductorCompatibility.upstreamPiCommit and
+    # conductorCompatibility.serverCommit values, and scripts/check-release.mjs
+    # requires the development pin to equal
+    # conductorCompatibility.testedPiVersion exactly. An isolated bump can
+    # therefore never pass version:check. Upgrading Pi requires merging the new
+    # upstream commit into the compatible server fork, updating all three pins,
+    # rebuilding that server, and re-running test:compatibility.
+    ignore:
+      - dependency-name: "@earendil-works/pi-ai"
+      - dependency-name: "@earendil-works/pi-coding-agent"
     groups:
+      # Group only patch and minor updates. Major updates arrive as individual
+      # pull requests so a toolchain jump is reviewed and validated on its own
+      # instead of riding along with unrelated routine bumps.
       development-dependencies:
         dependency-type: development
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     cooldown:
