@@ -139,6 +139,9 @@ describe("investigate workflow end to end", () => {
 		expect(settled.steps[investigationStepId(0)]?.state).toBe("succeeded");
 		expect(settled.steps[investigationStepId(1)]?.state).toBe("succeeded");
 		expect(settled.steps[SYNTHESIS_STEP_ID]?.state).toBe("succeeded");
+		for (const attempt of settled.attempts) {
+			expect(attempt.workerId).toEqual(expect.any(String));
+		}
 
 		// The synthesis worker received both reports as untrusted artifacts.
 		const synthesisPrompt = workers.prompts.find((prompt) =>

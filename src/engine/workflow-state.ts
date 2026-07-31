@@ -1,5 +1,9 @@
 import type { StepDefinition, WorkflowPlan } from "../domain/steps.js";
-import type { AttemptState, RunCapabilityProfiles } from "../domain/types.js";
+import type {
+	AttemptState,
+	RunCapabilityProfiles,
+	TaskValidationEvidence,
+} from "../domain/types.js";
 import type { WorkflowEvent } from "./events.js";
 import type { WorkspaceRequirement } from "./workspaces.js";
 
@@ -50,7 +54,11 @@ export interface WorkflowStepAttempt {
 	finishedAt?: string;
 	summary?: string;
 	error?: string;
+	/** The worker process that ran this attempt, for output inspection. */
+	workerId?: string;
 	commit?: string;
+	/** The focused checks that justified this attempt's commit. */
+	evidence?: TaskValidationEvidence;
 	/** The artifacts this attempt published for the step's declared outputs. */
 	artifactIds?: string[];
 	/**

@@ -27,6 +27,8 @@ export interface StepWorkerProgress {
 	event: WorkerProgressEvent;
 }
 
+export type StepWorkerSpawn = Omit<StepWorkerProgress, "event">;
+
 export interface StepWorkerRunnerOptions {
 	workers: WorkerBackend;
 	securityPolicy: RunSecurityPolicy;
@@ -34,6 +36,7 @@ export interface StepWorkerRunnerOptions {
 	provider?: string;
 	model?: string;
 	attemptLogs?: AttemptLogStore;
+	onSpawn?: (spawn: StepWorkerSpawn) => Promise<void>;
 	onProgress?: (progress: StepWorkerProgress) => void;
 }
 
@@ -104,6 +107,12 @@ export class StepWorkerRunner {
 					: {}),
 			});
 			workerId = worker.id;
+			await this.options.onSpawn?.({
+				runId: request.runId,
+				stepId: request.stepId,
+				attemptId: request.attemptId,
+				workerId,
+			});
 			const execution = await this.options.workers.startPrompt(
 				worker.id,
 				request.prompt,

@@ -7,6 +7,7 @@ import {
 import type {
 	CapabilityProfile,
 	CapabilityProfileName,
+	TaskValidationEvidence,
 } from "../domain/types.js";
 import type { RepositoryInfo } from "../git/git.js";
 import type { StepArtifactDraft } from "./artifact-routing.js";
@@ -33,14 +34,19 @@ export type StepOutcome =
 	| {
 			status: "succeeded";
 			summary?: string;
+			/** The worker that carried the step out, when one did. */
+			workerId?: string;
 			/** The step branch commit an integrating step produced. */
 			commit?: string;
+			/** The focused checks that justified the commit. */
+			evidence?: TaskValidationEvidence;
 			/** One artifact per output the step declared. */
 			artifacts?: StepArtifactDraft[];
 	  }
 	| {
 			status: "failed";
 			error: string;
+			workerId?: string;
 			/**
 			 * Whether running the step again could succeed. Handlers set this
 			 * when they know: a rejected diff is permanent, a lost worker is not.
@@ -48,7 +54,7 @@ export type StepOutcome =
 			 */
 			retryable?: boolean;
 	  }
-	| { status: "cancelled"; error: string };
+	| { status: "cancelled"; error: string; workerId?: string };
 
 /**
  * One step kind's execution strategy. Handlers own how a step is carried out;

@@ -203,9 +203,17 @@ export function materializeReviewFindings(
 	round: number,
 ): ReviewFinding[] {
 	return report.findings.map((finding, index) => ({
-		id: `review-${round}-${category}-${String(index + 1).padStart(3, "0")}`,
+		id: reviewFindingId(round, category, index),
 		category,
 		...finding,
 		status: "deferred",
 	}));
+}
+
+export function reviewFindingId(
+	round: number,
+	category: ReviewCategory,
+	index: number,
+): string {
+	return `review-${round}-${category}-${String(index + 1).padStart(3, "0")}`;
 }

@@ -22,8 +22,9 @@ import type {
 } from "../src/workers/backend.js";
 import {
 	buildChangeWorkflowPlan,
+	CHANGE_WORKFLOW_REPAIR_ROUNDS,
 	changeWorkflowStepHandlers,
-	REPAIR_STEP_ID,
+	repairStepId,
 	reviewStepId,
 } from "../src/workflows/change.js";
 import {
@@ -159,12 +160,21 @@ async function writeFileIn(cwd: string, path: string, body: string) {
 	await writeFile(join(cwd, path), body);
 }
 
+const REVIEW_ROUNDS = CHANGE_WORKFLOW_REPAIR_ROUNDS + 1;
+
+function reviewRounds(): number[] {
+	return Array.from({ length: REVIEW_ROUNDS }, (_, index) => index + 1);
+}
+
+/** A clean reviewer for every category of every round. */
 function cleanReviewScripts(): Record<string, Script> {
 	return Object.fromEntries(
-		REVIEW_CATEGORIES.map((category) => [
-			reviewStepId(category),
-			{ output: reviewReport(category, []) },
-		]),
+		reviewRounds().flatMap((round) =>
+			REVIEW_CATEGORIES.map((category) => [
+				reviewStepId(round, category),
+				{ output: reviewReport(category, []) },
+			]),
+		),
 	);
 }
 
@@ -196,7 +206,7 @@ describe("strict change workflow end to end", () => {
 				act: (cwd) => writeFileIn(cwd, join("docs", "guide.md"), "Guide.\n"),
 			},
 			...cleanReviewScripts(),
-			[reviewStepId("security")]: {
+			[reviewStepId(1, "security")]: {
 				output: reviewReport("security", [
 					{
 						severity: "high",
@@ -208,7 +218,7 @@ describe("strict change workflow end to end", () => {
 					},
 				]),
 			},
-			[REPAIR_STEP_ID]: {
+			[repairStepId(1)]: {
 				act: (cwd) =>
 					writeFileIn(
 						cwd,
@@ -221,16 +231,31 @@ describe("strict change workflow end to end", () => {
 		const settled = await harness.engine.run(harness.initial.id);
 
 		expect(settled.state).toBe("completed");
-		for (const category of REVIEW_CATEGORIES) {
-			expect(settled.steps[reviewStepId(category)]?.state).toBe("succeeded");
+		for (const round of reviewRounds()) {
+			for (const category of REVIEW_CATEGORIES) {
+				expect(settled.steps[reviewStepId(round, category)]?.state).toBe(
+					"succeeded",
+				);
+			}
 		}
-		expect(settled.steps[REPAIR_STEP_ID]?.state).toBe("succeeded");
+		expect(settled.steps[repairStepId(1)]?.state).toBe("succeeded");
+		expect(settled.steps[repairStepId(2)]?.state).toBe("succeeded");
 
 		// The security findings were prioritized into the repair worker.
 		const repairPrompt = workers.prompts.find((prompt) =>
 			prompt.includes("repair worker"),
 		);
 		expect(repairPrompt).toContain("Unsafe export");
+
+		// The repair moved the head, so round 2 spent fresh reviewers on it,
+		// while round 3 adopted round 2 over the commit nothing changed again.
+		const reviewersOf = (round: number) =>
+			workers.prompts.filter((prompt) =>
+				prompt.includes(`step ${reviewStepId(round, "security")}.`),
+			).length;
+		expect(reviewersOf(1)).toBe(1);
+		expect(reviewersOf(2)).toBe(1);
+		expect(reviewersOf(3)).toBe(0);
 
 		// Integration lands change commits in plan order, then the repair.
 		const history = await execute(
@@ -239,7 +264,7 @@ describe("strict change workflow end to end", () => {
 			{ cwd: harness.repositoryRoot },
 		);
 		expect(history.stdout.trim().split("\n")).toEqual([
-			`step(${REPAIR_STEP_ID}): Repair the review findings`,
+			`step(${repairStepId(1)}): Repair the round 1 review findings`,
 			"step(add-docs): Add the docs",
 			"step(add-api): Add the API",
 			"Initial",
@@ -266,7 +291,7 @@ describe("strict change workflow end to end", () => {
 	});
 
 	it("completes without a repair commit when every review is clean", async () => {
-		const { git, harness } = await createChangeHarness({
+		const { git, harness, workers } = await createChangeHarness({
 			"add-api": {
 				act: (cwd) =>
 					writeFileIn(cwd, join("src", "api", "index.ts"), "export {};\n"),
@@ -279,7 +304,7 @@ describe("strict change workflow end to end", () => {
 		const settled = await harness.engine.run(harness.initial.id);
 
 		expect(settled.state).toBe("completed");
-		expect(settled.steps[REPAIR_STEP_ID]?.state).toBe("succeeded");
+		expect(settled.steps[repairStepId(1)]?.state).toBe("succeeded");
 		const history = await execute(
 			"git",
 			["log", "--format=%s", settled.integrationBranch],
@@ -290,6 +315,10 @@ describe("strict change workflow end to end", () => {
 			"step(add-api): Add the API",
 			"Initial",
 		]);
+		// Nothing changed after round 1, so only round 1 spent reviewers.
+		expect(
+			workers.prompts.filter((prompt) => prompt.includes("reviewer")),
+		).toHaveLength(REVIEW_CATEGORIES.length);
 
 		const result = await finalizeWorkflowRun(
 			{
@@ -309,31 +338,195 @@ describe("strict change workflow end to end", () => {
 			"add-api",
 			"add-docs",
 		]);
+
+		const noReader = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(noReader.mergeReady).toBeUndefined();
+		expect(noReader.evidenceGap).toMatch(/Review evidence is unavailable/);
+
+		const missingArtifact = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+				artifacts: {
+					latest(runId, stepId, output) {
+						return stepId === reviewStepId(3, "security")
+							? Promise.resolve(undefined)
+							: harness.artifacts.latest(runId, stepId, output);
+					},
+				},
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(missingArtifact.mergeReady).toBeUndefined();
+		expect(missingArtifact.evidenceGap).toContain(
+			`${reviewStepId(3, "security")}.findings`,
+		);
+	});
+
+	it("withholds merge-ready evidence when an important finding survives the last round", async () => {
+		const unsafeExport = (round: number) => ({
+			output: reviewReport("security", [
+				{
+					severity: "high",
+					confidence: "high",
+					title: "Unsafe export",
+					description: `The export syntax is still unsafe in round ${round}.`,
+					paths: ["src/api/index.ts"],
+					recommendation: "Use export default.",
+				},
+			]),
+		});
+		const { git, harness, workers } = await createChangeHarness({
+			"add-api": {
+				act: (cwd) =>
+					writeFileIn(cwd, join("src", "api", "index.ts"), "export = 1;\n"),
+			},
+			"add-docs": {
+				act: (cwd) => writeFileIn(cwd, join("docs", "guide.md"), "Guide.\n"),
+			},
+			...cleanReviewScripts(),
+			...Object.fromEntries(
+				reviewRounds().map((round) => [
+					reviewStepId(round, "security"),
+					unsafeExport(round),
+				]),
+			),
+			...Object.fromEntries(
+				[1, 2].map((round) => [
+					repairStepId(round),
+					{
+						act: (cwd: string) =>
+							writeFileIn(
+								cwd,
+								join("src", "api", "index.ts"),
+								`export default ${round};\n`,
+							),
+						output: `Attempted repair ${round}.`,
+					},
+				]),
+			),
+		});
+		const settled = await harness.engine.run(harness.initial.id);
+
+		// Every step did its job, so the run itself completed.
+		expect(settled.state).toBe("completed");
+		expect(
+			workers.prompts.filter((prompt) => prompt.includes("repair worker")),
+		).toHaveLength(CHANGE_WORKFLOW_REPAIR_ROUNDS);
+
+		const result = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+				artifacts: harness.artifacts,
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(result.mergeReady).toBeUndefined();
+		// The suite is not worth running for a result that cannot merge.
+		expect(result.evidence).toBeUndefined();
+		expect(result.evidenceGap).toMatch(/Important findings remain/);
+	});
+
+	it("refuses to repair findings outside the approved paths", async () => {
+		const { harness, workers } = await createChangeHarness({
+			"add-api": {
+				act: (cwd) =>
+					writeFileIn(cwd, join("src", "api", "index.ts"), "export {};\n"),
+			},
+			"add-docs": {
+				act: (cwd) => writeFileIn(cwd, join("docs", "guide.md"), "Guide.\n"),
+			},
+			...cleanReviewScripts(),
+			[reviewStepId(1, "security")]: {
+				output: reviewReport("security", [
+					{
+						severity: "critical",
+						confidence: "high",
+						title: "Unpinned dependency",
+						description: "The manifest allows an unpinned dependency.",
+						paths: ["package.json"],
+						recommendation: "Pin the dependency.",
+					},
+				]),
+			},
+		});
+		const settled = await harness.engine.run(harness.initial.id);
+
+		expect(settled.state).toBe("failed");
+		expect(settled.steps[repairStepId(1)]?.state).toBe("failed");
+		expect(settled.steps[repairStepId(1)]?.error).toMatch(
+			/outside approved paths/,
+		);
+		// No repair worker is given authority it could not legally use.
+		expect(
+			workers.prompts.some((prompt) => prompt.includes("repair worker")),
+		).toBe(false);
 	});
 });
 
 describe("buildChangeWorkflowPlan", () => {
-	it("appends one review per category and one bounded repair pass", () => {
+	it("alternates review rounds and bounded repair passes, ending on a review", () => {
 		const plan = buildChangeWorkflowPlan(taskPlanFixture());
 		expect(plan.steps.map((step) => step.id)).toEqual([
 			"add-api",
 			"add-docs",
-			...REVIEW_CATEGORIES.map((category) => reviewStepId(category)),
-			REPAIR_STEP_ID,
+			...reviewRounds().flatMap((round) => [
+				...REVIEW_CATEGORIES.map((category) => reviewStepId(round, category)),
+				...(round < REVIEW_ROUNDS ? [repairStepId(round)] : []),
+			]),
 		]);
-		const repair = plan.steps.find((step) => step.id === REPAIR_STEP_ID);
-		if (repair?.kind !== "change") {
-			throw new Error("repair step must be a change step");
-		}
-		expect(repair.profile).toBe("repair");
-		expect(repair.allowedPaths).toEqual(["docs/", "src/api/"]);
-		expect(repair.inputs).toHaveLength(REVIEW_CATEGORIES.length);
-		for (const category of REVIEW_CATEGORIES) {
-			const review = plan.steps.find(
-				(step) => step.id === reviewStepId(category),
+		for (let round = 1; round <= CHANGE_WORKFLOW_REPAIR_ROUNDS; round += 1) {
+			const repair = plan.steps.find((step) => step.id === repairStepId(round));
+			if (repair?.kind !== "change") {
+				throw new Error("repair step must be a change step");
+			}
+			expect(repair.profile).toBe("repair");
+			expect(repair.allowedPaths).toEqual(["docs/", "src/api/"]);
+			expect(repair.inputs?.map((input) => input.stepId)).toEqual(
+				REVIEW_CATEGORIES.map((category) => reviewStepId(round, category)),
 			);
-			expect(review?.dependencies).toEqual(["add-api", "add-docs"]);
-			expect(review?.profile).toBe("review");
+		}
+		for (const category of REVIEW_CATEGORIES) {
+			const first = plan.steps.find(
+				(step) => step.id === reviewStepId(1, category),
+			);
+			expect(first?.dependencies).toEqual(["add-api", "add-docs"]);
+			expect(first?.profile).toBe("review");
+			expect(first?.inputs).toBeUndefined();
+			// A later round reviews the repair before it, and reads the round it
+			// supersedes so an unchanged head can adopt those findings.
+			const second = plan.steps.find(
+				(step) => step.id === reviewStepId(2, category),
+			);
+			expect(second?.dependencies).toEqual([
+				repairStepId(1),
+				reviewStepId(1, category),
+			]);
+			expect(second?.inputs).toEqual([
+				{ stepId: reviewStepId(1, category), output: "findings" },
+			]);
 		}
 	});
 
@@ -343,7 +536,17 @@ describe("buildChangeWorkflowPlan", () => {
 		if (!first) {
 			throw new Error("fixture must have tasks");
 		}
-		first.id = REPAIR_STEP_ID;
+		first.id = repairStepId(2);
 		expect(() => buildChangeWorkflowPlan(taskPlan)).toThrow(/collides/);
+	});
+
+	it("allows the repair id for the final review-only round", () => {
+		const taskPlan = taskPlanFixture();
+		const first = taskPlan.tasks[0];
+		if (!first) {
+			throw new Error("fixture must have tasks");
+		}
+		first.id = repairStepId(REVIEW_ROUNDS);
+		expect(() => buildChangeWorkflowPlan(taskPlan)).not.toThrow();
 	});
 });

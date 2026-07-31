@@ -157,7 +157,7 @@ describe("review and repair step profiles", () => {
 
 	it("requires a review step id that names its category", () => {
 		const plan = workflowPlanOf([
-			investigationStep("review-security", [], { profile: "review" }),
+			investigationStep("review-1-security", [], { profile: "review" }),
 		]);
 		const step = plan.steps[0];
 		if (!step || step.kind !== "investigation") {
@@ -178,7 +178,7 @@ describe("review and repair step profiles", () => {
 					);
 				},
 			},
-			"review-security": {
+			"review-1-security": {
 				output: "",
 			},
 			"repair-1": {
@@ -193,13 +193,13 @@ describe("review and repair step profiles", () => {
 		});
 		const plan = workflowPlanOf([
 			changeStep("api", [], ["src/api/"]),
-			investigationStep("review-security", ["api"], {
+			investigationStep("review-1-security", ["api"], {
 				profile: "review",
 				outputs: ["findings"],
 			}),
-			changeStep("repair-1", ["review-security"], ["src/api/"], {
+			changeStep("repair-1", ["review-1-security"], ["src/api/"], {
 				profile: "repair",
-				inputs: [{ stepId: "review-security", output: "findings" }],
+				inputs: [{ stepId: "review-1-security", output: "findings" }],
 				outputs: ["evidence"],
 			}),
 		]);
@@ -207,7 +207,7 @@ describe("review and repair step profiles", () => {
 		// The reviewer answers against the integration head it actually saw.
 		const originalStart = workers.startPrompt.bind(workers);
 		workers.startPrompt = async (workerId: string, prompt: string) => {
-			if (prompt.includes("step review-security")) {
+			if (prompt.includes("step review-1-security")) {
 				const baseCommit = /at commit ([0-9a-f]{40})/.exec(prompt)?.[1] ?? "";
 				workers.prompts.push(prompt);
 				return {
@@ -234,7 +234,7 @@ describe("review and repair step profiles", () => {
 		expect(finished.state).toBe("completed");
 		const findings = await harness.artifacts.read(
 			harness.initial.id,
-			"review-security.findings.1",
+			"review-1-security.findings.1",
 		);
 		expect(JSON.parse(findings.payload)).toMatchObject({
 			category: "security",
@@ -275,20 +275,20 @@ describe("review and repair step profiles", () => {
 		});
 		const plan = workflowPlanOf([
 			changeStep("api", [], ["src/api/"]),
-			investigationStep("review-tests", ["api"], {
+			investigationStep("review-1-tests", ["api"], {
 				profile: "review",
 				outputs: ["findings"],
 			}),
-			changeStep("repair-1", ["review-tests"], ["src/api/"], {
+			changeStep("repair-1", ["review-1-tests"], ["src/api/"], {
 				profile: "repair",
-				inputs: [{ stepId: "review-tests", output: "findings" }],
+				inputs: [{ stepId: "review-1-tests", output: "findings" }],
 				outputs: ["evidence"],
 			}),
 		]);
 		const harness = await createWorkflowHarness(plan, handlersFor(workers));
 		const originalStart = workers.startPrompt.bind(workers);
 		workers.startPrompt = async (workerId: string, prompt: string) => {
-			if (prompt.includes("step review-tests")) {
+			if (prompt.includes("step review-1-tests")) {
 				const baseCommit = /at commit ([0-9a-f]{40})/.exec(prompt)?.[1] ?? "";
 				return {
 					completion: Promise.resolve({
@@ -334,10 +334,10 @@ describe("review and repair step profiles", () => {
 
 	it("fails a review that returns an unusable report", async () => {
 		const workers = new ScriptedWorkers({
-			"review-correctness": { output: "no markers here" },
+			"review-1-correctness": { output: "no markers here" },
 		});
 		const plan = workflowPlanOf([
-			investigationStep("review-correctness", [], {
+			investigationStep("review-1-correctness", [], {
 				profile: "review",
 				outputs: ["findings"],
 			}),
@@ -347,7 +347,7 @@ describe("review and repair step profiles", () => {
 		const finished = await harness.engine.run(harness.initial.id);
 
 		expect(finished.state).toBe("failed");
-		expect(finished.steps["review-correctness"]?.error).toContain(
+		expect(finished.steps["review-1-correctness"]?.error).toContain(
 			"unusable report",
 		);
 	});
@@ -355,7 +355,7 @@ describe("review and repair step profiles", () => {
 	it("gives review and repair workers their own frozen authority", async () => {
 		const workers = new ScriptedWorkers({});
 		const plan = workflowPlanOf([
-			investigationStep("review-security", [], {
+			investigationStep("review-1-security", [], {
 				profile: "review",
 				outputs: ["findings"],
 			}),

@@ -6,11 +6,14 @@ import {
 	type IntegratedCommitEvidence,
 	MERGE_READY_EVIDENCE_VERSION,
 	type MergeReadyEvidence,
+	REVIEW_CATEGORIES,
+	type ReviewCategory,
 	type ReviewFinding,
 	type RunSecurityPolicy,
 } from "../domain/types.js";
 import type { GitClient, RepositoryInfo } from "../git/git.js";
 import type { WorktreeManager } from "../git/worktrees.js";
+import { requiresAutomaticRepair } from "../review/review-policy.js";
 import {
 	FinalValidationError,
 	type FinalValidator,
@@ -37,12 +40,21 @@ export interface WorkflowFinalizationInput {
 	repository: RepositoryInfo;
 	attemptNumber?: number;
 	signal?: AbortSignal;
+	onValidationReady?: () => Promise<void>;
 }
 
 export interface WorkflowFinalizationResult {
-	evidence: FinalValidationEvidence;
-	/** Present only when final validation passed. */
+	/**
+	 * Absent when the run's review evidence could not justify merging, because
+	 * final validation is not run for a result that cannot become merge-ready.
+	 */
+	evidence?: FinalValidationEvidence;
+	/** Present only when the reviews hold and final validation passed. */
 	mergeReady?: MergeReadyEvidence;
+	/** Why merge-ready evidence was withheld. */
+	evidenceGap?: string;
+	/** The worktree the final suite ran in, for the attempt record. */
+	worktreePath?: string;
 }
 
 /** Every commit the workflow contributed, in integration order. */
@@ -80,32 +92,111 @@ export function integratedCommitEvidence(
 	return evidence;
 }
 
+interface ReviewOutcomes {
+	summaries: FinalReviewSummary[];
+	risks: ReviewFinding[];
+	/** Why these reviews cannot back merge-ready evidence. */
+	gap?: string;
+}
+
+/**
+ * Summarizes the reviews that describe the head this run would merge.
+ *
+ * A review only counts as evidence when it read the final integrated commit:
+ * a review of an earlier head says nothing about what a later step changed.
+ * Every category that was reviewed at all must therefore also have been
+ * reviewed at the final head, and none of those final findings may still
+ * require repair, or the run has not earned merge-ready evidence.
+ */
 async function reviewOutcomes(
 	state: WorkflowRunState,
 	artifacts: StepArtifactReader | undefined,
-): Promise<{ summaries: FinalReviewSummary[]; risks: ReviewFinding[] }> {
-	const summaries: FinalReviewSummary[] = [];
-	const risks: ReviewFinding[] = [];
-	if (!artifacts) {
-		return { summaries, risks };
+): Promise<ReviewOutcomes> {
+	const staleCategories = new Set<ReviewCategory>();
+	const reviewSteps = topologicalStepIds(state.plan).flatMap((stepId) => {
+		const record = state.steps[stepId];
+		return record && stepProfileName(record.definition) === "review"
+			? [{ stepId, outputs: record.definition.outputs ?? [] }]
+			: [];
+	});
+	// The newest review of the final head per category is that category's
+	// evidence; an earlier review of the same commit adds no new information.
+	const latest = new Map<ReviewCategory, ReviewFindingsPayload>();
+	if (reviewSteps.length === 0) {
+		return { summaries: [], risks: [] };
 	}
-	for (const [stepId, record] of Object.entries(state.steps)) {
-		if (stepProfileName(record.definition) !== "review") {
+	if (!artifacts) {
+		return {
+			summaries: [],
+			risks: [],
+			gap: `Review evidence is unavailable for ${reviewSteps
+				.map(({ stepId }) => stepId)
+				.join(", ")}`,
+		};
+	}
+	const unavailable: string[] = [];
+	for (const { stepId, outputs } of reviewSteps) {
+		if (outputs.length === 0) {
+			unavailable.push(stepId);
 			continue;
 		}
-		for (const output of record.definition.outputs ?? []) {
+		for (const output of outputs) {
 			const artifact = await artifacts.latest(state.id, stepId, output);
 			if (!artifact) {
+				unavailable.push(`${stepId}.${output}`);
 				continue;
 			}
 			const payload = JSON.parse(artifact.payload) as ReviewFindingsPayload;
-			summaries.push({ category: payload.category, summary: payload.summary });
-			for (const finding of payload.findings ?? []) {
-				if (finding.status !== "repaired") {
-					risks.push(finding);
-				}
+			if (payload.baseCommit === state.integrationHead) {
+				latest.set(payload.category, payload);
+			} else {
+				staleCategories.add(payload.category);
 			}
 		}
+	}
+	if (unavailable.length > 0) {
+		return {
+			summaries: [],
+			risks: [],
+			gap: `Review evidence is unavailable for ${unavailable.join(", ")}`,
+		};
+	}
+	const summaries: FinalReviewSummary[] = [];
+	const risks: ReviewFinding[] = [];
+	for (const category of REVIEW_CATEGORIES) {
+		const payload = latest.get(category);
+		if (!payload) {
+			continue;
+		}
+		summaries.push({ category, summary: payload.summary });
+		for (const finding of payload.findings ?? []) {
+			if (finding.status !== "repaired") {
+				risks.push(finding);
+			}
+		}
+	}
+	risks.sort((left, right) => left.id.localeCompare(right.id));
+	const missing = [...staleCategories].filter(
+		(category) => !latest.has(category),
+	);
+	if (missing.length > 0) {
+		return {
+			summaries,
+			risks,
+			gap: `No ${missing.join(", ")} review covers the final integrated commit ${state.integrationHead}`,
+		};
+	}
+	const unrepaired = risks.filter((finding) =>
+		requiresAutomaticRepair(finding),
+	);
+	if (unrepaired.length > 0) {
+		return {
+			summaries,
+			risks,
+			gap: `Important findings remain after the approved repair rounds: ${unrepaired
+				.map((finding) => finding.id)
+				.join(", ")}`,
+		};
 	}
 	return { summaries, risks };
 }
@@ -146,6 +237,21 @@ export async function finalizeWorkflowRun(
 	const now = dependencies.now ?? (() => new Date().toISOString());
 	const { state } = input;
 	assertFinalizableState(state);
+	// Reviews are checked before the suite runs: a result the reviews cannot
+	// support will not become merge-ready however green its checks are.
+	const { summaries, risks, gap } = await reviewOutcomes(
+		state,
+		dependencies.artifacts,
+	);
+	if (gap) {
+		return { evidenceGap: gap };
+	}
+	if (input.signal?.aborted) {
+		throw input.signal.reason instanceof Error
+			? input.signal.reason
+			: new Error("Final validation aborted");
+	}
+	await input.onValidationReady?.();
 	const attemptNumber = input.attemptNumber ?? 1;
 	const worktreePath =
 		await dependencies.worktrees.prepareFinalValidationWorktree(
@@ -177,7 +283,7 @@ export async function finalizeWorkflowRun(
 		);
 	}
 	if (!evidence.passed) {
-		return { evidence };
+		return { evidence, worktreePath };
 	}
 	const commits = integratedCommitEvidence(state);
 	const verifiedAt = now();
@@ -190,12 +296,9 @@ export async function finalizeWorkflowRun(
 		commits,
 		verifiedAt,
 	});
-	const { summaries, risks } = await reviewOutcomes(
-		state,
-		dependencies.artifacts,
-	);
 	return {
 		evidence,
+		worktreePath,
 		mergeReady: {
 			version: MERGE_READY_EVIDENCE_VERSION,
 			generatedAt: verifiedAt,

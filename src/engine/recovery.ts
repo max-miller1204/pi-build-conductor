@@ -1,8 +1,12 @@
-import { artifactIdFor } from "../domain/artifacts.js";
+import { type ArtifactRecord, artifactIdFor } from "../domain/artifacts.js";
 import { type StepDefinition, stepRetryPolicy } from "../domain/steps.js";
-import { isActiveAttemptState } from "../domain/types.js";
+import {
+	isActiveAttemptState,
+	type TaskValidationEvidence,
+} from "../domain/types.js";
 import type { GitClient } from "../git/git.js";
 import type { StoredArtifactEntry } from "../storage/artifact-store.js";
+import { validateStoredEvidence } from "../storage/file-storage.js";
 import {
 	appendWorkflowEvents,
 	blockedStepEvents,
@@ -18,9 +22,14 @@ import {
 	type WorkflowStepAttempt,
 } from "./workflow-state.js";
 
+/** The output every step that commits publishes its focused checks under. */
+const EVIDENCE_OUTPUT = "evidence";
+
 /** The read surface recovery needs to prove an artifact really is durable. */
 export interface RecoveryArtifactReader {
 	scan(runId: string): Promise<StoredArtifactEntry[]>;
+	/** Used to recover the checks behind an adopted commit, when available. */
+	read?(runId: string, artifactId: string): Promise<ArtifactRecord>;
 }
 
 export interface WorkflowRecoveryDependencies {
@@ -52,6 +61,8 @@ interface InterruptedAttemptDecision {
 	commit?: string;
 	/** The declared artifacts that attempt durably published. */
 	artifactIds?: string[];
+	/** The focused checks recovered for an adopted commit. */
+	evidence?: TaskValidationEvidence;
 	/** Why the attempt cannot be adopted, though it may still run again. */
 	retryReason?: string;
 	/** Why the attempt's step branch could not be safely reconciled. */
@@ -173,12 +184,59 @@ async function inspectInterruptedAttempt(
 			} of ${step.id}: ${missing.map((entry) => entry.output).join(", ")}`,
 		};
 	}
-	return {
-		commit: decision.commit,
-		artifactIds: declared.flatMap((entry) =>
-			entry.artifactId ? [entry.artifactId] : [],
-		),
-	};
+	const artifactIds = declared.flatMap((entry) =>
+		entry.artifactId ? [entry.artifactId] : [],
+	);
+	if (attempt.evidence) {
+		return { commit: decision.commit, artifactIds, evidence: attempt.evidence };
+	}
+	if (!(step.outputs ?? []).includes(EVIDENCE_OUTPUT)) {
+		return { commit: decision.commit, artifactIds };
+	}
+	// A step that publishes its checks is adopted on those checks. Evidence the
+	// engine cannot read back is not evidence, and a commit whose justification
+	// cannot be produced is worth running again rather than reporting as
+	// validated work.
+	const evidence = await adoptedEvidence(dependencies, state.id, step, attempt);
+	return evidence
+		? { commit: decision.commit, artifactIds, evidence }
+		: {
+				retryReason: `published no readable passing validation evidence for ${step.id}`,
+			};
+}
+
+/**
+ * Recovers the focused checks that justified an adopted commit. The evidence
+ * a step published is durable, but the attempt record that would have carried
+ * it was lost with the interrupted process, and a commit whose justification
+ * is unknown should not be reported as validated work.
+ */
+async function adoptedEvidence(
+	dependencies: WorkflowRecoveryDependencies,
+	runId: string,
+	step: StepDefinition,
+	attempt: WorkflowStepAttempt,
+): Promise<TaskValidationEvidence | undefined> {
+	const artifacts = dependencies.artifacts;
+	if (!artifacts?.read) {
+		return undefined;
+	}
+	try {
+		const record = await artifacts.read(
+			runId,
+			artifactIdFor({
+				stepId: step.id,
+				output: EVIDENCE_OUTPUT,
+				attempt: attempt.number,
+			}),
+		);
+		const parsed: unknown = JSON.parse(record.payload);
+		validateStoredEvidence(parsed, `artifact ${record.id}`);
+		const evidence = parsed as TaskValidationEvidence;
+		return evidence.passed === true ? evidence : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -223,6 +281,7 @@ export async function recoverWorkflowRun(
 					state: "succeeded",
 					finishedAt,
 					commit: decision.commit,
+					...(decision.evidence ? { evidence: decision.evidence } : {}),
 					...(artifactIds.length > 0 ? { artifactIds } : {}),
 				});
 				next = updateStep(next, attempt.stepId, { state: "succeeded" });

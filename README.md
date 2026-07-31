@@ -23,7 +23,7 @@ Workers never merge into the user's branch, worker-created commits are rejected,
 - Inspects worker diffs, runs focused checks, and creates orchestrator-owned commits.
 - Integrates accepted commits in dependency order on `conductor/<run-id>/integration` without touching the checked-out branch.
 - Runs fresh correctness, security, maintainability, test, and documentation reviews.
-- Automatically repairs critical, high, and high-confidence medium findings, then repeats all reviews.
+- Automatically repairs critical, high, and high-confidence medium findings, then ensures all five review categories cover the final integration head.
 - Runs the approved complete validation suite in a detached worktree at the exact integration head.
 - Persists atomic run state, immutable plan revisions, bounded worker journals, validation evidence, and merge-ready reports.
 - Recovers safely after interruption and supports inspection, retry, cancellation, and conservative cleanup.
@@ -116,7 +116,7 @@ Merge or cherry-pick the integration branch only after reviewing the result.
 8. It rejects unexpected Git state, out-of-scope changes, conflicts, worker commits, and checks that mutate worker output.
 9. It creates validated task commits and cherry-picks them onto the integration branch in deterministic dependency order.
 10. Five fresh read-only reviewers inspect the integrated result.
-11. Important findings go through isolated repair and a complete fresh review round.
+11. Important findings go through isolated repair, after which all five review categories cover the resulting integration head.
 12. The approved final commands run in a detached worktree at the exact integration head.
 13. Completion requires passing checks, strict linear integration history, a clean validation worktree, and proof that the user's branch and worktree were untouched.
 
@@ -143,7 +143,8 @@ The orchestrator persists restart-safe metadata and valid plan revisions, but do
 Every command is also available under its legacy `/build*` name as a temporary alias.
 The plan-only and investigation commands require a clean repository, inspect only committed `HEAD` from detached branchless worktrees, and store their results as artifacts without creating an integration branch.
 Use `/orchestrate-resume`, not `/orchestrate-retry`, after a process or daemon interruption.
-Resume first reconciles server workers, attempts, commits, branches, and worktrees.
+Resume first reconciles durable attempts, commits, artifacts, branches, and worktrees before launching new work.
+An interrupted engine step is adopted only when its commit, declared outputs, and required passing validation evidence can be proved; otherwise resume runs that step and its blocked descendants again.
 
 Task-phase retry creates new attempts for all failed tasks in the retry set and their blocked descendants while preserving history.
 Final-validation retry creates a new detached attempt for the already approved complete suite.
@@ -250,7 +251,8 @@ High-confidence medium findings also require repair.
 Lower-priority findings remain visible as deferred risks in the final evidence.
 
 Repairs can modify only the union of paths approved by the plan and must pass the union of focused validation commands.
-Every repair is followed by all five fresh reviews.
+Every repair that changes the integration head is followed by all five fresh reviews.
+When a repair changes no bytes, the next round adopts the previous findings for that identical commit instead of launching redundant reviewers.
 The run allows at most two successful repair and re-review cycles.
 
 ## Security
@@ -290,7 +292,9 @@ Run state is stored outside the checked-out tree at:
 Worker journals are stored below the same run directory in `output/` and are capped at 5 MiB each.
 A legacy `<git-common-dir>/pi-build-conductor` directory is migrated to the new location automatically the first time a command touches run storage.
 Immutable workflow artifacts are stored by run below `<git-common-dir>/pi-orchestrator/artifacts/`.
-Workflow engine runs persist their own versioned snapshots below `<git-common-dir>/pi-orchestrator/workflow-runs/`, which is what lets an interrupted engine run be recovered after a restart; the `/orchestrate` command family still executes through the run state above.
+Workflow engine runs, including new `/orchestrate` change runs, execute from versioned snapshots below `<git-common-dir>/pi-orchestrator/workflow-runs/`, which are the authoritative execution record and allow recovery after a restart.
+For change runs, the corresponding `runs/` record retains approval and plan history and receives a best-effort projection for the existing inspection and control commands.
+Runs with legacy execution state and no workflow snapshot remain on the legacy execution path.
 Orchestrator worktrees are stored at:
 
 ```text

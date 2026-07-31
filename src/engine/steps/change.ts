@@ -150,10 +150,11 @@ export async function runValidatedChange(
 		prompt: worker.prompt,
 		signal: context.signal,
 	});
+	const workerId = result.workerId ? { workerId: result.workerId } : {};
 	if (result.status !== "succeeded") {
 		return result.status === "cancelled"
-			? { status: "cancelled", error: result.error }
-			: { status: "failed", error: result.error };
+			? { status: "cancelled", error: result.error, ...workerId }
+			: { status: "failed", error: result.error, ...workerId };
 	}
 	if (!branch) {
 		// A step whose narrowed profile lacks mutate-repository runs in a
@@ -170,6 +171,7 @@ export async function runValidatedChange(
 			return {
 				status: "failed",
 				error: error instanceof Error ? error.message : String(error),
+				...workerId,
 				...(error instanceof CapabilityViolationError
 					? { retryable: false }
 					: {}),
@@ -178,6 +180,7 @@ export async function runValidatedChange(
 		return {
 			status: "failed",
 			error: `Change step ${step.id} holds no mutate-repository authority, so it cannot produce a committable change`,
+			...workerId,
 			retryable: false,
 		};
 	}
@@ -206,6 +209,7 @@ export async function runValidatedChange(
 		return {
 			status: "failed",
 			error: message,
+			...workerId,
 			...(breach ? { retryable: false } : {}),
 		};
 	}
@@ -218,7 +222,9 @@ export async function runValidatedChange(
 		return {
 			status: "succeeded",
 			summary: `Committed ${evidence.changedFiles.length} changed file(s) as ${commit}`,
+			...workerId,
 			commit,
+			evidence,
 			artifacts: artifactsFor(
 				step,
 				evidence,
@@ -231,6 +237,7 @@ export async function runValidatedChange(
 		return {
 			status: "failed",
 			error: error instanceof Error ? error.message : String(error),
+			...workerId,
 		};
 	}
 }

@@ -252,7 +252,12 @@ function latestReviewRoundLines(run: OrchestrationRun): string[] {
 	if (!round) {
 		return [];
 	}
-	let line = `Latest review round: ${round.state}; base ${display(round.baseCommit)}; ${display(round.startedAt)} -> ${display(round.finishedAt, "in progress")}`;
+	const finished = round.finishedAt
+		? display(round.finishedAt)
+		: round.state === "running" || round.state === "repairing"
+			? "in progress"
+			: "finished (time unavailable)";
+	let line = `Latest review round: ${round.state}; base ${display(round.baseCommit)}; ${display(round.startedAt)} -> ${finished}`;
 	if (round.repairAttemptId) {
 		line += `; repair ${display(round.repairAttemptId)}`;
 	}
@@ -478,11 +483,13 @@ function workerAttempts(run: OrchestrationRun): WorkerAttemptResolution[] {
 export function latestWorkerAttempt(
 	run: OrchestrationRun,
 ): WorkerAttemptResolution | undefined {
-	return workerAttempts(run).sort(
-		(left, right) =>
-			right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
-			right.attempt.number - left.attempt.number,
-	)[0];
+	return workerAttempts(run)
+		.filter((resolution) => resolution.attempt.workerId !== undefined)
+		.sort(
+			(left, right) =>
+				right.attempt.startedAt.localeCompare(left.attempt.startedAt) ||
+				right.attempt.number - left.attempt.number,
+		)[0];
 }
 
 function isFollowableWorkerAttempt(resolution: RunAttemptResolution): boolean {

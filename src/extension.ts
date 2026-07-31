@@ -60,9 +60,18 @@ import {
 	migrateLegacyOrchestratorStorage,
 	STORAGE_DIRECTORY_NAME,
 } from "./storage/storage-migration.js";
+import {
+	FileWorkflowStateStore,
+	WORKFLOW_RUNS_DIRECTORY_NAME,
+} from "./storage/workflow-state-store.js";
 import { LocalFinalValidator } from "./validation/final-validator.js";
 import { LocalTaskValidator } from "./validation/task-validator.js";
 import { OfficialServerBackend } from "./workers/server-backend.js";
+import {
+	EngineChangeRunner,
+	type EngineLaunchOptions,
+	hasLegacyExecutionState,
+} from "./workflows/change-run.js";
 import {
 	buildInvestigateWorkflowPlan,
 	INVESTIGATE_REPORT_OUTPUT,
@@ -224,30 +233,67 @@ async function createRuntime(git: GitCli, repository: RepositoryInfo) {
 	const securityPolicy = readSecurityPolicy();
 	const validationTimeoutMs = configuredValidationTimeoutMs();
 	const finalValidationTimeoutMs = configuredFinalValidationTimeoutMs();
+	const validator = new LocalTaskValidator(git, {
+		...(validationTimeoutMs === undefined
+			? {}
+			: { commandTimeoutMs: validationTimeoutMs }),
+	});
+	const finalValidator = new LocalFinalValidator(git, {
+		...(finalValidationTimeoutMs === undefined
+			? {}
+			: { commandTimeoutMs: finalValidationTimeoutMs }),
+	});
+	const worktrees = new GitWorktreeManager(
+		git,
+		worktreeRoots(repository.root).root,
+		worktreeRoots(repository.root).legacyRoot,
+	);
+	const artifacts = new ArtifactStore(
+		join(repository.commonDirectory, STORAGE_DIRECTORY_NAME, "artifacts"),
+	);
+	const workflowStates = new FileWorkflowStateStore(
+		join(
+			repository.commonDirectory,
+			STORAGE_DIRECTORY_NAME,
+			WORKFLOW_RUNS_DIRECTORY_NAME,
+		),
+	);
+	// Live change runs execute on the engine; the legacy orchestrator keeps the
+	// run store surface (creation, plan revisions, retry, prune) and still runs
+	// the runs that started under it before the engine took over.
+	const engine = new EngineChangeRunner({
+		store,
+		workflowStates,
+		artifacts,
+		workers,
+		git,
+		worktrees,
+		validator,
+		finalValidator,
+		securityPolicy,
+		attemptLogs,
+		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
+	});
 	const orchestrator = new Orchestrator({
 		store,
 		workers,
 		git,
-		validator: new LocalTaskValidator(git, {
-			...(validationTimeoutMs === undefined
-				? {}
-				: { commandTimeoutMs: validationTimeoutMs }),
-		}),
-		finalValidator: new LocalFinalValidator(git, {
-			...(finalValidationTimeoutMs === undefined
-				? {}
-				: { commandTimeoutMs: finalValidationTimeoutMs }),
-		}),
-		worktrees: new GitWorktreeManager(
-			git,
-			worktreeRoots(repository.root).root,
-			worktreeRoots(repository.root).legacyRoot,
-		),
+		validator,
+		finalValidator,
+		worktrees,
 		attemptLogs,
 		securityPolicy,
 		...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
 	});
-	return { attemptLogs, orchestrator, securityPolicy, store, workers };
+	return {
+		artifacts,
+		attemptLogs,
+		engine,
+		orchestrator,
+		securityPolicy,
+		store,
+		workers,
+	};
 }
 
 async function readRequestFile(
@@ -697,11 +743,11 @@ async function reviewAndLaunchRun(
 			);
 		}
 		ctx.ui.setStatus("pi-orchestrator", "launching workers");
-		const result = await runtime.orchestrator.approveAndLaunch(
+		const result = await runtime.engine.approveAndLaunch(
 			run,
 			freshRepository,
 			selectedWorkerModel(ctx),
-			lifecycleUi(ctx),
+			engineLifecycleUi(ctx),
 		);
 		showLaunch(ctx, result, runtime.store);
 		return;
@@ -791,6 +837,27 @@ function reviewStateSummary(run: OrchestrationRun): string {
 	return `Review round ${round?.number ?? 0}: ${succeeded}/5 reports received, ${repairRequired} repair-required, ${unresolved} unresolved, ${deferred} deferred`;
 }
 
+/**
+ * The same live status and widget the legacy lifecycle shows, driven by engine
+ * step progress instead of task attempts.
+ */
+function engineLifecycleUi(ctx: ExtensionCommandContext): EngineLaunchOptions {
+	const ui = lifecycleUi(ctx);
+	return {
+		onProgress: (progress) => {
+			ui.onProgress?.({
+				runId: progress.runId,
+				kind: progress.kind === "implementation" ? "task" : progress.kind,
+				taskId: progress.stepId,
+				attemptId: progress.attemptId,
+				workerId: progress.workerId,
+				event: progress.event,
+			});
+		},
+		...(ui.onRunUpdated ? { onRunUpdated: ui.onRunUpdated } : {}),
+	};
+}
+
 function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 	return {
 		onProgress: (progress) => {
@@ -820,7 +887,7 @@ function lifecycleUi(ctx: ExtensionCommandContext): LaunchOptions {
 
 function showCompletion(
 	ctx: ExtensionCommandContext,
-	_result: LaunchResult,
+	_result: LaunchDisplay,
 	run: OrchestrationRun,
 	store: RunStore,
 ): void {
@@ -942,13 +1009,18 @@ function showCompletion(
 	);
 }
 
+/** What a launched or resumed run shows, from either execution path. */
+type LaunchDisplay = Omit<LaunchResult, "launches"> &
+	Partial<Pick<LaunchResult, "launches">>;
+
 function showLaunch(
 	ctx: ExtensionCommandContext,
-	result: LaunchResult,
+	result: LaunchDisplay,
 	store: RunStore,
 ): void {
 	const key = runUiKey(result.run.id);
-	const launchLines = result.launches.map(
+	const launches = result.launches ?? [];
+	const launchLines = launches.map(
 		({ task, attempt }) =>
 			`${task.id}: ${attempt.workerId ?? "starting"} in ${attempt.worktreePath}`,
 	);
@@ -965,9 +1037,9 @@ function showLaunch(
 		`State file: ${store.directory}`,
 	]);
 	ctx.ui.notify(
-		result.launches.length > 0
-			? `Launched ${result.launches.length} implementation worker(s) for run ${result.run.id}`
-			: `Resuming ${result.run.state} lifecycle for run ${result.run.id}`,
+		launches.length > 0
+			? `Launched ${launches.length} implementation worker(s) for run ${result.run.id}`
+			: `Executing run ${result.run.id}; progress appears in the run widget`,
 		"info",
 	);
 	void result.completion.then(
@@ -1163,12 +1235,19 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 						return;
 					}
 				}
-				const result = await runtime.orchestrator.retryAndLaunch(
-					run.id,
-					repository,
-					selectedWorkerModel(ctx),
-					lifecycleUi(ctx),
-				);
+				const result = (await runtime.engine.hasWorkflowState(run.id))
+					? await runtime.engine.retry(
+							run,
+							repository,
+							selectedWorkerModel(ctx),
+							engineLifecycleUi(ctx),
+						)
+					: await runtime.orchestrator.retryAndLaunch(
+							run.id,
+							repository,
+							selectedWorkerModel(ctx),
+							lifecycleUi(ctx),
+						);
 				showLaunch(ctx, result, runtime.store);
 			} catch (error) {
 				ctx.ui.setStatus("pi-orchestrator", "retry failed");
@@ -1494,7 +1573,8 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 			try {
 				const git = new GitCli();
 				const repository = await git.inspect(ctx.cwd);
-				const { orchestrator, store } = await createRuntime(git, repository);
+				const runtime = await createRuntime(git, repository);
+				const { orchestrator, store } = runtime;
 				const stored = await store.load(runId);
 				assertRunRepository(stored, repository);
 				if (
@@ -1509,7 +1589,9 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("Cancellation declined", "info");
 					return;
 				}
-				const cancelled = await orchestrator.cancelRun(stored);
+				const cancelled = (await runtime.engine.hasWorkflowState(runId))
+					? await runtime.engine.cancel(stored, repository)
+					: await orchestrator.cancelRun(stored);
 				const key = runUiKey(runId);
 				ctx.ui.setStatus("pi-orchestrator", undefined);
 				ctx.ui.setStatus(key, `run ${runId}: ${cancelled.state}`);
@@ -1563,6 +1645,23 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 						);
 					}
 					await reviewAndLaunchRun(ctx, git, repository, runtime, stored);
+					return;
+				}
+				// A run that started on the engine resumes there; one that already
+				// executed under the legacy orchestrator stays with it.
+				const onEngine =
+					(await runtime.engine.hasWorkflowState(runId)) ||
+					!hasLegacyExecutionState(stored);
+				if (onEngine) {
+					assertRunBase(stored, repository);
+					ctx.ui.setStatus("pi-orchestrator", "recovering run");
+					const resumed = await runtime.engine.resume(
+						stored,
+						repository,
+						selectedWorkerModel(ctx),
+						engineLifecycleUi(ctx),
+					);
+					showLaunch(ctx, resumed, store);
 					return;
 				}
 				const recovered = await orchestrator.recoverRun(runId);

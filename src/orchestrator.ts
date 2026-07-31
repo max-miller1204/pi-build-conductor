@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { topologicalTaskIds } from "./domain/dag.js";
+import { pathIsAllowed } from "./domain/paths.js";
 import {
 	approveRun,
 	createOrchestrationRun,
@@ -306,12 +307,6 @@ function updateRepairAttempt(
 			attempt.id === attemptId ? { ...attempt, ...update } : attempt,
 		),
 	};
-}
-
-function pathIsAllowed(path: string, allowedPaths: string[]): boolean {
-	return allowedPaths.some((allowed) =>
-		allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
-	);
 }
 
 function repairTaskDefinition(

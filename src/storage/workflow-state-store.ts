@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { ARTIFACT_KINDS } from "../domain/artifacts.js";
 import { isRecord } from "../domain/dag.js";
@@ -28,7 +28,11 @@ import {
 	WORKSPACE_REQUIREMENTS,
 } from "../engine/workspaces.js";
 import { assertCapabilityProfiles } from "../security/capabilities.js";
-import { acquireStorageLock, writeFileAtomic } from "./file-storage.js";
+import {
+	acquireStorageLock,
+	validateStoredEvidence,
+	writeFileAtomic,
+} from "./file-storage.js";
 
 /**
  * The stored engine run schema. It is versioned independently of the legacy
@@ -327,7 +331,12 @@ function validateStoredAttempts(
 		for (const field of ["id", "stepId", "baseCommit", "startedAt"] as const) {
 			assertString(attempt[field], `${path}.${field}`);
 		}
-		for (const field of ["branch", "finishedAt", "commit"] as const) {
+		for (const field of [
+			"branch",
+			"finishedAt",
+			"commit",
+			"workerId",
+		] as const) {
 			assertOptionalString(attempt[field], `${path}.${field}`);
 		}
 		for (const field of [
@@ -379,6 +388,14 @@ function validateStoredAttempts(
 		}
 		if (attempt.artifactIds !== undefined) {
 			assertStringArray(attempt.artifactIds, `${path}.artifactIds`);
+		}
+		if (attempt.evidence !== undefined) {
+			validateStoredEvidence(attempt.evidence, `${path}.evidence`);
+			if (attempt.commit === undefined) {
+				throw new Error(
+					`${path}.evidence records checks for a commit this attempt never made`,
+				);
+			}
 		}
 		if (attempt.state === "succeeded") {
 			assertString(attempt.finishedAt, `${path}.finishedAt`);
@@ -645,6 +662,23 @@ export class FileWorkflowStateStore implements WorkflowStateStore {
 			});
 			return structuredClone(run);
 		});
+	}
+
+	/**
+	 * Whether a snapshot exists for this run. An unreadable snapshot still
+	 * exists: a corrupt engine run must never look like a run that never
+	 * started on the engine.
+	 */
+	async has(runId: string): Promise<boolean> {
+		try {
+			await stat(join(this.directory, this.fileNameFor(runId)));
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				return false;
+			}
+			throw error;
+		}
 	}
 
 	async load(runId: string): Promise<WorkflowRunState> {

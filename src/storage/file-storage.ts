@@ -67,3 +67,93 @@ export async function writeFileAtomic(
 		await rm(temporary, { force: true });
 	}
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertString(value: unknown, path: string): asserts value is string {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`${path} must be a non-empty string`);
+	}
+}
+
+/**
+ * Validates one stored record of the focused checks behind a commit. Both run
+ * stores persist the same evidence, so they validate it the same way.
+ */
+export function validateStoredEvidence(value: unknown, path: string): void {
+	if (!isRecord(value)) {
+		throw new Error(`${path} must be an object`);
+	}
+	assertString(value.startedAt, `${path}.startedAt`);
+	assertString(value.finishedAt, `${path}.finishedAt`);
+	if (typeof value.passed !== "boolean") {
+		throw new Error(`${path}.passed must be a boolean`);
+	}
+	if (!Array.isArray(value.changedFiles)) {
+		throw new Error(`${path}.changedFiles must be an array`);
+	}
+	for (const [index, file] of value.changedFiles.entries()) {
+		if (!isRecord(file)) {
+			throw new Error(`${path}.changedFiles[${index}] must be an object`);
+		}
+		assertString(file.path, `${path}.changedFiles[${index}].path`);
+		assertString(file.status, `${path}.changedFiles[${index}].status`);
+		if (file.previousPath !== undefined) {
+			assertString(
+				file.previousPath,
+				`${path}.changedFiles[${index}].previousPath`,
+			);
+		}
+	}
+	if (typeof value.diffHash !== "string") {
+		throw new Error(`${path}.diffHash must be a string`);
+	}
+	if (!Array.isArray(value.checks)) {
+		throw new Error(`${path}.checks must be an array`);
+	}
+	for (const [index, check] of value.checks.entries()) {
+		const checkPath = `${path}.checks[${index}]`;
+		if (!isRecord(check)) {
+			throw new Error(`${checkPath} must be an object`);
+		}
+		for (const field of [
+			"command",
+			"startedAt",
+			"finishedAt",
+			"stdoutTail",
+			"stderrTail",
+		] as const) {
+			if (typeof check[field] !== "string") {
+				throw new Error(`${checkPath}.${field} must be a string`);
+			}
+		}
+		if (
+			!Array.isArray(check.args) ||
+			check.args.some((arg) => typeof arg !== "string")
+		) {
+			throw new Error(`${checkPath}.args must be an array of strings`);
+		}
+		if (check.exitCode !== null && !Number.isInteger(check.exitCode)) {
+			throw new Error(`${checkPath}.exitCode must be an integer or null`);
+		}
+		if (typeof check.passed !== "boolean") {
+			throw new Error(`${checkPath}.passed must be a boolean`);
+		}
+		if (check.executionBoundary !== undefined) {
+			if (!isRecord(check.executionBoundary)) {
+				throw new Error(`${checkPath}.executionBoundary must be an object`);
+			}
+			const boundary = check.executionBoundary;
+			if (
+				!["none", "nono"].includes(String(boundary.sandbox)) ||
+				!["host", "blocked"].includes(String(boundary.network)) ||
+				boundary.environment !== "temporary-home-reduced" ||
+				(boundary.sandbox === "nono") !== (boundary.network === "blocked")
+			) {
+				throw new Error(`${checkPath}.executionBoundary is invalid`);
+			}
+		}
+	}
+}
