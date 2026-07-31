@@ -11,6 +11,7 @@ import { CATEGORY_GUIDANCE } from "../../review/prompts.js";
 import {
 	materializeReviewFindings,
 	parseReviewReport,
+	reviewFindingId,
 	REVIEW_REPORT_END,
 	REVIEW_REPORT_START,
 	REVIEW_REPORT_VERSION,
@@ -254,10 +255,17 @@ export class ReviewStepHandler implements StepHandler {
 			baseCommit,
 		);
 		if (adopted) {
+			const payload = {
+				...adopted,
+				findings: adopted.findings.map((finding, index) => ({
+					...finding,
+					id: reviewFindingId(round, category, index),
+				})),
+			};
 			return {
 				status: "succeeded",
 				summary: `Adopted the ${category} review of unchanged commit ${baseCommit}`,
-				artifacts: [reviewFindingsArtifact(output, category, adopted)],
+				artifacts: [reviewFindingsArtifact(output, category, payload)],
 			};
 		}
 		const result = await this.options.worker.run({

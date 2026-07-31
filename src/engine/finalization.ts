@@ -112,20 +112,37 @@ async function reviewOutcomes(
 	artifacts: StepArtifactReader | undefined,
 ): Promise<ReviewOutcomes> {
 	const staleCategories = new Set<ReviewCategory>();
+	const reviewSteps = topologicalStepIds(state.plan).flatMap((stepId) => {
+		const record = state.steps[stepId];
+		return record && stepProfileName(record.definition) === "review"
+			? [{ stepId, outputs: record.definition.outputs ?? [] }]
+			: [];
+	});
 	// The newest review of the final head per category is that category's
 	// evidence; an earlier review of the same commit adds no new information.
 	const latest = new Map<ReviewCategory, ReviewFindingsPayload>();
-	if (!artifacts) {
+	if (reviewSteps.length === 0) {
 		return { summaries: [], risks: [] };
 	}
-	for (const stepId of topologicalStepIds(state.plan)) {
-		const record = state.steps[stepId];
-		if (!record || stepProfileName(record.definition) !== "review") {
+	if (!artifacts) {
+		return {
+			summaries: [],
+			risks: [],
+			gap: `Review evidence is unavailable for ${reviewSteps
+				.map(({ stepId }) => stepId)
+				.join(", ")}`,
+		};
+	}
+	const unavailable: string[] = [];
+	for (const { stepId, outputs } of reviewSteps) {
+		if (outputs.length === 0) {
+			unavailable.push(stepId);
 			continue;
 		}
-		for (const output of record.definition.outputs ?? []) {
+		for (const output of outputs) {
 			const artifact = await artifacts.latest(state.id, stepId, output);
 			if (!artifact) {
+				unavailable.push(`${stepId}.${output}`);
 				continue;
 			}
 			const payload = JSON.parse(artifact.payload) as ReviewFindingsPayload;
@@ -135,6 +152,13 @@ async function reviewOutcomes(
 				staleCategories.add(payload.category);
 			}
 		}
+	}
+	if (unavailable.length > 0) {
+		return {
+			summaries: [],
+			risks: [],
+			gap: `Review evidence is unavailable for ${unavailable.join(", ")}`,
+		};
 	}
 	const summaries: FinalReviewSummary[] = [];
 	const risks: ReviewFinding[] = [];

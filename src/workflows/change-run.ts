@@ -181,6 +181,15 @@ export class EngineChangeRunner {
 		model?: WorkerModelSelection,
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
+		if (
+			executingEngines.has(
+				executionKey(this.dependencies.workflowStates.directory, run.id),
+			)
+		) {
+			throw new Error(
+				`Cannot resume run ${run.id} while it has active lifecycle work`,
+			);
+		}
 		if (!(await this.hasWorkflowState(run.id))) {
 			// The run was approved but its snapshot never reached disk. Nothing
 			// has executed, so the workflow simply starts from the approved plan.
@@ -229,6 +238,7 @@ export class EngineChangeRunner {
 		options: EngineLaunchOptions = {},
 	): Promise<EngineLaunchResult> {
 		const reset: string[] = [];
+		let retryFinalization = false;
 		const state = await this.dependencies.workflowStates.transaction(
 			run.id,
 			(current) => {
@@ -255,6 +265,10 @@ export class EngineChangeRunner {
 					};
 				}
 				if (reset.length === 0) {
+					retryFinalization =
+						current.state === "completed" &&
+						run.state === "failed" &&
+						run.finalValidationAttempts.at(-1)?.state === "failed";
 					return current;
 				}
 				const { error: _settled, ...rest } = next;
@@ -277,6 +291,13 @@ export class EngineChangeRunner {
 			},
 		);
 		if (reset.length === 0) {
+			if (retryFinalization) {
+				const projected = await this.project(run.id, state);
+				return {
+					run: projected,
+					completion: this.settle(projected, state, repository, options),
+				};
+			}
 			throw new Error(`Run ${run.id} has no failed steps to retry`);
 		}
 		return this.launch(

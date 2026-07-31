@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
-import { REVIEW_CATEGORIES } from "../src/domain/types.js";
+import {
+	type OrchestrationRun,
+	REVIEW_CATEGORIES,
+	type ReviewSeverity,
+	type TaskPlan,
+} from "../src/domain/types.js";
 import { GitCli } from "../src/git/git.js";
 import { GitWorktreeManager } from "../src/git/worktrees.js";
 import { Orchestrator } from "../src/orchestrator.js";
@@ -13,7 +17,10 @@ import { readSecurityPolicy } from "../src/security/policy.js";
 import { ArtifactStore } from "../src/storage/artifact-store.js";
 import { RunStore } from "../src/storage/run-store.js";
 import { FileWorkflowStateStore } from "../src/storage/workflow-state-store.js";
-import { LocalFinalValidator } from "../src/validation/final-validator.js";
+import {
+	type FinalValidator,
+	LocalFinalValidator,
+} from "../src/validation/final-validator.js";
 import { LocalTaskValidator } from "../src/validation/task-validator.js";
 import {
 	EngineChangeRunner,
@@ -77,16 +84,43 @@ function taskPlan(): TaskPlan {
 	};
 }
 
-async function createHarness(findingPath?: string) {
+async function createHarness(
+	findingPath?: string,
+	findingSeverity: ReviewSeverity = "high",
+	failFinalValidationOnce = false,
+) {
 	const { parent, repositoryRoot } = await createRepository();
 	const git = new GitCli();
 	const repository = await git.inspect(repositoryRoot);
 	const workers = new ChangeRunWorkers({
 		path: findingPath ?? "src/review-fix.txt",
+		severity: findingSeverity,
 	});
 	const store = new RunStore(join(parent, "runs"));
 	const worktrees = new GitWorktreeManager(git, join(parent, "worktrees"));
 	const securityPolicy = readSecurityPolicy({});
+	const localFinalValidator = new LocalFinalValidator(git);
+	let finalValidationCalls = 0;
+	const finalValidator: FinalValidator = failFinalValidationOnce
+		? {
+				validate(input) {
+					finalValidationCalls += 1;
+					return localFinalValidator.validate(
+						finalValidationCalls === 1
+							? {
+									...input,
+									commands: [
+										{
+											command: process.execPath,
+											args: ["-e", "process.exit(1)"],
+										},
+									],
+								}
+							: input,
+					);
+				},
+			}
+		: localFinalValidator;
 	const dependencies = {
 		store,
 		workflowStates: new FileWorkflowStateStore(join(parent, "workflow-runs")),
@@ -95,7 +129,7 @@ async function createHarness(findingPath?: string) {
 		git,
 		worktrees,
 		validator: new LocalTaskValidator(git),
-		finalValidator: new LocalFinalValidator(git),
+		finalValidator,
 		securityPolicy,
 	};
 	const created = await new Orchestrator({
@@ -332,6 +366,37 @@ describe("live /orchestrate change runs on the engine", () => {
 		).toBe(true);
 	}, 120_000);
 
+	it("refuses to recover a run that is still executing in this process", async () => {
+		const harness = await createHarness();
+		let workerStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			workerStarted = resolve;
+		});
+		let releaseWorker = () => {};
+		const held = new Promise<void>((resolve) => {
+			releaseWorker = resolve;
+		});
+		harness.workers.onChangeWorker = async () => {
+			workerStarted();
+			await held;
+		};
+
+		const launch = await harness.runner.approveAndLaunch(
+			harness.run,
+			harness.repository,
+		);
+		await started;
+		await expect(
+			harness.runner.resume(
+				await harness.store.load(harness.run.id),
+				harness.repository,
+			),
+		).rejects.toThrow(/active lifecycle work/);
+
+		releaseWorker();
+		expect((await launch.completion).state).toBe("completed");
+	}, 120_000);
+
 	it("retries the failed work of a settled run without losing its history", async () => {
 		const harness = await createHarness();
 		harness.workers.failNextChange = true;
@@ -358,6 +423,57 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(completed.mergeReadyEvidence?.integrationHead).toBe(
 			completed.integrationHead,
 		);
+	}, 120_000);
+
+	it("retries final validation after the workflow itself completed", async () => {
+		const harness = await createHarness(undefined, "high", true);
+
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		expect(failed.state).toBe("failed");
+		expect(failed.finalValidationAttempts).toEqual([
+			expect.objectContaining({ number: 1, state: "failed" }),
+		]);
+
+		const completed = await (
+			await harness.runner.retry(failed, harness.repository)
+		).completion;
+
+		expect(completed.state).toBe("completed");
+		expect(
+			completed.finalValidationAttempts.map((attempt) => [
+				attempt.number,
+				attempt.state,
+			]),
+		).toEqual([
+			[1, "failed"],
+			[2, "succeeded"],
+		]);
+		expect(completed.attempts).toHaveLength(1);
+		expect(
+			harness.workers.prompts.filter((prompt) => prompt.includes("reviewer")),
+		).toHaveLength(REVIEW_CATEGORIES.length * 2);
+	}, 120_000);
+
+	it("re-keys deferred findings adopted by later review rounds", async () => {
+		const harness = await createHarness("src/follow-up.txt", "low");
+
+		const completed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		const deferred = findingsOf(completed).filter(
+			(finding) => finding.title === "Missing review fix",
+		);
+
+		expect(completed.state).toBe("completed");
+		expect(deferred.map((finding) => finding.id)).toEqual([
+			"review-1-security-001",
+			"review-2-security-001",
+			"review-3-security-001",
+		]);
+		expect(deferred.every((finding) => finding.status === "deferred")).toBe(true);
+		expect(completed.repairAttempts).toEqual([]);
 	}, 120_000);
 
 	it("leaves a run that executed under the legacy orchestrator alone", async () => {

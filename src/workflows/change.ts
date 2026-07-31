@@ -120,7 +120,9 @@ export function buildChangeWorkflowPlan(taskPlan: TaskPlan): WorkflowPlan {
 		for (const stepId of reviewRoundStepIds(round)) {
 			reserved.add(stepId);
 		}
-		reserved.add(repairStepId(round));
+		if (round < rounds) {
+			reserved.add(repairStepId(round));
+		}
 	}
 	for (const step of translated.steps) {
 		if (reserved.has(step.id)) {

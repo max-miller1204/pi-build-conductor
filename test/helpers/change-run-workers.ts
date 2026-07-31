@@ -1,6 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ReviewCategory } from "../../src/domain/types.js";
+import type {
+	ReviewCategory,
+	ReviewSeverity,
+} from "../../src/domain/types.js";
 import { reviewStepId } from "../../src/engine/steps/review.js";
 import {
 	REVIEW_REPORT_END,
@@ -22,6 +25,8 @@ export interface ScriptedFinding {
 	stepId?: string;
 	/** The repository path the finding names. */
 	path: string;
+	/** The finding severity, defaulting to one that requires repair. */
+	severity?: ReviewSeverity;
 }
 
 /**
@@ -106,7 +111,7 @@ export class ChangeRunWorkers implements WorkerBackend {
 			this.finding && stepId === reporting
 				? [
 						{
-							severity: "high",
+							severity: this.finding.severity ?? "high",
 							confidence: "high",
 							title: "Missing review fix",
 							description: "The implementation needs the required review fix.",

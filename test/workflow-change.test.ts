@@ -338,6 +338,45 @@ describe("strict change workflow end to end", () => {
 			"add-api",
 			"add-docs",
 		]);
+
+		const noReader = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(noReader.mergeReady).toBeUndefined();
+		expect(noReader.evidenceGap).toMatch(/Review evidence is unavailable/);
+
+		const missingArtifact = await finalizeWorkflowRun(
+			{
+				finalValidator: new LocalFinalValidator(git),
+				worktrees: new GitWorktreeManager(git, harness.worktreeRoot),
+				git,
+				securityPolicy,
+				artifacts: {
+					latest(runId, stepId, output) {
+						return stepId === reviewStepId(3, "security")
+							? Promise.resolve(undefined)
+							: harness.artifacts.latest(runId, stepId, output);
+					},
+				},
+			},
+			{
+				state: settled,
+				repository: await git.inspect(harness.repositoryRoot),
+			},
+		);
+		expect(missingArtifact.mergeReady).toBeUndefined();
+		expect(missingArtifact.evidenceGap).toContain(
+			`${reviewStepId(3, "security")}.findings`,
+		);
 	});
 
 	it("withholds merge-ready evidence when an important finding survives the last round", async () => {
@@ -499,5 +538,15 @@ describe("buildChangeWorkflowPlan", () => {
 		}
 		first.id = repairStepId(2);
 		expect(() => buildChangeWorkflowPlan(taskPlan)).toThrow(/collides/);
+	});
+
+	it("allows the repair id for the final review-only round", () => {
+		const taskPlan = taskPlanFixture();
+		const first = taskPlan.tasks[0];
+		if (!first) {
+			throw new Error("fixture must have tasks");
+		}
+		first.id = repairStepId(REVIEW_ROUNDS);
+		expect(() => buildChangeWorkflowPlan(taskPlan)).not.toThrow();
 	});
 });
