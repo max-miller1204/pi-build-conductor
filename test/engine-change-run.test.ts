@@ -690,6 +690,47 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect((await harness.store.load(harness.run.id)).state).toBe("cancelled");
 	}, 120_000);
 
+	it("preserves retryable workflow failure when cancellation arrives late", async () => {
+		const harness = await createHarness();
+		harness.workers.failNextChange = true;
+		const failed = await (
+			await harness.runner.approveAndLaunch(harness.run, harness.repository)
+		).completion;
+		expect(failed.state).toBe("failed");
+		const snapshot = await harness.dependencies.workflowStates.transaction(
+			harness.run.id,
+			(state) => ({
+				...state,
+				error: "Implementation failed before cancellation",
+			}),
+		);
+		expect(snapshot).toMatchObject({
+			state: "failed",
+			error: "Implementation failed before cancellation",
+		});
+		const running = await harness.store.transaction(
+			harness.run.id,
+			(stored) => {
+				const { error: _error, ...retained } = stored;
+				return { ...retained, state: "running" };
+			},
+		);
+
+		const result = await harness.runner.cancel(running, harness.repository);
+
+		expect(result).toMatchObject({
+			state: "failed",
+			error: snapshot.error,
+		});
+		const view = await harness.view();
+		expect(retryableRunWork(view)).toMatchObject({
+			retryable: true,
+			phase: "steps",
+			failedUnitIds: ["implementation"],
+		});
+		expect((await harness.store.load(harness.run.id)).state).toBe("failed");
+	}, 120_000);
+
 	it("records a review evidence gap without a validation attempt", async () => {
 		const harness = await createHarness();
 		harness.dependencies.artifacts.missingStepId = "review-3-security";

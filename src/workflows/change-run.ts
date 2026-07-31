@@ -521,8 +521,21 @@ export class EngineChangeRunner {
 		executing?.controller.abort(new Error("The run was cancelled"));
 		const engine =
 			executing?.engine ?? this.engineFor(run, repository, undefined, {});
-		await engine.cancel(run.id);
+		const state = await engine.cancel(run.id);
 		await this.drainViewUpdates();
+		if (state.state === "failed") {
+			const finishedAt = this.now();
+			return this.dependencies.store.transaction(run.id, (stored) =>
+				["completed", "failed", "cancelled"].includes(stored.state)
+					? stored
+					: {
+							...stored,
+							state: "failed",
+							...(state.error ? { error: state.error } : {}),
+							updatedAt: finishedAt,
+						},
+			);
+		}
 		// The engine settles its own steps; the stored run stops claiming the
 		// lifecycle is open, whichever phase the cancellation interrupted.
 		return this.cancelStoredRun(run.id);
