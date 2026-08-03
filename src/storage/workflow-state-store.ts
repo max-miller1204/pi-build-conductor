@@ -27,6 +27,11 @@ import {
 	stepWorkspaceRequirement,
 	WORKSPACE_REQUIREMENTS,
 } from "../engine/workspaces.js";
+import {
+	assertAuthorityTransition,
+	assertStoredAuthorityConsistency,
+	validateStoredAuthority,
+} from "../security/authority.js";
 import { assertCapabilityProfiles } from "../security/capabilities.js";
 import {
 	acquireStorageLock,
@@ -157,6 +162,7 @@ const EVENT_SHAPES: Readonly<Record<WorkflowEvent["kind"], EventShape>> = {
 	},
 	step_cancelled: { text: ["stepId"], optionalText: ["attemptId", "error"] },
 	step_blocked: { text: ["stepId"], textArrays: ["blockedBy"] },
+	step_admitted: { text: ["stepId", "proposedBy", "reason"] },
 	artifact_published: {
 		text: ["stepId", "attemptId", "artifactId", "output"],
 		integers: ["sizeBytes"],
@@ -558,6 +564,22 @@ export function validateStoredWorkflowRun(value: unknown): StoredWorkflowRun {
 	const plan = validateWorkflowPlan(run.plan);
 	const profiles: unknown = run.capabilityProfiles;
 	assertCapabilityProfiles(profiles, "run.capabilityProfiles");
+	if (run.authority !== undefined) {
+		const repositoryRoot = run.repositoryRoot;
+		assertString(repositoryRoot, "run.repositoryRoot");
+		// The envelope is the source this run's authority derives from, so a
+		// snapshot whose profiles or plan no longer match it would execute under
+		// authority the user never approved.
+		assertStoredAuthorityConsistency(
+			validateStoredAuthority(run.authority, "run.authority"),
+			{
+				repositoryRoot,
+				plan,
+				capabilityProfiles: profiles,
+				path: "run.authority",
+			},
+		);
+	}
 	if (
 		!Number.isSafeInteger(run.maxConcurrentWorkers) ||
 		(run.maxConcurrentWorkers as number) < 1 ||
@@ -703,6 +725,7 @@ export class FileWorkflowStateStore implements WorkflowStateStore {
 			if (JSON.stringify(next) === baseline) {
 				return stored.run;
 			}
+			assertAuthorityTransition(stored.run.authority, next.authority, false);
 			await this.writeAtomic({
 				schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
 				revision: stored.revision + 1,

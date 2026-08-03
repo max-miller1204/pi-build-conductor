@@ -1,11 +1,4 @@
-import {
-	mkdir,
-	mkdtemp,
-	readFile,
-	rm,
-	utimes,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +10,7 @@ import {
 } from "../src/domain/run.js";
 import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
 import { RunStore, validateStoredRun } from "../src/storage/run-store.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const directories: string[] = [];
 
@@ -57,11 +51,7 @@ function createRun(): OrchestrationRun {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("RunStore", () => {

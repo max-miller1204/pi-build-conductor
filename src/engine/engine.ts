@@ -7,6 +7,7 @@ import {
 import { type StepDefinition, stepRetryPolicy } from "../domain/steps.js";
 import type { RepositoryInfo } from "../git/git.js";
 import { stepCapabilityProfile } from "../security/capabilities.js";
+import { admitWorkflowSteps } from "./admission.js";
 import {
 	routeStepArtifacts,
 	StepArtifactRoutingError,
@@ -24,6 +25,7 @@ import type {
 	StepExecutionResult,
 	StepExecutor,
 } from "./executor.js";
+import type { StepAdmissionPort } from "./handlers.js";
 import type { StepIntegrator } from "./integration.js";
 import { classifyStepFailure } from "./retry.js";
 import {
@@ -181,6 +183,28 @@ export class WorkflowEngine {
 			: `${stepId}-${attemptNumber}-${randomUUID().slice(0, 8)}`;
 	}
 
+	/**
+	 * How one running step proposes further work.
+	 *
+	 * The engine picks admitted steps up on its next scheduling pass, so a
+	 * session grows the graph it is already executing rather than starting a
+	 * second run, and the frozen envelope decides what may enter it.
+	 */
+	private admissionFor(runId: string, stepId: string): StepAdmissionPort {
+		return {
+			admit: async (request) => {
+				const { state, admitted } = await admitWorkflowSteps(
+					this.dependencies.store,
+					runId,
+					{ ...request, proposedBy: stepId },
+					{ now: this.now },
+				);
+				this.notify(state);
+				return admitted;
+			},
+		};
+	}
+
 	private async dispatchLaunchableSteps(
 		runId: string,
 		active: Map<string, Promise<string>>,
@@ -311,6 +335,7 @@ export class WorkflowEngine {
 					prepared,
 					attempt: running,
 					execution,
+					admission: this.admissionFor(runId, stepId),
 					signal,
 				})
 				.catch(

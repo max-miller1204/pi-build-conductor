@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
 } from "../src/domain/step-context.js";
 import type { ChangeStepDefinition } from "../src/domain/steps.js";
 import { ArtifactStore } from "../src/storage/artifact-store.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const directories: string[] = [];
 
@@ -46,11 +47,7 @@ function dependentStep(
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("resolveStepInputs", () => {

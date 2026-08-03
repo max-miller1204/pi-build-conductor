@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
+import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
@@ -21,6 +22,11 @@ import {
 	type TaskState,
 	type WorkerUiMethod,
 } from "../domain/types.js";
+import {
+	assertAuthorityTransition,
+	assertStoredAuthorityConsistency,
+	validateStoredAuthority,
+} from "../security/authority.js";
 import {
 	assertRunSecurityPolicy,
 	legacySecurityPolicy,
@@ -211,7 +217,8 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 	) {
 		throw new Error(`Invalid run state: ${String(value.state)}`);
 	}
-	assertRunSecurityPolicy(value.securityPolicy);
+	const securityPolicy = value.securityPolicy;
+	assertRunSecurityPolicy(securityPolicy);
 	for (const field of [
 		"repositoryRoot",
 		"baseBranch",
@@ -232,6 +239,29 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 		throw new Error("run.integrationBranch must differ from run.baseBranch");
 	}
 	const plan = validateTaskPlan(value.plan);
+	if (value.authority !== undefined) {
+		const repositoryRoot = value.repositoryRoot;
+		assertString(repositoryRoot, "run.repositoryRoot");
+		const capabilityProfiles = securityPolicy.workers.capabilityProfiles;
+		if (!capabilityProfiles) {
+			throw new Error(
+				"run.authority requires a security policy that freezes capability profiles",
+			);
+		}
+		// The frozen envelope is the source this run's capability profiles and
+		// path locks derive from, so a stored run whose plan or profiles drifted
+		// away from it must not load and execute under unapproved authority.
+		assertStoredAuthorityConsistency(
+			validateStoredAuthority(value.authority, "run.authority"),
+			{
+				repositoryRoot,
+				plan: readWorkflowPlanDocument(plan),
+				capabilityProfiles,
+				securityPolicy,
+				path: "run.authority",
+			},
+		);
+	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||
 		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
@@ -1417,6 +1447,11 @@ function assertPlanHistoryTransition(
 	) {
 		throw new Error("Run security policy is immutable");
 	}
+	assertAuthorityTransition(
+		current.authority,
+		proposed.authority,
+		proposed.planRevision !== current.planRevision,
+	);
 	if (proposed.planRevisions.length < current.planRevisions.length) {
 		throw new Error("Plan revision history cannot be truncated");
 	}

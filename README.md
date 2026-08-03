@@ -92,6 +92,7 @@ Start Pi in a clean Git worktree with a model selected, then run:
 ```
 
 The orchestrator generates a plan unless `docs/health-check-request.md.plan.json` exists.
+Add `docs/health-check-request.md.envelope.json` to approve the run's authority before any plan exists; the run is then frozen under exactly that envelope.
 Review the final approval summary and confirm its authority envelope before approving.
 Repository mutation starts only after explicit approval.
 
@@ -110,7 +111,7 @@ Merge or cherry-pick the integration branch only after reviewing the result.
 2. It loads a plan sidecar or asks the selected Pi model to produce a dependency DAG.
 3. It validates the plan and stores the first immutable revision under the repository's Git common directory.
 4. The interactive editor can change tasks, dependencies, order, paths, commands, title, and worker limit.
-5. A final approval screen shows the exact plan revision and the authority envelope implied by that plan: its outcome, acceptance criteria, repository capabilities and mutable paths, forbidden actions and external effects, sandbox policy, validation expectations, and decisions reserved for the user.
+5. A final approval screen shows the exact plan revision and the authority envelope the run is frozen under: its outcome, acceptance criteria, repository capabilities and mutable paths, forbidden actions and external effects, sandbox policy, validation expectations, and decisions reserved for the user. An authored envelope is that source; without one, the authority the approved plan implies is read back into the same shape.
 6. After approval, the orchestrator creates a separate integration branch and dispatches ready tasks to isolated worktrees.
 7. It monitors worker events, answers blocked UI requests conservatively, enforces timeouts, and records bounded activity journals.
 8. It rejects unexpected Git state, out-of-scope changes, conflicts, worker commits, and checks that mutate worker output.
@@ -156,6 +157,65 @@ A run that executed under the legacy orchestrator is read from the stored run an
 Cancellation is idempotent.
 Pruning retains the integration branch, source-evidence branches, snapshots, journals, dirty worktrees, and any resource whose commit cannot be proven safe to remove.
 
+## Authority envelope sidecar
+
+Add `<request-file>.envelope.json` to approve the run's authority before its work is known.
+
+The envelope is then the source the run derives from, and it is frozen when the run is created.
+Its capabilities narrow every worker profile and tool allowlist, its approved paths bound every mutating step, its withheld paths are rejected against observed worker output even inside an approved subtree, and its required commands must appear in the plan's final validation.
+
+```json
+{
+  "version": 1,
+  "outcome": "Add health checks to the service",
+  "acceptanceCriteria": [
+    "The documented status payload is served",
+    "npm run check passes"
+  ],
+  "repositories": [
+    {
+      "root": "/home/you/service",
+      "mutation": {
+        "capabilities": ["read-repository", "mutate-repository", "execute-commands"],
+        "allowedPaths": ["src/", "test/", "docs/health.md"],
+        "forbiddenPaths": ["src/generated/"]
+      }
+    }
+  ],
+  "forbiddenActions": ["Never change the release workflow"],
+  "externalEffects": "forbidden",
+  "sandbox": { "workers": "worktree-only", "validation": "none" },
+  "validation": {
+    "required": [{ "command": "npm", "args": ["run", "check"] }],
+    "perChange": true
+  },
+  "escalation": {
+    "conditions": [
+      "add-repository",
+      "widen-mutation-authority",
+      "change-acceptance-criteria",
+      "skip-required-validation",
+      "external-effect"
+    ],
+    "reservedDecisions": ["Choosing the published endpoint path"]
+  }
+}
+```
+
+Every absent optional field resolves to the least authority it can express, and an unknown field is rejected rather than ignored, so a misspelled deny list fails loudly instead of silently widening authority.
+The reserved escalation conditions are a floor an envelope cannot declare its way below, and only one repository may be named until multi-repository parent orchestration lands.
+
+A plan that would mutate outside the approved paths, mutate a withheld path, declare a capability the envelope withholds, drop a required final validation command, omit per-change validation when the envelope requires it, or run in a repository the envelope does not name is refused when the run is created, and refused again for any later plan revision.
+An authored envelope and its digest stay fixed across revisions; a derived envelope is re-derived with an accepted revision, but a revision that would change the capability profiles frozen at run creation is refused.
+The approval summary shows the frozen envelope and its digest.
+
+Without this sidecar a run still freezes an envelope: the authority its approved plan already implies, read back and stated in the same shape.
+
+A run frozen under an envelope can also grow inside it.
+A running step may propose further steps, and they are admitted only when the frozen envelope already allows them, so a session decides what work is needed while the user keeps deciding what authority it holds.
+Growth is append-only and bounded: approved steps, their order, and the validation the run settles on never change, each admitted step is recorded on the run timeline with the step that proposed it and why, and a graph that grew is durable and recoverable exactly like one that was approved whole.
+A run with no frozen envelope cannot grow at all.
+
 ## Plan sidecar
 
 Add `<request-file>.plan.json` to provide a deterministic plan instead of generating one with the model.
@@ -193,7 +253,12 @@ The live `/orchestrate` path continues to accept task-plan sidecar schema versio
       "dependencies": ["health-route"],
       "acceptanceCriteria": ["The endpoint is documented"],
       "allowedPaths": ["docs/health.md"],
-      "validationCommands": []
+      "validationCommands": [
+        {
+          "command": "npm",
+          "args": ["run", "lint:docs"]
+        }
+      ]
     }
   ],
   "finalValidationCommands": [

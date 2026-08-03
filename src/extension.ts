@@ -58,6 +58,10 @@ import {
 	validatePlanningDocument,
 } from "./planning/planning-worker.js";
 import { discoverRepositoryProfile } from "./planning/repository-discovery.js";
+import {
+	envelopeSidecarPath,
+	readEnvelopeSidecar,
+} from "./security/authority.js";
 import { readSecurityPolicy, securityPolicyLines } from "./security/policy.js";
 import { ArtifactStore } from "./storage/artifact-store.js";
 import {
@@ -1334,6 +1338,9 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 				}
 				let plan = await loadSidecarPlan(requestPath);
 				const planSource = plan ? "sidecar" : "generated";
+				// The envelope is approved before the work is known, so it is read
+				// before planning and every later step derives its authority from it.
+				const envelope = await readEnvelopeSidecar(requestPath);
 				const runtime = await createRuntime(git, repository);
 				const reader = new GitRepositoryReader(repository.root);
 				const listing = await reader.listFiles(repository.head);
@@ -1394,9 +1401,16 @@ export default function piOrchestratorExtension(pi: ExtensionAPI) {
 					requestPath,
 					requestText,
 					plan,
+					...(envelope ? { envelope } : {}),
 					planSource,
 					maxConcurrentWorkers: configuredMaxConcurrentWorkers(),
 				});
+				if (envelope) {
+					ctx.ui.notify(
+						`Frozen the authority envelope from ${envelopeSidecarPath(requestPath)}. Every worker profile, path lock, and validation expectation derives from it.`,
+						"info",
+					);
+				}
 				if (planningEvidence.length > 0) {
 					ctx.ui.setWidget(
 						`${runUiKey(run.id)}:planning-evidence`,

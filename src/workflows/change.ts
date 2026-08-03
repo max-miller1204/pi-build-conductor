@@ -169,6 +169,8 @@ export interface ChangeWorkflowHandlerOptions {
 	validator: TaskValidator;
 	git: Pick<GitClient, "commitTaskWork" | "status">;
 	securityPolicy: RunSecurityPolicy;
+	/** Paths the run's approved envelope withholds from every change. */
+	withheldPaths?: readonly string[];
 	requestText?: string;
 }
 
@@ -185,6 +187,7 @@ export function changeWorkflowStepHandlers(
 		validator: options.validator,
 		git: options.git,
 		securityPolicy: options.securityPolicy,
+		...(options.withheldPaths ? { withheldPaths: options.withheldPaths } : {}),
 		...requestText,
 	};
 	return [

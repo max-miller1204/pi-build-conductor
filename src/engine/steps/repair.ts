@@ -15,6 +15,7 @@ import type {
 } from "../handlers.js";
 import { runValidatedChange, type ValidatedChangeOptions } from "./change.js";
 import { assertSupportedOutputs } from "./outputs.js";
+import { withheldPathLines } from "./prompt.js";
 import type { ReviewFindingsPayload } from "./review.js";
 
 /**
@@ -58,6 +59,7 @@ function buildRepairStepPrompt(
 	step: ChangeStepDefinition,
 	findings: ReviewFinding[],
 	securityPolicy: RunSecurityPolicy,
+	withheldPaths: readonly string[],
 	requestText: string | undefined,
 ): string {
 	const launchPolicy = stepWorkerLaunchPolicy(
@@ -73,7 +75,7 @@ Approved authority (frozen at run creation): ${describeCapabilityProfile(context
 Your Pi process and tools are not OS-sandboxed. Host filesystem, network, and credentials may be reachable, but they are outside your authority.
 Work only in the current Git worktree and current branch.
 Write only within these approved repository-relative paths:
-${step.allowedPaths.map((path) => `- ${path}`).join("\n")}
+${step.allowedPaths.map((path) => `- ${path}`).join("\n")}${withheldPathLines(withheldPaths)}
 Do not push, publish, deploy, mutate remote APIs or cloud resources, escalate privileges, or access credential stores.
 Do not create, switch, merge, delete, or modify branches or worktrees.
 Do not commit changes. The orchestrator owns validation, commits, and integration.
@@ -129,10 +131,16 @@ export class RepairStepHandler implements StepHandler {
 				retryable: false,
 			};
 		}
-		// A finding outside the approved paths cannot be repaired under this
-		// run's authority, and widening the repair scope is the user's decision.
+		// A finding outside the approved paths, or inside one the envelope
+		// withholds, cannot be repaired under this run's authority, and widening
+		// the repair scope is the user's decision.
+		const withheldPaths = this.options.withheldPaths ?? [];
 		const outOfScope = required.filter((finding) =>
-			finding.paths.some((path) => !pathIsAllowed(path, step.allowedPaths)),
+			finding.paths.some(
+				(path) =>
+					!pathIsAllowed(path, step.allowedPaths) ||
+					pathIsAllowed(path, withheldPaths),
+			),
 		);
 		if (outOfScope.length > 0) {
 			return {
@@ -169,6 +177,7 @@ export class RepairStepHandler implements StepHandler {
 				step,
 				required,
 				this.options.securityPolicy,
+				withheldPaths,
 				this.options.requestText,
 			),
 		});

@@ -111,6 +111,11 @@ function taskPlan(): TaskPlan {
 	};
 }
 
+/**
+ * A run whose plan is a generalized workflow plan and which froze no envelope,
+ * which is what the read-back path exists for: authority stated step by step
+ * rather than approved up front.
+ */
 function runWithWorkflowPlan(plan: WorkflowPlan): OrchestrationRun {
 	const run = createOrchestrationRun({
 		id: "run-envelope-workflow",
@@ -124,7 +129,8 @@ function runWithWorkflowPlan(plan: WorkflowPlan): OrchestrationRun {
 		maxConcurrentWorkers: 2,
 		now: "2026-08-03T00:00:00.000Z",
 	});
-	return { ...run, plan: plan as unknown as TaskPlan };
+	const { authority: _frozen, ...withoutAuthority } = run;
+	return { ...withoutAuthority, plan: plan as unknown as TaskPlan };
 }
 
 describe("approved authority envelope", () => {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -30,6 +30,7 @@ import type {
 } from "../src/workers/backend.js";
 import { EngineChangeRunner } from "../src/workflows/change-run.js";
 import { ChangeRunWorkers } from "./helpers/change-run-workers.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const mockedServer = vi.hoisted(() => ({
 	backend: undefined as WorkerBackend | undefined,
@@ -78,11 +79,7 @@ function showEvidence(label: string, body: string): void {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 function plan(): TaskPlan {

@@ -110,7 +110,10 @@ ${JSON.stringify({
 ${REVIEW_REPORT_END}`;
 }
 
-function handlersFor(workers: WorkerBackend) {
+function handlersFor(
+	workers: WorkerBackend,
+	withheldPaths: readonly string[] = [],
+) {
 	const git = new GitCli();
 	const securityPolicy = readSecurityPolicy({});
 	const worker = new StepWorkerRunner({
@@ -123,6 +126,7 @@ function handlersFor(workers: WorkerBackend) {
 		git,
 		securityPolicy,
 		validator: new LocalTaskValidator(git),
+		withheldPaths,
 	};
 	return [
 		new InvestigationStepHandler({ worker, git, securityPolicy }),
@@ -330,6 +334,68 @@ describe("review and repair step profiles", () => {
 			"step(api): api",
 			"Initial",
 		]);
+	});
+
+	it("refuses a repair whose findings only reach files the envelope withholds", async () => {
+		const workers = new ScriptedWorkers({
+			api: {
+				act: async (cwd) => {
+					await writeFileIn(
+						cwd,
+						join("src", "api", "index.ts"),
+						"export {};\n",
+					);
+				},
+			},
+		});
+		const plan = workflowPlanOf([
+			changeStep("api", [], ["src/api/"]),
+			investigationStep("review-1-security", ["api"], {
+				profile: "review",
+				outputs: ["findings"],
+			}),
+			changeStep("repair-1", ["review-1-security"], ["src/"], {
+				profile: "repair",
+				inputs: [{ stepId: "review-1-security", output: "findings" }],
+				outputs: ["evidence"],
+			}),
+		]);
+		const harness = await createWorkflowHarness(
+			plan,
+			handlersFor(workers, ["src/generated/"]),
+		);
+		const originalStart = workers.startPrompt.bind(workers);
+		workers.startPrompt = async (workerId: string, prompt: string) => {
+			if (prompt.includes("step review-1-security")) {
+				const baseCommit = /at commit ([0-9a-f]{40})/.exec(prompt)?.[1] ?? "";
+				return {
+					completion: Promise.resolve({
+						status: "succeeded" as const,
+						output: reviewReport("security", baseCommit, [
+							{
+								severity: "critical",
+								confidence: "high",
+								title: "Generated client is unsafe",
+								description: "The generated client needs a guard.",
+								paths: ["src/generated/client.ts"],
+								recommendation: "Regenerate the client with a guard.",
+							},
+						]),
+					}),
+				};
+			}
+			return originalStart(workerId, prompt);
+		};
+
+		const finished = await harness.engine.run(harness.initial.id);
+
+		expect(finished.state).toBe("failed");
+		expect(finished.steps["repair-1"]?.error).toContain(
+			"Important findings require changes outside approved paths",
+		);
+		expect(
+			workers.prompts.some((prompt) => prompt.includes("repair worker")),
+		).toBe(false);
 	});
 
 	it("fails a review that returns an unusable report", async () => {

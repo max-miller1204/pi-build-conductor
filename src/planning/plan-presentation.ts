@@ -152,6 +152,18 @@ export function renderStepAuthorityLines(
 	return [...lines, EXTERNAL_EFFECT_BOUNDARY];
 }
 
+/**
+ * How the envelope below reached this run. The user reads this before they
+ * approve, so an authority they authored must never read like one the
+ * orchestrator inferred from the plan it is showing them.
+ */
+function envelopeHeading(run: OrchestrationRun): string {
+	if (run.authority?.source === "authored") {
+		return `Authority envelope (approved before planning, digest ${run.authority.digest.slice(0, 12)}):`;
+	}
+	return "Authority envelope (read back from this plan):";
+}
+
 export function renderApprovalSummary(run: OrchestrationRun): string {
 	const plan = readWorkflowPlanDocument(run.plan);
 	const orderedStepIds = topologicalStepIds(plan);
@@ -203,11 +215,15 @@ export function renderApprovalSummary(run: OrchestrationRun): string {
 		`DAG layers: ${layerPreview}`,
 		`Worker limit: ${run.maxConcurrentWorkers} | Approved paths: ${pathCount} | Focused checks: ${focusedCommandCount}`,
 		`Integration branch: ${run.integrationBranch}`,
-		// The objective-level authority this approval grants. Today it is read
-		// back from the plan the user is approving; once the envelope is
-		// approved first, the step authority below derives from it instead.
-		"Authority envelope:",
-		...authorityEnvelopeLines(envelopeFromApprovedRun(run)),
+		// The objective-level authority this approval grants. An authored
+		// envelope was approved before the work was known and is the source the
+		// step authority below derives from; a derived one states the authority
+		// this plan already carries, and a run frozen before envelopes existed
+		// has it read back here.
+		envelopeHeading(run),
+		...authorityEnvelopeLines(
+			run.authority?.envelope ?? envelopeFromApprovedRun(run),
+		),
 		"Step authority:",
 		...stepAuthority,
 		"Final validation:",

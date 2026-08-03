@@ -4,6 +4,7 @@ import type {
 	RunCapabilityProfiles,
 	TaskValidationEvidence,
 } from "../domain/types.js";
+import type { FrozenAuthority } from "../security/authority.js";
 import type { WorkflowEvent } from "./events.js";
 import type { WorkspaceRequirement } from "./workspaces.js";
 
@@ -91,6 +92,12 @@ export interface WorkflowRunState {
 	integrationBranch: string;
 	integrationHead: string;
 	capabilityProfiles: RunCapabilityProfiles;
+	/**
+	 * The approved authority this run executes under. Present exactly when the
+	 * run that started it froze one, and the source its capability profiles and
+	 * path locks derive from.
+	 */
+	authority?: FrozenAuthority;
 	steps: Record<string, WorkflowStepRecord>;
 	attempts: WorkflowStepAttempt[];
 	/** The retained tail of the ordered run timeline. */
@@ -115,6 +122,7 @@ export interface CreateWorkflowRunStateInput {
 	integrationBranch: string;
 	integrationHead: string;
 	capabilityProfiles: RunCapabilityProfiles;
+	authority?: FrozenAuthority;
 	maxConcurrentWorkers: number;
 	createdAt?: string;
 }
@@ -147,6 +155,7 @@ export function createWorkflowRunState(
 		integrationBranch: input.integrationBranch,
 		integrationHead: input.integrationHead,
 		capabilityProfiles: input.capabilityProfiles,
+		...(input.authority ? { authority: input.authority } : {}),
 		steps,
 		attempts: [],
 		events: [],

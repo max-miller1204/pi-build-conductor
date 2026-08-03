@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import {
 	defaultServerSocketPath,
 	OfficialServerBackend,
 } from "../src/workers/server-backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const directories: string[] = [];
 const servers: Server[] = [];
@@ -20,11 +21,7 @@ afterEach(async () => {
 				}),
 		),
 	);
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 interface UiRequestFrame {

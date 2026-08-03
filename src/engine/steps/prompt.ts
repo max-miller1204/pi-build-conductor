@@ -20,8 +20,23 @@ export interface StepWorkerPromptInput {
 	securityPolicy: RunSecurityPolicy;
 	/** The allowlist the server will enforce, when one applies. */
 	launchPolicy?: WorkerLaunchPolicy;
+	/** Paths the approved envelope withholds inside the approved subtree. */
+	withheldPaths?: readonly string[];
 	/** The user's original request, when the workflow carries one. */
 	requestText?: string;
+}
+
+/**
+ * The withheld paths a mutating worker must never touch. They cannot be
+ * expressed by narrowing the approved paths, because they name exceptions
+ * inside an approved subtree, so the worker is told and validation enforces it.
+ */
+export function withheldPathLines(paths: readonly string[]): string {
+	if (paths.length === 0) {
+		return "";
+	}
+	return `\nNever create, modify, or delete these withheld repository-relative paths, even though they sit inside an approved path:
+${paths.map((path) => `- ${path}`).join("\n")}`;
 }
 
 const CLOSING_INSTRUCTIONS: Record<StepDefinition["kind"], string> = {
@@ -36,6 +51,7 @@ When finished, summarize changed files and test evidence.`,
 function writeAuthorityLines(
 	step: StepDefinition,
 	profile: CapabilityProfile,
+	withheldPaths: readonly string[],
 ): string {
 	if (!profile.capabilities.includes("mutate-repository")) {
 		return "Do not create, modify, or delete any repository file.";
@@ -45,7 +61,7 @@ function writeAuthorityLines(
 		return "Do not create, modify, or delete any repository file.";
 	}
 	return `Write only within these approved repository-relative paths:
-${paths.map((path) => `- ${path}`).join("\n")}`;
+${paths.map((path) => `- ${path}`).join("\n")}${withheldPathLines(withheldPaths)}`;
 }
 
 /**
@@ -63,7 +79,7 @@ Approved authority (frozen at run creation): ${describeCapabilityProfile(profile
 Resource discovery: ${securityPolicy.workers.resourceDiscovery}.
 Your Pi process and tools are not OS-sandboxed. Host filesystem, network, and credentials may be reachable, but they are outside your authority.
 Work only in the current Git worktree and current branch.
-${writeAuthorityLines(step, profile)}
+${writeAuthorityLines(step, profile, input.withheldPaths ?? [])}
 Do not push, publish, deploy, mutate remote APIs or cloud resources, escalate privileges, or access credential stores.
 Do not create, switch, merge, delete, or modify branches or worktrees.
 Do not commit changes. The orchestrator owns validation, commits, and integration.

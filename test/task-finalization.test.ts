@@ -5,7 +5,6 @@ import {
 	mkdir,
 	mkdtemp,
 	readFile,
-	rm,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,6 +27,7 @@ import type {
 	WorkerExecutionOptions,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 import { reviewResult } from "./helpers/review.js";
 import { waitForOrchestration } from "./helpers/wait.js";
 
@@ -151,11 +151,7 @@ class WritingWorkers implements WorkerBackend {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("task validation and orchestrator-owned commits", () => {

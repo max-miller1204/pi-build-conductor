@@ -14,6 +14,21 @@ import type { StepArtifactDraft } from "./artifact-routing.js";
 import type { WorkflowStepAttempt } from "./workflow-state.js";
 import type { Workspace } from "./workspaces.js";
 
+/**
+ * Proposes further work for the run this step belongs to.
+ *
+ * A session that chooses its own work needs somewhere to put what it decided
+ * to do. Admission is that place, and it admits only what the frozen envelope
+ * already allows, so the decision stays the session's and the authority stays
+ * the user's. It is absent when the engine cannot grow this run's graph.
+ */
+export interface StepAdmissionPort {
+	admit(request: {
+		steps: readonly unknown[];
+		reason: string;
+	}): Promise<StepDefinition[]>;
+}
+
 /** Everything a step handler is given, and the only authority it may use. */
 export interface StepHandlerContext {
 	runId: string;
@@ -25,6 +40,8 @@ export interface StepHandlerContext {
 	execution: StepExecutionContext;
 	/** The frozen run profile narrowed to this step's declared capabilities. */
 	capabilityProfile: CapabilityProfile;
+	/** Present exactly when this run may admit steps its session proposes. */
+	admission?: StepAdmissionPort;
 	/** Aborted when the step times out or the run is cancelled. */
 	signal: AbortSignal;
 	now(): string;

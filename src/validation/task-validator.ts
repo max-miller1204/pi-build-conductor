@@ -17,6 +17,12 @@ export interface TaskValidationInput {
 	task: TaskDefinition;
 	attempt: TaskAttempt;
 	securityPolicy?: RunSecurityPolicy;
+	/**
+	 * Paths the approved envelope withholds from mutation even inside an
+	 * approved subtree. A withheld path cannot be expressed as a narrower
+	 * allowlist, so it is enforced here against observed output.
+	 */
+	withheldPaths?: readonly string[];
 	signal?: AbortSignal;
 }
 
@@ -104,14 +110,24 @@ export class LocalTaskValidator implements TaskValidator {
 					changedPaths: snapshot.changedFiles.map((file) => file.path),
 				});
 			}
-			const outOfScope = snapshot.changedFiles.flatMap((file) =>
-				[file.path, ...(file.previousPath ? [file.previousPath] : [])].filter(
-					(path) => !pathIsAllowed(path, input.task.allowedPaths),
-				),
+			const changedPaths = snapshot.changedFiles.flatMap((file) => [
+				file.path,
+				...(file.previousPath ? [file.previousPath] : []),
+			]);
+			const outOfScope = changedPaths.filter(
+				(path) => !pathIsAllowed(path, input.task.allowedPaths),
 			);
 			if (outOfScope.length > 0) {
 				throw new Error(
 					`Task changed paths outside its approved scope: ${[...new Set(outOfScope)].join(", ")}`,
+				);
+			}
+			const withheld = changedPaths.filter((path) =>
+				pathIsAllowed(path, input.withheldPaths ?? []),
+			);
+			if (withheld.length > 0) {
+				throw new Error(
+					`Task changed paths the approved envelope withholds: ${[...new Set(withheld)].join(", ")}`,
 				);
 			}
 		} catch (error) {

@@ -1,3 +1,11 @@
+import {
+	AuthorityViolationError,
+	type FrozenAuthority,
+	type FrozenRunAuthority,
+	freezeRunAuthority,
+	reviseRunAuthority,
+} from "../security/authority.js";
+import type { AuthorityEnvelope } from "../security/envelope.js";
 import { legacySecurityPolicy } from "../security/policy.js";
 import { validateTaskPlan } from "./dag.js";
 import { reconcileTaskStates } from "./scheduler.js";
@@ -20,6 +28,12 @@ export interface CreateRunInput {
 	integrationBranch: string;
 	request: OrchestrationRun["request"];
 	securityPolicy?: RunSecurityPolicy;
+	/**
+	 * The authority envelope the user approved before the work was known. When
+	 * one is given it is the source: the plan must fit inside it and the run's
+	 * capability profiles derive from it.
+	 */
+	envelope?: AuthorityEnvelope;
 	plan: TaskPlan;
 	maxConcurrentWorkers: number;
 	planSource?: Exclude<PlanRevisionSource, "edited" | "restored" | "migrated">;
@@ -32,6 +46,75 @@ export interface ReviseRunPlanInput {
 	expectedPlanRevision: number;
 	now: string;
 	source?: "edited";
+}
+
+/**
+ * Freezes the authority a new run executes under, when its security policy
+ * can enforce one. A version 1 policy predates capability profiles, so such a
+ * run keeps its historical fixed-role authority and an approved envelope is
+ * refused rather than accepted unenforced.
+ */
+function frozenAuthorityFor(
+	input: Pick<
+		CreateRunInput,
+		"envelope" | "repositoryRoot" | "securityPolicy"
+	> & { plan: TaskPlan; securityPolicy: RunSecurityPolicy },
+): FrozenRunAuthority | undefined {
+	if (input.securityPolicy.version !== 2) {
+		if (input.envelope) {
+			throw new AuthorityViolationError([
+				{
+					code: "policy_cannot_enforce_envelope",
+					path: "securityPolicy.version",
+					message:
+						"An approved authority envelope requires security policy version 2, which freezes capability profiles",
+				},
+			]);
+		}
+		return undefined;
+	}
+	return freezeRunAuthority({
+		repositoryRoot: input.repositoryRoot,
+		plan: input.plan,
+		securityPolicy: input.securityPolicy,
+		...(input.envelope ? { envelope: input.envelope } : {}),
+	});
+}
+
+/**
+ * The authority a revised plan executes under, keeping an authored one.
+ *
+ * The capability profiles were frozen when the run was created, so a revision
+ * that would change them is refused rather than silently refreezing them: the
+ * authority a run executes under is settled before any work starts.
+ */
+function revisedAuthorityFor(
+	run: OrchestrationRun,
+	plan: TaskPlan,
+): FrozenAuthority | undefined {
+	if (!run.authority) {
+		return undefined;
+	}
+	const revised = reviseRunAuthority(run.authority, {
+		repositoryRoot: run.repositoryRoot,
+		plan,
+		securityPolicy: run.securityPolicy,
+	});
+	if (
+		JSON.stringify(revised.securityPolicy) !==
+		JSON.stringify(run.securityPolicy)
+	) {
+		throw new AuthorityViolationError([
+			{
+				code: "frozen_profiles_would_change",
+				path: "securityPolicy.workers.capabilityProfiles",
+				message:
+					"A plan revision cannot change the capability profiles frozen at run creation",
+				condition: "widen-mutation-authority",
+			},
+		]);
+	}
+	return revised.authority;
 }
 
 function assertWorkerLimit(maxConcurrentWorkers: number): void {
@@ -88,6 +171,10 @@ export function createOrchestrationRun(
 	assertWorkerLimit(input.maxConcurrentWorkers);
 	const plan = cloneTaskPlan(validateTaskPlan(input.plan));
 	const planRevision = 1;
+	const securityPolicy = structuredClone(
+		input.securityPolicy ?? legacySecurityPolicy(),
+	);
+	const frozen = frozenAuthorityFor({ ...input, plan, securityPolicy });
 	return reconcileTaskStates({
 		schemaVersion: RUN_SCHEMA_VERSION,
 		revision: 0,
@@ -98,9 +185,8 @@ export function createOrchestrationRun(
 		baseCommit: input.baseCommit,
 		integrationBranch: input.integrationBranch,
 		request: input.request,
-		securityPolicy: structuredClone(
-			input.securityPolicy ?? legacySecurityPolicy(),
-		),
+		securityPolicy: frozen?.securityPolicy ?? securityPolicy,
+		...(frozen ? { authority: frozen.authority } : {}),
 		plan,
 		planRevision,
 		planRevisions: [
@@ -145,8 +231,10 @@ export function reviseRunPlan(
 		return run;
 	}
 	const planRevision = run.planRevision + 1;
+	const revised = revisedAuthorityFor(run, plan);
 	return reconcileTaskStates({
 		...run,
+		...(revised ? { authority: revised } : {}),
 		plan,
 		planRevision,
 		planRevisions: [
@@ -185,8 +273,10 @@ export function restoreRunPlanRevision(
 	}
 	const plan = cloneTaskPlan(restored.plan);
 	const planRevision = run.planRevision + 1;
+	const revised = revisedAuthorityFor(run, plan);
 	return reconcileTaskStates({
 		...run,
+		...(revised ? { authority: revised } : {}),
 		plan,
 		planRevision,
 		planRevisions: [

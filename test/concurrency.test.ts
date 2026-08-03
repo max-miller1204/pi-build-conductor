@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -23,6 +23,7 @@ import type {
 	WorkerExecutionResult,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 import { createFakeFinalizationDependencies } from "./helpers/finalization.js";
 import { reviewResult } from "./helpers/review.js";
 import { waitForOrchestration } from "./helpers/wait.js";
@@ -226,11 +227,7 @@ async function setup(tasks: TaskDefinition[], maxConcurrentWorkers = 2) {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("bounded dependency-aware concurrency", () => {
