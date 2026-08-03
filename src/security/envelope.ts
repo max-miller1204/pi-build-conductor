@@ -164,7 +164,22 @@ function readRepositoryRoot(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
+	source: "authored" | "derived",
 ): string {
+	if (source === "derived") {
+		if (typeof value !== "string" || value.length === 0) {
+			addIssue(
+				issues,
+				"repository_root",
+				path,
+				`${path} must preserve the historical run's non-empty repository identity`,
+			);
+			return "";
+		}
+		// Historical roots are identities the run already uses. Normalizing or
+		// trimming one here would make envelopeRepository disagree with that run.
+		return value;
+	}
 	const root = readNonEmptyString(value, path, issues);
 	if (root.length === 0) {
 		return root;
@@ -314,6 +329,7 @@ function readRepositories(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
+	source: "authored" | "derived",
 ): EnvelopeRepository[] {
 	if (!Array.isArray(value) || value.length === 0) {
 		addIssue(
@@ -340,7 +356,7 @@ function readRepositories(
 		}
 		rejectUnknownKeys(entry, ["root", "mutation"], itemPath, issues);
 		return {
-			root: readRepositoryRoot(entry.root, `${itemPath}.root`, issues),
+			root: readRepositoryRoot(entry.root, `${itemPath}.root`, issues, source),
 			mutation: readMutationScope(
 				entry.mutation,
 				`${itemPath}.mutation`,
@@ -521,7 +537,7 @@ function readEscalation(
 
 function normalizeAuthorityEnvelope(
 	value: unknown,
-	requireMutationCompleteness: boolean,
+	source: "authored" | "derived",
 ): AuthorityEnvelope {
 	const issues: PlanValidationIssue[] = [];
 	if (!isRecord(value)) {
@@ -567,6 +583,7 @@ function normalizeAuthorityEnvelope(
 		value.repositories,
 		"repositories",
 		issues,
+		source,
 	);
 	const forbiddenActions =
 		value.forbiddenActions === undefined
@@ -597,7 +614,7 @@ function normalizeAuthorityEnvelope(
 	// read-back is history that already happened, so fidelity takes precedence
 	// over rejecting a gap in a plan that was valid when approved.
 	if (
-		requireMutationCompleteness &&
+		source === "authored" &&
 		mutates &&
 		acceptanceCriteria.length === 0
 	) {
@@ -609,7 +626,7 @@ function normalizeAuthorityEnvelope(
 		);
 	}
 	if (
-		requireMutationCompleteness &&
+		source === "authored" &&
 		mutates &&
 		validation.required.length === 0
 	) {
@@ -642,7 +659,7 @@ function normalizeAuthorityEnvelope(
  * an incomplete envelope narrows the run rather than widening it.
  */
 export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
-	return normalizeAuthorityEnvelope(value, true);
+	return normalizeAuthorityEnvelope(value, "authored");
 }
 
 /**
@@ -769,7 +786,7 @@ export function envelopeFromApprovedRun(
 			perChange: true,
 		},
 		},
-		false,
+		"derived",
 	);
 }
 
@@ -791,6 +808,18 @@ function renderedPaths(label: string, entries: readonly string[]): string[] {
 	return [
 		`    ${label}:`,
 		...entries.map((entry) => `      - ${renderAuthoredScalar(entry)}`),
+	];
+}
+
+function renderedCommands(commands: readonly ValidationCommand[]): string[] {
+	if (commands.length === 0) {
+		return ["Required validation: []"];
+	}
+	return [
+		"Required validation:",
+		...commands.map(
+			(command) => `  - ${renderAuthoredScalar(formatCommand(command))}`,
+		),
 	];
 }
 
@@ -826,7 +855,7 @@ export function authorityEnvelopeLines(envelope: AuthorityEnvelope): string[] {
 		...repositories,
 		...renderedList("Forbidden actions", envelope.forbiddenActions),
 		`Sandbox: workers ${envelope.sandbox.workers}; validation ${envelope.sandbox.validation === "nono" ? "Nono sandbox, network blocked" : "no OS sandbox, host network available"}`,
-		`Required validation: ${envelope.validation.required.map(formatCommand).join("; ") || "none"}`,
+		...renderedCommands(envelope.validation.required),
 		`Per-change validation: ${envelope.validation.perChange ? "required before integration" : "not required"}`,
 		"Reserved for the user, always escalated:",
 		...envelope.escalation.conditions.map(

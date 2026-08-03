@@ -598,6 +598,29 @@ describe("approved authority envelope", () => {
 			const envelope = envelopeFromApprovedRun(run);
 			expect(envelope.acceptanceCriteria).toEqual([]);
 			expect(envelope.validation.required).toEqual([]);
+			const summary = renderApprovalSummary(run);
+			expect(summary).toContain("Required validation: []");
+		}
+	});
+
+	it("preserves accepted historical repository root identities", () => {
+		for (const [index, historicalRoot] of ["/repo/", "relative-repo"].entries()) {
+			const run = createOrchestrationRun({
+				id: `run-envelope-root-${index}`,
+				repositoryRoot: historicalRoot,
+				baseBranch: "main",
+				baseCommit: "a".repeat(40),
+				integrationBranch: `conductor/run-envelope-root-${index}/integration`,
+				request: { sourcePath: "/tmp/request.md", text: "Apply the change" },
+				securityPolicy: readSecurityPolicy({}),
+				plan: taskPlan(),
+				maxConcurrentWorkers: 2,
+				now: "2026-08-03T00:00:00.000Z",
+			});
+
+			const envelope = envelopeFromApprovedRun(run);
+			expect(envelopeRepository(envelope, historicalRoot)).toBeDefined();
+			expect(envelope.repositories[0]?.root).toBe(historicalRoot);
 			expect(() => renderApprovalSummary(run)).not.toThrow();
 		}
 	});
@@ -718,11 +741,30 @@ describe("approved authority envelope", () => {
 		});
 
 		expect(authorityEnvelopeLines(spaced)).toContain(
-			'Required validation: tool "a b"',
+			'  - "tool \\"a b\\""',
 		);
 		expect(authorityEnvelopeLines(separate)).toContain(
-			"Required validation: tool a b",
+			'  - "tool a b"',
 		);
+	});
+
+	it("distinguishes empty validation from a command named none", () => {
+		const envelopeWithValidation = (
+			required: AuthorityEnvelope["validation"]["required"],
+		): AuthorityEnvelope =>
+			validateAuthorityEnvelope({
+				...authoredDocument(),
+				repositories: [{ root: repositoryRoot }],
+				validation: { required },
+			});
+		const empty = authorityEnvelopeLines(envelopeWithValidation([]));
+		const namedNone = authorityEnvelopeLines(
+			envelopeWithValidation([{ command: "none", args: [] }]),
+		);
+
+		expect(empty).toContain("Required validation: []");
+		expect(namedNone).toContain('  - "none"');
+		expect(empty.join("\n")).not.toBe(namedNone.join("\n"));
 	});
 
 	it("renders authored list entries with injective scalar boundaries", () => {
