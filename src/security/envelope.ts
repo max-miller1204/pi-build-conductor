@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, normalize } from "node:path";
+import { formatCommand } from "../domain/command-format.js";
 import {
 	addIssue,
 	isRecord,
@@ -9,7 +10,6 @@ import {
 	readSafeRepositoryPaths,
 	readStringArray,
 } from "../domain/dag.js";
-import { formatCommand } from "../domain/command-format.js";
 import { pathIsAllowed } from "../domain/paths.js";
 import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
 import { stepCapabilities } from "../domain/steps.js";
@@ -244,8 +244,14 @@ function readCapabilities(
 			`${path} must not contain duplicates`,
 		);
 	}
-	// Requiring read authority beside a narrower capability would make callers
-	// add authority they do not need, contradicting the fail-closed boundary.
+	if (capabilities.length > 0 && !capabilities.includes("read-repository")) {
+		addIssue(
+			issues,
+			"missing_read_capability",
+			path,
+			`${path} must include read-repository whenever any capability is granted`,
+		);
+	}
 	return orderedCapabilities(capabilities);
 }
 
@@ -439,16 +445,16 @@ function readValidationExpectations(
 				`${path}.required`,
 				`${path}.required must be an array of command objects`,
 			);
-			} else {
-				required = value.required.map((item, index) => {
-					const itemPath = `${path}.required[${index}]`;
-					if (isRecord(item)) {
-						rejectUnknownKeys(item, ["command", "args"], itemPath, issues);
-					}
-					return readCommandObject(item, itemPath, issues);
-				});
-			}
+		} else {
+			required = value.required.map((item, index) => {
+				const itemPath = `${path}.required[${index}]`;
+				if (isRecord(item)) {
+					rejectUnknownKeys(item, ["command", "args"], itemPath, issues);
+				}
+				return readCommandObject(item, itemPath, issues);
+			});
 		}
+	}
 	if (value.perChange !== undefined && typeof value.perChange !== "boolean") {
 		addIssue(
 			issues,
@@ -610,31 +616,15 @@ function normalizeAuthorityEnvelope(
 	const mutates = repositories.some((repository) =>
 		repository.mutation.capabilities.includes("mutate-repository"),
 	);
-	// An authored envelope is a forward promise and must be complete. Derived
-	// read-back is history that already happened, so fidelity takes precedence
-	// over rejecting a gap in a plan that was valid when approved.
-	if (
-		source === "authored" &&
-		mutates &&
-		acceptanceCriteria.length === 0
-	) {
-		addIssue(
-			issues,
-			"required_acceptance_criteria",
-			"acceptanceCriteria",
-			"acceptanceCriteria must state at least one criterion when mutation authority is granted",
-		);
-	}
-	if (
-		source === "authored" &&
-		mutates &&
-		validation.required.length === 0
-	) {
+	// A forward mutation promise without a final check would widen authority by
+	// letting the run settle without evidence. Valid historical mutating plans
+	// already require final validation, so derived read-back remains faithful.
+	if (source === "authored" && mutates && validation.required.length === 0) {
 		addIssue(
 			issues,
 			"required_commands",
 			"validation.required",
-			"validation.required must be a non-empty array of command objects when mutation authority is granted",
+			"validation.required must be a non-empty array of command objects when mutate-repository is granted",
 		);
 	}
 	if (issues.length > 0) {
@@ -745,8 +735,7 @@ export function envelopeFromApprovedRun(
 	const allowedPaths = [
 		...new Set(
 			effectiveCapabilities.flatMap(({ step, capabilities: stepAuthority }) =>
-				step.kind === "change" &&
-				stepAuthority.includes("mutate-repository")
+				step.kind === "change" && stepAuthority.includes("mutate-repository")
 					? step.allowedPaths
 					: [],
 			),
@@ -761,30 +750,30 @@ export function envelopeFromApprovedRun(
 	];
 	return normalizeAuthorityEnvelope(
 		{
-		version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
-		outcome: plan.title,
-		acceptanceCriteria,
-		repositories: [
-			{
-				root: run.repositoryRoot,
-				mutation: {
-					capabilities,
-					allowedPaths: capabilities.includes("mutate-repository")
-						? allowedPaths
-						: [],
-					forbiddenPaths: [],
+			version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
+			outcome: plan.title,
+			acceptanceCriteria,
+			repositories: [
+				{
+					root: run.repositoryRoot,
+					mutation: {
+						capabilities,
+						allowedPaths: capabilities.includes("mutate-repository")
+							? allowedPaths
+							: [],
+						forbiddenPaths: [],
+					},
 				},
+			],
+			externalEffects: "forbidden",
+			sandbox: {
+				workers: run.securityPolicy.workers.isolation,
+				validation: run.securityPolicy.validation.sandbox,
 			},
-		],
-		externalEffects: "forbidden",
-		sandbox: {
-			workers: run.securityPolicy.workers.isolation,
-			validation: run.securityPolicy.validation.sandbox,
-		},
-		validation: {
-			required: plan.finalValidationCommands,
-			perChange: true,
-		},
+			validation: {
+				required: plan.finalValidationCommands,
+				perChange: true,
+			},
 		},
 		"derived",
 	);

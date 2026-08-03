@@ -1,5 +1,5 @@
-import { analyzeTaskPlan, type PlanValidationIssue } from "../domain/dag.js";
 import { formatCommand } from "../domain/command-format.js";
+import { analyzeTaskPlan, type PlanValidationIssue } from "../domain/dag.js";
 import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
 import {
 	type StepDefinition,

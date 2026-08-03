@@ -240,6 +240,7 @@ describe("workflow finalization", () => {
 		}
 		const { integratedCommit: _integratedCommit, ...unintegratedApiRecord } =
 			apiRecord;
+		const { api: _api, ...stepsWithoutApi } = finished.steps;
 
 		await expect(
 			finalizeWorkflowRun(dependencies, {
@@ -247,6 +248,12 @@ describe("workflow finalization", () => {
 				repository,
 			}),
 		).rejects.toThrow(/expected completed/);
+		await expect(
+			finalizeWorkflowRun(dependencies, {
+				state: { ...finished, steps: stepsWithoutApi },
+				repository,
+			}),
+		).rejects.toThrow(/step api has not succeeded/);
 		await expect(
 			finalizeWorkflowRun(dependencies, {
 				state: {

@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createOrchestrationRun } from "../src/domain/run.js";
 import {
-	type WorkflowPlan,
 	WORKFLOW_PLAN_SCHEMA_VERSION,
+	type WorkflowPlan,
 } from "../src/domain/steps.js";
 import {
-	PLAN_SCHEMA_VERSION,
 	type OrchestrationRun,
+	PLAN_SCHEMA_VERSION,
 	type TaskPlan,
 } from "../src/domain/types.js";
 import { renderApprovalSummary } from "../src/planning/plan-presentation.js";
@@ -275,25 +275,31 @@ describe("approved authority envelope", () => {
 			"repositories[0].mutation.allowedPaths must name at least one path when mutate-repository is granted",
 		]);
 
-	});
-
-	it("accepts narrower capabilities without adding read authority", () => {
-		const envelope = validateAuthorityEnvelope({
-			...authoredDocument(),
-			repositories: [
-				{
-					root: repositoryRoot,
-					mutation: {
-						capabilities: ["mutate-repository"],
-						allowedPaths: ["src/"],
-					},
-				},
-			],
-		});
-
-		expect(envelope.repositories[0]?.mutation.capabilities).toEqual([
-			"mutate-repository",
-		]);
+		for (const capabilities of [
+			["mutate-repository"],
+			["execute-commands"],
+			["mutate-repository", "execute-commands"],
+		]) {
+			const issues = expectIssues(() =>
+				validateAuthorityEnvelope({
+					...authoredDocument(),
+					repositories: [
+						{
+							root: repositoryRoot,
+							mutation: {
+								capabilities,
+								...(capabilities.includes("mutate-repository")
+									? { allowedPaths: ["src/"] }
+									: {}),
+							},
+						},
+					],
+				}),
+			);
+			expect(issues).toContain(
+				"repositories[0].mutation.capabilities must include read-repository whenever any capability is granted",
+			);
+		}
 	});
 
 	it("rejects an approved path a forbidden path entirely withholds", () => {
@@ -383,7 +389,7 @@ describe("approved authority envelope", () => {
 		]);
 	});
 
-	it("requires outcome criteria and validation for mutation authority", () => {
+	it("requires an outcome and validation while preserving honestly empty criteria", () => {
 		const issues = expectIssues(() =>
 			readAuthorityEnvelopeDocument({
 				version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
@@ -405,8 +411,30 @@ describe("approved authority envelope", () => {
 
 		expect(issues).toEqual([
 			"outcome must be a non-empty string",
-			"acceptanceCriteria must state at least one criterion when mutation authority is granted",
-			"validation.required must be a non-empty array of command objects when mutation authority is granted",
+			"validation.required must be a non-empty array of command objects when mutate-repository is granted",
+		]);
+
+		const envelope = validateAuthorityEnvelope({
+			version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
+			outcome: "Apply the bounded change",
+			acceptanceCriteria: [],
+			repositories: [
+				{
+					root: repositoryRoot,
+					mutation: {
+						capabilities: ["read-repository", "mutate-repository"],
+						allowedPaths: ["src/"],
+					},
+				},
+			],
+			sandbox: { validation: "none" },
+			validation: {
+				required: [{ command: "npm", args: ["run", "check"] }],
+			},
+		});
+		expect(envelope.acceptanceCriteria).toEqual([]);
+		expect(envelope.validation.required).toEqual([
+			{ command: "npm", args: ["run", "check"] },
 		]);
 	});
 
@@ -432,7 +460,10 @@ describe("approved authority envelope", () => {
 				"repositories[0].mutation.forbidenPaths",
 			],
 			[
-				{ ...authoredDocument(), sandbox: { validation: "none", network: "host" } },
+				{
+					...authoredDocument(),
+					sandbox: { validation: "none", network: "host" },
+				},
 				"sandbox.network",
 			],
 			[
@@ -450,9 +481,7 @@ describe("approved authority envelope", () => {
 				{
 					...authoredDocument(),
 					validation: {
-						required: [
-							{ command: "npm", args: ["test"], allowFailure: true },
-						],
+						required: [{ command: "npm", args: ["test"], allowFailure: true }],
 					},
 				},
 				"validation.required[0].allowFailure",
@@ -581,6 +610,14 @@ describe("approved authority envelope", () => {
 				questions: ["What owns the state?"],
 			},
 			{
+				id: "verify",
+				kind: "command" as const,
+				title: "Verify",
+				description: "Run a local check",
+				dependencies: [],
+				command: { command: "git", args: ["status", "--short"] },
+			},
+			{
 				id: "decision",
 				kind: "approval" as const,
 				title: "Decide",
@@ -596,6 +633,7 @@ describe("approved authority envelope", () => {
 				finalValidationCommands: [],
 			});
 			const envelope = envelopeFromApprovedRun(run);
+			expect(validateAuthorityEnvelope(envelope)).toEqual(envelope);
 			expect(envelope.acceptanceCriteria).toEqual([]);
 			expect(envelope.validation.required).toEqual([]);
 			const summary = renderApprovalSummary(run);
@@ -604,7 +642,10 @@ describe("approved authority envelope", () => {
 	});
 
 	it("preserves accepted historical repository root identities", () => {
-		for (const [index, historicalRoot] of ["/repo/", "relative-repo"].entries()) {
+		for (const [index, historicalRoot] of [
+			"/repo/",
+			"relative-repo",
+		].entries()) {
 			const run = createOrchestrationRun({
 				id: `run-envelope-root-${index}`,
 				repositoryRoot: historicalRoot,
@@ -644,6 +685,9 @@ describe("approved authority envelope", () => {
 		});
 
 		expect(envelopeFromApprovedRun(run).acceptanceCriteria).toEqual([]);
+		expect(validateAuthorityEnvelope(envelopeFromApprovedRun(run))).toEqual(
+			envelopeFromApprovedRun(run),
+		);
 		expect(renderApprovalSummary(run)).toContain(
 			"Acceptance criteria: none stated by this plan",
 		);
@@ -682,13 +726,16 @@ describe("approved authority envelope", () => {
 		).toEqual(["src/"]);
 	});
 
-	it("preserves frozen change authority without adding read authority", () => {
+	it("preserves valid narrowed change authority without adding command authority", () => {
 		const securityPolicy = readSecurityPolicy({});
 		const profiles = securityPolicy.workers.capabilityProfiles;
 		if (!profiles) {
 			throw new Error("expected frozen capability profiles");
 		}
-		profiles.change = capabilityProfileFor(["mutate-repository"]);
+		profiles.change = capabilityProfileFor([
+			"read-repository",
+			"mutate-repository",
+		]);
 		const run = createOrchestrationRun({
 			id: "run-envelope-narrowed",
 			repositoryRoot,
@@ -702,10 +749,15 @@ describe("approved authority envelope", () => {
 			now: "2026-08-03T00:00:00.000Z",
 		});
 
-		expect(envelopeFromApprovedRun(run).repositories[0]?.mutation).toMatchObject({
-			capabilities: ["mutate-repository"],
+		expect(
+			envelopeFromApprovedRun(run).repositories[0]?.mutation,
+		).toMatchObject({
+			capabilities: ["read-repository", "mutate-repository"],
 			allowedPaths: ["src/service/", "src/protocol/"],
 		});
+		expect(validateAuthorityEnvelope(envelopeFromApprovedRun(run))).toEqual(
+			envelopeFromApprovedRun(run),
+		);
 	});
 
 	it("renders every authority-bearing list entry", () => {
@@ -740,12 +792,8 @@ describe("approved authority envelope", () => {
 			validation: { required: [{ command: "tool", args: ["a", "b"] }] },
 		});
 
-		expect(authorityEnvelopeLines(spaced)).toContain(
-			'  - "tool \\"a b\\""',
-		);
-		expect(authorityEnvelopeLines(separate)).toContain(
-			'  - "tool a b"',
-		);
+		expect(authorityEnvelopeLines(spaced)).toContain('  - "tool \\"a b\\""');
+		expect(authorityEnvelopeLines(separate)).toContain('  - "tool a b"');
 	});
 
 	it("distinguishes empty validation from a command named none", () => {
@@ -797,9 +845,7 @@ describe("approved authority envelope", () => {
 					},
 				],
 			});
-		const joined = authorityEnvelopeLines(
-			envelopeWithPaths(["src/a, src/b"]),
-		);
+		const joined = authorityEnvelopeLines(envelopeWithPaths(["src/a, src/b"]));
 		const separate = authorityEnvelopeLines(
 			envelopeWithPaths(["src/a", "src/b"]),
 		);
