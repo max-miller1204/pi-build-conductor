@@ -725,11 +725,7 @@ export class FileWorkflowStateStore implements WorkflowStateStore {
 			if (JSON.stringify(next) === baseline) {
 				return stored.run;
 			}
-			assertAuthorityTransition(
-				stored.run.authority,
-				next.authority,
-				false,
-			);
+			assertAuthorityTransition(stored.run.authority, next.authority, false);
 			await this.writeAtomic({
 				schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
 				revision: stored.revision + 1,

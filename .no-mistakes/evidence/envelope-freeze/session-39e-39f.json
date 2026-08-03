@@ -1,0 +1,73 @@
+{
+  "capturedBy": "A real WorkflowEngine run in a temporary Git repository, followed by a fresh FileWorkflowStateStore load",
+  "frozenAuthority": {
+    "source": "authored",
+    "digest": "c739c50538a0a3aa4be1b62333802f4e5cd1fa2a398e59540ca7f6e31c9a4ede",
+    "digestPersistedUnchanged": true,
+    "approvedPaths": [
+      "src/"
+    ],
+    "withheldPaths": [
+      "src/generated/"
+    ],
+    "changeCapabilities": [
+      "read-repository",
+      "mutate-repository"
+    ],
+    "changeTools": [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "edit",
+      "write"
+    ],
+    "commandCapabilities": [
+      "read-repository"
+    ]
+  },
+  "refusedProposal": {
+    "name": "AuthorityViolationError",
+    "message": "Plan exceeds the approved authority envelope:\n- Step docs-leak would mutate docs/, which the approved envelope does not allow",
+    "details": [
+      {
+        "code": "path_not_approved",
+        "path": "steps[1].allowedPaths[0]",
+        "message": "Step docs-leak would mutate docs/, which the approved envelope does not allow",
+        "condition": "widen-mutation-authority"
+      }
+    ]
+  },
+  "settledRun": {
+    "state": "completed",
+    "durablePlanStepIds": [
+      "api",
+      "ui"
+    ],
+    "topologicalStepIds": [
+      "api",
+      "ui"
+    ],
+    "finalValidationCommandsUnchanged": true,
+    "stepStates": {
+      "api": "succeeded",
+      "ui": "succeeded"
+    },
+    "admittedEvents": [
+      {
+        "sequence": 2,
+        "at": "2026-08-03T22:14:34.722Z",
+        "kind": "step_admitted",
+        "stepId": "ui",
+        "proposedBy": "api",
+        "reason": "the API step discovered the UI it implies"
+      }
+    ],
+    "integrationHead": "0c58bee1e76a262dba1958e4bb310de9c0a6f6b3",
+    "lastStepIntegratedAtHead": true,
+    "integrationBranchFiles": {
+      "src/api/index.ts": "export const api = true;",
+      "src/ui/index.ts": "export const ui = true;"
+    }
+  }
+}

@@ -205,7 +205,8 @@ Its capabilities narrow every worker profile and tool allowlist, its approved pa
 Every absent optional field resolves to the least authority it can express, and an unknown field is rejected rather than ignored, so a misspelled deny list fails loudly instead of silently widening authority.
 The reserved escalation conditions are a floor an envelope cannot declare its way below, and only one repository may be named until multi-repository parent orchestration lands.
 
-A plan that would mutate outside the approved paths, mutate a withheld path, declare a capability the envelope withholds, drop a required validation command, or run in a repository the envelope does not name is refused when the run is created, and refused again for any later plan revision.
+A plan that would mutate outside the approved paths, mutate a withheld path, declare a capability the envelope withholds, drop a required final validation command, omit per-change validation when the envelope requires it, or run in a repository the envelope does not name is refused when the run is created, and refused again for any later plan revision.
+An authored envelope and its digest stay fixed across revisions; a derived envelope is re-derived with an accepted revision, but a revision that would change the capability profiles frozen at run creation is refused.
 The approval summary shows the frozen envelope and its digest.
 
 Without this sidecar a run still freezes an envelope: the authority its approved plan already implies, read back and stated in the same shape.

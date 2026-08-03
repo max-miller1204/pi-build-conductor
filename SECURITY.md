@@ -17,6 +17,10 @@ Prompt instructions and post-run diff inspection are defense in depth and are no
 Every durable change run stores a versioned security policy before approval.
 The policy is immutable for the lifetime of the run, including retries and recovery after restart.
 Approval, worker prompts, worker launches, validation, run inspection, and merge-ready evidence use this stored policy rather than current environment defaults.
+Every new version 2 change run also stores one authority envelope and its digest.
+An authored envelope remains immutable; without a sidecar, the envelope is derived from the approved plan and changes only together with a pre-approval plan revision.
+Storage reads recompute the digest and reject any envelope, capability-profile snapshot, or plan that no longer agrees with the frozen authority.
+Every plan revision and running-step admission must fit that authority; admission is append-only, limited to 200 total steps, and unavailable to runs without a frozen envelope.
 Engine-backed read-only commands snapshot their capability profiles for one execution and do not expose retry or recovery.
 Legacy runs are migrated with an explicit `legacy-migrated` policy that does not claim controls that were not recorded at creation time.
 Runs approved before the server migration keep their persisted `orchestrator-allowlist-v1` tool policy and stay enforced as worker launch policy version 1.
@@ -31,7 +35,7 @@ The compatible server disables project and user extension discovery, skills, and
 Worker launch policy version 1 does not suppress Pi's `SYSTEM.md` or `APPEND_SYSTEM.md` context files; those files remain discoverable even when `resourceDiscovery` is `disabled`.
 Worker processes also do not inherit the session's `--models` scope.
 The extension therefore launches each worker with the active session model or, when none is active, the first scoped model; an empty scope leaves model selection to the worker default.
-New runs freeze the complete capability-profile set at creation.
+New version 2 change runs derive every capability profile by intersecting its archetype maximum with the capabilities granted by the frozen authority envelope, then freeze the complete set at creation.
 Each workflow step selects an allowed profile and may only narrow its capabilities further.
 The compatible server enforces the exact derived tool allowlist:
 
@@ -45,7 +49,7 @@ Investigation and review profiles have only read-repository authority.
 Change and repair profiles may also receive command and mutation authority, while command profiles cannot mutate and approval profiles receive no worker tools.
 Deployment, publishing, cloud administration, and remote mutation are not expressible capabilities.
 The local validator rejects any repository mutation observed from a profile without `mutate-repository`.
-The orchestrator still rejects branch movement, worker-created commits, conflicts, and changes outside approved repository paths before accepting work.
+The orchestrator still rejects branch movement, worker-created commits, conflicts, changes outside approved repository paths, and changes to paths withheld inside an approved subtree before accepting work.
 These checks detect repository mutations after execution and cannot undo host or external side effects.
 
 Workers must not push, publish, deploy, mutate remote APIs or cloud resources, access credential stores, escalate privileges, or change external branches and worktrees.

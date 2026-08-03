@@ -32,9 +32,8 @@ export const AUTHORITY_ENVELOPE_SCHEMA_VERSION = 1 as const;
 
 /**
  * The decisions an autonomous session may never take on its own authority.
- * Reaching one pauses the run for renewed user approval instead of widening
- * the envelope, so this set is a floor: an approved envelope may never
- * declare fewer conditions than these.
+ * Reaching one is refused instead of widening the envelope. This set is a
+ * floor: an approved envelope may never declare fewer conditions than these.
  */
 export const RESERVED_ESCALATION_CONDITIONS = [
 	"add-repository",

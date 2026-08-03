@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { createOrchestrationRun, reviseRunPlan } from "../src/domain/run.js";
 import { readWorkflowPlanDocument } from "../src/domain/plan-translation.js";
-import { WORKFLOW_PLAN_SCHEMA_VERSION } from "../src/domain/steps.js";
+import { createOrchestrationRun, reviseRunPlan } from "../src/domain/run.js";
+import {
+	WORKFLOW_PLAN_SCHEMA_VERSION,
+	type WorkflowPlan,
+} from "../src/domain/steps.js";
 import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
 import { createWorkflowRunState } from "../src/engine/workflow-state.js";
 import { GitCli } from "../src/git/git.js";
@@ -19,6 +22,7 @@ import {
 	capabilityProfilesFromEnvelope,
 	envelopeSidecarPath,
 	freezeRunAuthority,
+	planAuthorityIssues,
 	readEnvelopeSidecar,
 } from "../src/security/authority.js";
 import { defaultCapabilityProfiles } from "../src/security/capabilities.js";
@@ -385,6 +389,36 @@ describe("the authority envelope frozen at run creation", () => {
 		);
 		expect(issues).toEqual([
 			`The plan never runs the required validation command ${FINAL_CHECK.command} -e ""`,
+		]);
+	});
+
+	it("reserves skipping the per-change validation the envelope requires", () => {
+		const envelope = authoredEnvelopeFor("/repo");
+		const plan: WorkflowPlan = {
+			version: WORKFLOW_PLAN_SCHEMA_VERSION,
+			title: "Reviewed feature",
+			steps: [
+				{
+					kind: "change",
+					id: "implementation",
+					title: "Implementation",
+					description: "Implement the feature",
+					dependencies: [],
+					acceptanceCriteria: ["Implementation exists"],
+					allowedPaths: ["src/"],
+					validationCommands: [],
+				},
+			],
+			finalValidationCommands: [FINAL_CHECK],
+		};
+
+		expect(planAuthorityIssues(plan, envelope, "/repo")).toEqual([
+			expect.objectContaining({
+				code: "per_change_validation_missing",
+				condition: "skip-required-validation",
+				message:
+					"Step implementation would integrate without the per-change validation the approved envelope requires",
+			}),
 		]);
 	});
 

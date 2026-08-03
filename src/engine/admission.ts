@@ -16,7 +16,7 @@ import type { WorkflowRunState, WorkflowStepRecord } from "./workflow-state.js";
 /**
  * The most steps one run's graph may ever hold. A session that chooses its own
  * work needs room to grow, and a bound is what keeps "chooses its own work"
- * from meaning "grows without end"; reaching it is an escalation, not a stall.
+ * from meaning "grows without end"; reaching it refuses further admission.
  */
 export const MAX_WORKFLOW_PLAN_STEPS = 200;
 
@@ -52,7 +52,7 @@ function requireRunningProposer(
 		);
 	}
 	// Admission is a running session growing its own graph. Anything else is
-	// either a plan revision, which happens before approval, or an escalation.
+	// either a plan revision, which happens before approval, or invalid here.
 	if (proposer.state !== "running") {
 		throw new StepAdmissionError(
 			`Step ${proposedBy} is ${proposer.state}, and only a running step can propose further work`,
