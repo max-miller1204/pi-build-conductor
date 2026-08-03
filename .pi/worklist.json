@@ -260,10 +260,10 @@
     {
       "id": "goal-ms98t7al-d4b5a7f6",
       "title": "Add autonomous and guided execution modes",
-      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement.",
+      "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement. Progress 2026-08-03: the approved authority envelope, frozen run authority, and bounded runtime step admission landed in v0.1.0 through PRs 17 and 18, and escalation conditions are modeled in the envelope; the runtime escalation and renewed-approval flow, the autonomous session handler, and guided mode remain.",
       "status": "active",
       "createdAt": "2026-07-31T17:55:10.509Z",
-      "updatedAt": "2026-08-03T19:23:55.015Z"
+      "updatedAt": "2026-08-03T22:39:43.139Z"
     },
     {
       "id": "goal-ms9ads82-6f7a88cb",
@@ -280,7 +280,15 @@
       "status": "open",
       "createdAt": "2026-07-31T18:39:15.933Z",
       "updatedAt": "2026-07-31T18:42:53.567Z"
+    },
+    {
+      "id": "goal-msdt7lhq-e9a422c9",
+      "title": "Migrate to the upstream PiServer protocol and retire the fork",
+      "description": "Rewrite src/workers/server-backend.ts against the new composable PiServer session protocol (length-prefixed CBOR via @earendil-works/pi-protocol) and delete the max-miller1204/pi compatibility fork, moving worker launch policy enforcement to the new plane. Wait until upstream stabilizes; watch signals: the pi-server README drops its Experimental banner and legacy-migration section, the coding-agent backend and CLI actually run on the new protocol, and the server and protocol packages are independently consumable from npm.",
+      "status": "open",
+      "createdAt": "2026-08-03T22:37:19.118Z",
+      "updatedAt": "2026-08-03T22:37:19.118Z"
     }
   ],
-  "revision": 26
+  "revision": 28
 }
