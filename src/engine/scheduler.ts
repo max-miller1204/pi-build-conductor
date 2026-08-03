@@ -166,11 +166,7 @@ export function launchableStepIds(state: WorkflowRunState): string[] {
 	const launchable: string[] = [];
 	for (const stepId of topologicalStepIds(reconciled.plan)) {
 		const record = reconciled.steps[stepId];
-		if (
-			!record ||
-			record.state !== "ready" ||
-			stepsWithActiveAttempts.has(stepId)
-		) {
+		if (record?.state !== "ready" || stepsWithActiveAttempts.has(stepId)) {
 			continue;
 		}
 		if (conflictsWithHeldLocks(record.definition, held)) {

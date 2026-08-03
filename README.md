@@ -92,7 +92,7 @@ Start Pi in a clean Git worktree with a model selected, then run:
 ```
 
 The orchestrator generates a plan unless `docs/health-check-request.md.plan.json` exists.
-Review the DAG, approved paths, commands, worker limit, validation boundary, and security summary.
+Review the final approval summary and confirm its authority envelope before approving.
 Repository mutation starts only after explicit approval.
 
 When the run completes, inspect its integration branch and evidence:
@@ -110,7 +110,7 @@ Merge or cherry-pick the integration branch only after reviewing the result.
 2. It loads a plan sidecar or asks the selected Pi model to produce a dependency DAG.
 3. It validates the plan and stores the first immutable revision under the repository's Git common directory.
 4. The interactive editor can change tasks, dependencies, order, paths, commands, title, and worker limit.
-5. A final approval screen shows the exact plan revision and security boundary.
+5. A final approval screen shows the exact plan revision and the authority envelope implied by that plan: its outcome, acceptance criteria, repository capabilities and mutable paths, forbidden actions and external effects, sandbox policy, validation expectations, and decisions reserved for the user.
 6. After approval, the orchestrator creates a separate integration branch and dispatches ready tasks to isolated worktrees.
 7. It monitors worker events, answers blocked UI requests conservatively, enforces timeouts, and records bounded activity journals.
 8. It rejects unexpected Git state, out-of-scope changes, conflicts, worker commits, and checks that mutate worker output.

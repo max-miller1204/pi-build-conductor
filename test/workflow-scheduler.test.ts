@@ -131,6 +131,21 @@ describe("workflow scheduler", () => {
 		expect(launchableStepIds(state)).toEqual(["ui", "api"]);
 	});
 
+	it("skips a missing stored step record without disturbing later readiness", () => {
+		const state = runWith(
+			planOf([
+				change("missing", [], ["src/missing/"]),
+				change("ready", [], ["src/ready/"]),
+			]),
+			2,
+		);
+		const { missing: _missing, ...remainingSteps } = state.steps;
+
+		expect(launchableStepIds({ ...state, steps: remainingSteps })).toEqual([
+			"ready",
+		]);
+	});
+
 	it("keeps dependents waiting until a mutating dependency is integrated", () => {
 		const plan = planOf([
 			change("api", [], ["src/api/"]),

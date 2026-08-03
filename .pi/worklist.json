@@ -189,9 +189,9 @@
       "id": "goal-mry8o2lm-a8c5a52c",
       "title": "Rename and migrate the product surface",
       "description": "Adopt neutral package, command, type, configuration, storage, and documentation naming centered on orchestration, provide /orchestrate as the main interface, and retain temporary /build aliases plus readers for existing run schemas.",
-      "status": "active",
+      "status": "open",
       "createdAt": "2026-07-24T01:05:43.210Z",
-      "updatedAt": "2026-07-31T07:22:38.317Z"
+      "updatedAt": "2026-08-03T19:23:55.015Z"
     },
     {
       "id": "goal-mry8o2lo-4cca8faf",
@@ -261,9 +261,9 @@
       "id": "goal-ms98t7al-d4b5a7f6",
       "title": "Add autonomous and guided execution modes",
       "description": "Add the approved authority envelope, in-run plan extension bounded by it, escalation and renewed approval, the autonomous session handler, and guided mode over approved phase boundaries, so a Project Goal can be executed without strict up-front task micromanagement.",
-      "status": "open",
+      "status": "active",
       "createdAt": "2026-07-31T17:55:10.509Z",
-      "updatedAt": "2026-07-31T18:57:53.455Z"
+      "updatedAt": "2026-08-03T19:23:55.015Z"
     },
     {
       "id": "goal-ms9ads82-6f7a88cb",
@@ -282,5 +282,5 @@
       "updatedAt": "2026-07-31T18:42:53.567Z"
     }
   ],
-  "revision": 25
+  "revision": 26
 }

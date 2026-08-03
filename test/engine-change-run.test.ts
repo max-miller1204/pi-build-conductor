@@ -38,6 +38,7 @@ import {
 	CHANGE_RUN_CRASH_RUN_ID,
 	ChangeRunWorkers,
 } from "./helpers/change-run-workers.js";
+import { waitForOrchestration } from "./helpers/wait.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -533,11 +534,13 @@ describe("live /orchestrate change runs on the engine", () => {
 		expect(settled.mergeReadyEvidence).toBeUndefined();
 		// Nothing was reviewed, and every worker this run started was stopped.
 		expect(attemptsOfRole(settled, "review")).toEqual([]);
-		expect(
-			[...harness.workers.workers.values()].every(
-				(worker) => worker.status === "stopped",
-			),
-		).toBe(true);
+		await waitForOrchestration(() =>
+			expect(
+				[...harness.workers.workers.values()].every(
+					(worker) => worker.status === "stopped",
+				),
+			).toBe(true),
+		);
 	}, 120_000);
 
 	it("refuses to recover a run that is still executing in this process", async () => {

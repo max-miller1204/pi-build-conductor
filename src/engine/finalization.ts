@@ -209,7 +209,7 @@ function assertFinalizableState(state: WorkflowRunState): void {
 	}
 	for (const stepId of topologicalStepIds(state.plan)) {
 		const record = state.steps[stepId];
-		if (!record || record.state !== "succeeded") {
+		if (record?.state !== "succeeded") {
 			throw new Error(
 				`Cannot finalize workflow run ${state.id}; step ${stepId} has not succeeded`,
 			);
