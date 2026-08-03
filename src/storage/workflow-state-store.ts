@@ -161,6 +161,7 @@ const EVENT_SHAPES: Readonly<Record<WorkflowEvent["kind"], EventShape>> = {
 	},
 	step_cancelled: { text: ["stepId"], optionalText: ["attemptId", "error"] },
 	step_blocked: { text: ["stepId"], textArrays: ["blockedBy"] },
+	step_admitted: { text: ["stepId", "proposedBy", "reason"] },
 	artifact_published: {
 		text: ["stepId", "attemptId", "artifactId", "output"],
 		integers: ["sizeBytes"],

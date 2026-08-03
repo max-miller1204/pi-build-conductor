@@ -7,6 +7,7 @@ export * from "./domain/scheduler.js";
 export * from "./domain/step-context.js";
 export * from "./domain/steps.js";
 export * from "./domain/types.js";
+export * from "./engine/admission.js";
 export * from "./engine/artifact-routing.js";
 export * from "./engine/engine.js";
 export * from "./engine/events.js";

@@ -31,6 +31,9 @@ import { ArtifactStore } from "../../src/storage/artifact-store.js";
 
 export const execute = promisify(execFile);
 
+/** The exit code the step-admission crash fixture dies with. */
+export const ADMISSION_CRASH_EXIT_CODE = 94;
+
 const directories: string[] = [];
 
 export async function removeWorkflowHarnessDirectories(): Promise<void> {

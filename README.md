@@ -210,6 +210,11 @@ The approval summary shows the frozen envelope and its digest.
 
 Without this sidecar a run still freezes an envelope: the authority its approved plan already implies, read back and stated in the same shape.
 
+A run frozen under an envelope can also grow inside it.
+A running step may propose further steps, and they are admitted only when the frozen envelope already allows them, so a session decides what work is needed while the user keeps deciding what authority it holds.
+Growth is append-only and bounded: approved steps, their order, and the validation the run settles on never change, each admitted step is recorded on the run timeline with the step that proposed it and why, and a graph that grew is durable and recoverable exactly like one that was approved whole.
+A run with no frozen envelope cannot grow at all.
+
 ## Plan sidecar
 
 Add `<request-file>.plan.json` to provide a deterministic plan instead of generating one with the model.

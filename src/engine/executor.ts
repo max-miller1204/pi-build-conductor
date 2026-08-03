@@ -3,6 +3,7 @@ import type { StepDefinition } from "../domain/steps.js";
 import type { CapabilityProfile } from "../domain/types.js";
 import type { RepositoryInfo } from "../git/git.js";
 import type {
+	StepAdmissionPort,
 	StepHandler,
 	StepHandlerContext,
 	StepHandlerRegistry,
@@ -50,6 +51,8 @@ export interface ExecuteStepRequest {
 	prepared: PreparedStep;
 	attempt: WorkflowStepAttempt;
 	execution: StepExecutionContext;
+	/** How this step proposes further work, when its run can admit any. */
+	admission?: StepAdmissionPort;
 	signal?: AbortSignal;
 }
 
@@ -169,6 +172,7 @@ export class StepExecutor {
 				workspace: prepared.workspace,
 				execution: request.execution,
 				capabilityProfile: prepared.capabilityProfile,
+				...(request.admission ? { admission: request.admission } : {}),
 				signal: controller.signal,
 				now: this.now,
 			};

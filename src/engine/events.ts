@@ -54,6 +54,13 @@ export type WorkflowEventBody =
 	  }
 	| { kind: "step_blocked"; stepId: string; blockedBy: string[] }
 	| {
+			kind: "step_admitted";
+			stepId: string;
+			/** The running step whose session proposed it. */
+			proposedBy: string;
+			reason: string;
+	  }
+	| {
 			kind: "artifact_published";
 			stepId: string;
 			attemptId: string;
