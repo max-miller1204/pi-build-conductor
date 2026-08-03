@@ -29,7 +29,10 @@ import {
 	type FrozenAuthority,
 	freezeRunAuthority,
 } from "../src/security/authority.js";
-import { readAuthorityEnvelopeDocument } from "../src/security/envelope.js";
+import {
+	authorityEnvelopeDigest,
+	readAuthorityEnvelopeDocument,
+} from "../src/security/envelope.js";
 import { readSecurityPolicy } from "../src/security/policy.js";
 import { ArtifactStore } from "../src/storage/artifact-store.js";
 import { FileWorkflowStateStore } from "../src/storage/workflow-state-store.js";
@@ -107,6 +110,7 @@ const committingChangeHandler: StepHandler = {
 interface AdmissionHarnessOptions {
 	/** Whether the run freezes an authority envelope at all. */
 	authority?: boolean;
+	authoritySource?: "authored" | "derived";
 	steps?: Record<string, unknown>[];
 }
 
@@ -120,14 +124,22 @@ async function createAdmissionHarness(options: AdmissionHarnessOptions = {}) {
 		repository,
 		runId,
 	);
-	const authority = authorityFor(paths.repositoryRoot);
+	const plan = workflowPlanOf(
+		options.steps ?? [changeStep("first", [], ["src/first/"])],
+	);
+	const authority =
+		options.authoritySource === "derived"
+			? freezeRunAuthority({
+					repositoryRoot: paths.repositoryRoot,
+					securityPolicy: readSecurityPolicy({}),
+					plan,
+				}).authority
+			: authorityFor(paths.repositoryRoot);
 	const store = new FileWorkflowStateStore(join(paths.parent, "workflow-runs"));
 	const artifacts = new ArtifactStore(paths.artifactRoot);
 	const initial = createWorkflowRunState({
 		id: runId,
-		plan: workflowPlanOf(
-			options.steps ?? [changeStep("first", [], ["src/first/"])],
-		),
+		plan,
 		repositoryRoot: paths.repositoryRoot,
 		baseBranch: repository.currentBranch,
 		baseCommit: repository.head,
@@ -344,6 +356,42 @@ describe("admitting the steps a running session proposes", () => {
 		expect(Object.keys(state.steps)).toEqual(["first"]);
 		expect(state.plan.steps).toHaveLength(1);
 		expect(state.events).toHaveLength(0);
+	});
+
+	it("refuses to widen derived authority while admitting a step", async () => {
+		const harness = await createAdmissionHarness({
+			authoritySource: "derived",
+		});
+		await markRunning(harness.store, harness.runId, "first");
+
+		await expect(
+			harness.store.transaction(harness.runId, (current) => {
+				const admitted = admitSteps(
+					current,
+					{
+						steps: [
+							changeStep("follow-up", ["first"], ["src/first/follow-up/"]),
+						],
+						proposedBy: "first",
+						reason: "the first step revealed follow-up work",
+					},
+					"2026-08-03T01:00:00.000Z",
+				);
+				if (!admitted.authority) {
+					throw new Error("expected frozen authority");
+				}
+				const envelope = structuredClone(admitted.authority.envelope);
+				envelope.repositories[0]?.mutation.allowedPaths.push("docs/");
+				return {
+					...admitted,
+					authority: {
+						...admitted.authority,
+						envelope,
+						digest: authorityEnvelopeDigest(envelope),
+					},
+				};
+			}),
+		).rejects.toThrow(/only change with its plan revision/);
 	});
 
 	it("refuses growth a run cannot bound or a session cannot own", async () => {
