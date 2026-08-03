@@ -4,7 +4,6 @@ import {
 	mkdir,
 	mkdtemp,
 	realpath,
-	rm,
 	symlink,
 	writeFile,
 } from "node:fs/promises";
@@ -16,6 +15,7 @@ import { createOrchestrationRun } from "../src/domain/run.js";
 import type { TaskPlan } from "../src/domain/types.js";
 import { GitCli, integrationScratchDirectoryPrefix } from "../src/git/git.js";
 import { GitWorktreeManager, isPathInside } from "../src/git/worktrees.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -77,11 +77,7 @@ function createRun(repositoryRoot: string, baseCommit: string) {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("GitWorktreeManager", () => {

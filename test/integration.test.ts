@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,6 +19,7 @@ import type {
 	WorkerExecutionResult,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 import { reviewResult } from "./helpers/review.js";
 import { waitForOrchestration } from "./helpers/wait.js";
 
@@ -138,11 +139,7 @@ async function showFile(
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("sequential task integration", () => {

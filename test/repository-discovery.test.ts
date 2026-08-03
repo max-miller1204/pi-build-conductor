@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,16 +12,13 @@ import {
 	discoverRepositoryProfile,
 	renderRepositoryProfile,
 } from "../src/planning/repository-discovery.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 async function createRepository(): Promise<string> {

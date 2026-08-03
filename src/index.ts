@@ -45,6 +45,7 @@ export * from "./planning/repository-discovery.js";
 export * from "./review/prompts.js";
 export * from "./review/review-policy.js";
 export * from "./review/review-report.js";
+export * from "./security/authority.js";
 export * from "./security/capabilities.js";
 export * from "./security/envelope.js";
 export * from "./security/policy.js";

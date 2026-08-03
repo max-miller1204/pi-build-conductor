@@ -27,6 +27,10 @@ import {
 	stepWorkspaceRequirement,
 	WORKSPACE_REQUIREMENTS,
 } from "../engine/workspaces.js";
+import {
+	assertStoredAuthorityConsistency,
+	validateStoredAuthority,
+} from "../security/authority.js";
 import { assertCapabilityProfiles } from "../security/capabilities.js";
 import {
 	acquireStorageLock,
@@ -558,6 +562,22 @@ export function validateStoredWorkflowRun(value: unknown): StoredWorkflowRun {
 	const plan = validateWorkflowPlan(run.plan);
 	const profiles: unknown = run.capabilityProfiles;
 	assertCapabilityProfiles(profiles, "run.capabilityProfiles");
+	if (run.authority !== undefined) {
+		const repositoryRoot = run.repositoryRoot;
+		assertString(repositoryRoot, "run.repositoryRoot");
+		// The envelope is the source this run's authority derives from, so a
+		// snapshot whose profiles or plan no longer match it would execute under
+		// authority the user never approved.
+		assertStoredAuthorityConsistency(
+			validateStoredAuthority(run.authority, "run.authority"),
+			{
+				repositoryRoot,
+				plan,
+				capabilityProfiles: profiles,
+				path: "run.authority",
+			},
+		);
+	}
 	if (
 		!Number.isSafeInteger(run.maxConcurrentWorkers) ||
 		(run.maxConcurrentWorkers as number) < 1 ||

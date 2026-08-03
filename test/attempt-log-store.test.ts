@@ -4,7 +4,6 @@ import {
 	mkdir,
 	mkdtemp,
 	readFile,
-	rm,
 	stat,
 	writeFile,
 } from "node:fs/promises";
@@ -16,6 +15,7 @@ import {
 	AttemptLogStore,
 } from "../src/storage/attempt-log-store.js";
 import type { WorkerProgressEvent } from "../src/workers/backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const directories: string[] = [];
 
@@ -34,11 +34,7 @@ function progressEvents(entries: AttemptLogEntry[]): WorkerProgressEvent[] {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("AttemptLogStore", () => {

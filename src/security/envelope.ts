@@ -12,14 +12,17 @@ import {
 } from "../domain/dag.js";
 import { pathIsAllowed } from "../domain/paths.js";
 import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
-import { stepCapabilities } from "../domain/steps.js";
+import { type StepDefinition, stepCapabilities } from "../domain/steps.js";
 import {
 	type OrchestrationRun,
+	type RunCapabilityProfiles,
+	type RunSecurityPolicy,
 	STEP_CAPABILITIES,
 	type StepCapability,
 	type ValidationCommand,
 	type ValidationSandboxMode,
 } from "../domain/types.js";
+import type { WorkflowRunState } from "../engine/workflow-state.js";
 import {
 	EXTERNAL_EFFECT_BOUNDARY,
 	stepCapabilityProfile,
@@ -43,6 +46,13 @@ export const RESERVED_ESCALATION_CONDITIONS = [
 
 export type EscalationCondition =
 	(typeof RESERVED_ESCALATION_CONDITIONS)[number];
+
+/**
+ * Where an envelope came from. An authored envelope is a forward promise a
+ * user made and is held to completeness; a derived one describes authority a
+ * plan already carries and must stay faithful to it instead.
+ */
+export type EnvelopeSource = "authored" | "derived";
 
 /** One bounded sentence naming what each reserved condition withholds. */
 export const ESCALATION_CONDITION_DESCRIPTIONS: Record<
@@ -164,7 +174,7 @@ function readRepositoryRoot(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
-	source: "authored" | "derived",
+	source: EnvelopeSource,
 ): string {
 	if (source === "derived") {
 		if (typeof value !== "string" || value.length === 0) {
@@ -335,7 +345,7 @@ function readRepositories(
 	value: unknown,
 	path: string,
 	issues: PlanValidationIssue[],
-	source: "authored" | "derived",
+	source: EnvelopeSource,
 ): EnvelopeRepository[] {
 	if (!Array.isArray(value) || value.length === 0) {
 		addIssue(
@@ -543,7 +553,7 @@ function readEscalation(
 
 function normalizeAuthorityEnvelope(
 	value: unknown,
-	source: "authored" | "derived",
+	source: EnvelopeSource,
 ): AuthorityEnvelope {
 	const issues: PlanValidationIssue[] = [];
 	if (!isRecord(value)) {
@@ -662,6 +672,18 @@ export function readAuthorityEnvelopeDocument(
 	return validateAuthorityEnvelope(value);
 }
 
+/**
+ * Revalidates an envelope read back from storage under the source it was
+ * frozen with, so a stored derived envelope is held to the same rules it was
+ * created under rather than to an authored promise's completeness.
+ */
+export function validateStoredAuthorityEnvelope(
+	value: unknown,
+	source: EnvelopeSource,
+): AuthorityEnvelope {
+	return normalizeAuthorityEnvelope(value, source);
+}
+
 /** The repository entry an envelope approves for this root, if any. */
 export function envelopeRepository(
 	envelope: AuthorityEnvelope,
@@ -711,23 +733,40 @@ export function authorityEnvelopeDigest(envelope: AuthorityEnvelope): string {
 }
 
 /**
- * The envelope an already approved run implies. Today authority is approved
- * implicitly, step by step, so this reads back the outcome, criteria, paths,
- * capabilities, sandboxing, and validation the user already approved and
- * states them as one object. Session 39e inverts this: the envelope becomes
- * the source those step declarations derive from and moves this boundary to
- * WorkflowRunState; this session deliberately retains OrchestrationRun.
+ * The effective authority of one step: the capabilities the frozen profiles
+ * actually grant it, rather than the ones its declaration asked for.
  */
-export function envelopeFromApprovedRun(
-	run: OrchestrationRun,
-): AuthorityEnvelope {
+export function effectiveStepCapabilities(
+	step: StepDefinition,
+	profiles: RunCapabilityProfiles | undefined,
+): StepCapability[] {
+	return profiles
+		? stepCapabilityProfile(profiles, step).capabilities
+		: stepCapabilities(step);
+}
+
+/** The execution record an envelope can be read back from. */
+export interface DerivableRun {
+	repositoryRoot: string;
+	/** A task plan or workflow plan document, in either schema. */
+	plan: unknown;
+	capabilityProfiles?: RunCapabilityProfiles;
+	sandbox: EnvelopeSandboxPolicy;
+}
+
+/**
+ * The envelope a plan implies: the outcome, criteria, paths, capabilities,
+ * sandboxing, and validation its steps already carry, stated as one object.
+ *
+ * This is a read-back of authority a plan describes, so it is normalized as
+ * `derived` and stays faithful to that plan rather than being held to the
+ * completeness an authored promise requires.
+ */
+export function deriveAuthorityEnvelope(run: DerivableRun): AuthorityEnvelope {
 	const plan = readWorkflowPlanDocument(run.plan);
-	const profiles = run.securityPolicy.workers.capabilityProfiles;
 	const effectiveCapabilities = plan.steps.map((step) => ({
 		step,
-		capabilities: profiles
-			? stepCapabilityProfile(profiles, step).capabilities
-			: stepCapabilities(step),
+		capabilities: effectiveStepCapabilities(step, run.capabilityProfiles),
 	}));
 	const capabilities = orderedCapabilities(
 		effectiveCapabilities.flatMap((entry) => entry.capabilities),
@@ -766,16 +805,60 @@ export function envelopeFromApprovedRun(
 				},
 			],
 			externalEffects: "forbidden",
-			sandbox: {
-				workers: run.securityPolicy.workers.isolation,
-				validation: run.securityPolicy.validation.sandbox,
-			},
+			sandbox: run.sandbox,
 			validation: {
 				required: plan.finalValidationCommands,
 				perChange: true,
 			},
 		},
 		"derived",
+	);
+}
+
+/** The sandbox boundary a run's security policy approves. */
+export function envelopeSandboxPolicy(
+	securityPolicy: RunSecurityPolicy,
+): EnvelopeSandboxPolicy {
+	return {
+		workers: securityPolicy.workers.isolation,
+		validation: securityPolicy.validation.sandbox,
+	};
+}
+
+/**
+ * The envelope an approved run implies. A run created before the envelope
+ * became the source has no frozen envelope, so its authority is still only
+ * readable back from the plan its user approved step by step.
+ */
+export function envelopeFromApprovedRun(
+	run: OrchestrationRun,
+): AuthorityEnvelope {
+	return deriveAuthorityEnvelope({
+		repositoryRoot: run.repositoryRoot,
+		plan: run.plan,
+		...(run.securityPolicy.workers.capabilityProfiles
+			? { capabilityProfiles: run.securityPolicy.workers.capabilityProfiles }
+			: {}),
+		sandbox: envelopeSandboxPolicy(run.securityPolicy),
+	});
+}
+
+/**
+ * The envelope an engine run executes under: the frozen one when the run
+ * carries it, and otherwise the one its generalized workflow plan implies.
+ */
+export function envelopeFromWorkflowRun(
+	state: WorkflowRunState,
+	securityPolicy: RunSecurityPolicy,
+): AuthorityEnvelope {
+	return (
+		state.authority?.envelope ??
+		deriveAuthorityEnvelope({
+			repositoryRoot: state.repositoryRoot,
+			plan: state.plan,
+			capabilityProfiles: state.capabilityProfiles,
+			sandbox: envelopeSandboxPolicy(securityPolicy),
+		})
 	);
 }
 

@@ -34,6 +34,8 @@ export interface ValidatedChangeOptions {
 	validator: TaskValidator;
 	git: Pick<GitClient, "commitTaskWork" | "status">;
 	securityPolicy: RunSecurityPolicy;
+	/** Paths the run's approved envelope withholds from every change. */
+	withheldPaths?: readonly string[];
 }
 
 export interface ChangeStepHandlerOptions extends ValidatedChangeOptions {
@@ -194,6 +196,9 @@ export async function runValidatedChange(
 				options.securityPolicy,
 				context.capabilityProfile,
 			),
+			...(options.withheldPaths
+				? { withheldPaths: options.withheldPaths }
+				: {}),
 			signal: context.signal,
 		});
 		evidence = validation.evidence;
@@ -274,6 +279,9 @@ export class ChangeStepHandler implements StepHandler {
 				context: context.execution,
 				profile: context.capabilityProfile,
 				securityPolicy: this.options.securityPolicy,
+				...(this.options.withheldPaths
+					? { withheldPaths: this.options.withheldPaths }
+					: {}),
 				...(this.options.requestText === undefined
 					? {}
 					: { requestText: this.options.requestText }),

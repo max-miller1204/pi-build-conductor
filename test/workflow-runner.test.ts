@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -26,17 +26,14 @@ import {
 	newWorkflowRunId,
 	runReadOnlyWorkflow,
 } from "../src/workflows/runner.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
 const securityPolicy = readSecurityPolicy({});
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 async function createFixture() {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -38,6 +38,7 @@ import {
 	CHANGE_RUN_CRASH_RUN_ID,
 	ChangeRunWorkers,
 } from "./helpers/change-run-workers.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 import { waitForOrchestration } from "./helpers/wait.js";
 
 const execute = promisify(execFile);
@@ -54,11 +55,7 @@ class TestArtifactStore extends ArtifactStore {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 async function createRepository() {

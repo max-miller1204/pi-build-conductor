@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,6 +12,7 @@ import { createOrchestrationRun } from "../src/domain/run.js";
 import extension, { selectedWorkerModel } from "../src/extension.js";
 import { GitCli } from "../src/git/git.js";
 import { RunStore } from "../src/storage/run-store.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -71,11 +72,7 @@ async function repositoryFixture(): Promise<{
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("run inspection extension commands", () => {

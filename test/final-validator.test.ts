@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GitClient } from "../src/git/git.js";
 import { LocalFinalValidator } from "../src/validation/final-validator.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const directories: string[] = [];
 
@@ -14,11 +15,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("LocalFinalValidator", () => {

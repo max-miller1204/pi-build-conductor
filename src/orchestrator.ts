@@ -51,6 +51,7 @@ import {
 	parseReviewReport,
 } from "./review/review-report.js";
 import { describeCapabilityProfile } from "./security/capabilities.js";
+import type { AuthorityEnvelope } from "./security/envelope.js";
 import {
 	blockedWorkerResponse,
 	readSecurityPolicy,
@@ -101,6 +102,8 @@ export interface CreateOrchestrationRunInput {
 	requestPath: string;
 	requestText: string;
 	plan: TaskPlan;
+	/** The authority envelope the user approved before the work was known. */
+	envelope?: AuthorityEnvelope;
 	maxConcurrentWorkers?: number;
 	planSource?: Exclude<PlanRevisionSource, "edited" | "restored" | "migrated">;
 }
@@ -611,6 +614,7 @@ export class Orchestrator {
 			integrationBranch: `conductor/${id}/integration`,
 			request: { sourcePath: input.requestPath, text: input.requestText },
 			securityPolicy: this.securityPolicy,
+			...(input.envelope ? { envelope: input.envelope } : {}),
 			plan: input.plan,
 			maxConcurrentWorkers:
 				input.maxConcurrentWorkers ?? MIN_CONCURRENT_WORKERS,

@@ -1,3 +1,5 @@
+import type { FrozenAuthority } from "../security/authority.js";
+
 export const RUN_SCHEMA_VERSION = 9 as const;
 export const PLAN_SCHEMA_VERSION = 3 as const;
 export const MERGE_READY_EVIDENCE_VERSION = 2 as const;
@@ -439,6 +441,12 @@ export interface OrchestrationRun {
 	integrationBranch: string;
 	request: RunRequest;
 	securityPolicy: RunSecurityPolicy;
+	/**
+	 * The approved authority this run executes under, frozen when it was
+	 * created. Runs created before the envelope became the source carry none,
+	 * and their authority is only readable back from the approved plan.
+	 */
+	authority?: FrozenAuthority;
 	plan: TaskPlan;
 	planRevision: number;
 	planRevisions: PlanRevision[];

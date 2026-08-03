@@ -36,6 +36,7 @@ import type { WorktreeManager } from "../git/worktrees.js";
 import { retryableRunWork } from "../inspection/run-control.js";
 import { readReviewFindings } from "../inspection/run-inspector.js";
 import { engineRunView, type RunView } from "../inspection/run-view.js";
+import { withheldPaths } from "../security/authority.js";
 import { defaultCapabilityProfiles } from "../security/capabilities.js";
 import { workerLaunchPolicy } from "../security/policy.js";
 import type { ArtifactStore } from "../storage/artifact-store.js";
@@ -557,6 +558,9 @@ export class EngineChangeRunner {
 			capabilityProfiles:
 				run.securityPolicy.workers.capabilityProfiles ??
 				defaultCapabilityProfiles(),
+			// The engine executes under the same approved authority the run was
+			// frozen with, so the snapshot carries it rather than re-deriving it.
+			...(run.authority ? { authority: run.authority } : {}),
 			maxConcurrentWorkers: run.maxConcurrentWorkers,
 			createdAt,
 		});
@@ -627,6 +631,9 @@ export class EngineChangeRunner {
 						validator: this.dependencies.validator,
 						git: this.dependencies.git,
 						securityPolicy: run.securityPolicy,
+						// A withheld path cannot be expressed as a narrower approved
+						// path, so every mutating handler enforces it directly.
+						withheldPaths: withheldPaths(run.authority, run.repositoryRoot),
 						requestText: run.request.text,
 					}),
 				),

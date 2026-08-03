@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,7 @@ import type {
 	WorkerInstance,
 } from "../src/workers/backend.js";
 import { OfficialServerBackend } from "../src/workers/server-backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 import { reviewResult } from "./helpers/review.js";
 
 const execute = promisify(execFile);
@@ -158,11 +159,7 @@ function implementationTask(): TaskDefinition {
 
 afterEach(async () => {
 	await Promise.all(backends.splice(0).map((backend) => backend.cleanup()));
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe.runIf(Boolean(socketPath))("real server orchestrator flow", () => {

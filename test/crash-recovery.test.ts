@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,7 @@ import type {
 	WorkerExecutionOptions,
 	WorkerInstance,
 } from "../src/workers/backend.js";
+import { removeTemporaryDirectories } from "./helpers/cleanup.js";
 
 const execute = promisify(execFile);
 const directories: string[] = [];
@@ -190,11 +191,7 @@ function recoveryOrchestrator(
 }
 
 afterEach(async () => {
-	await Promise.all(
-		directories
-			.splice(0)
-			.map((directory) => rm(directory, { recursive: true, force: true })),
-	);
+	await removeTemporaryDirectories(directories);
 });
 
 describe("process crash recovery", () => {

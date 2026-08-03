@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { topologicalTaskIds, validateTaskPlan } from "../domain/dag.js";
+import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
 import { recoverInterruptedRun } from "../domain/run.js";
 import {
 	type AttemptState,
@@ -21,6 +22,10 @@ import {
 	type TaskState,
 	type WorkerUiMethod,
 } from "../domain/types.js";
+import {
+	assertStoredAuthorityConsistency,
+	validateStoredAuthority,
+} from "../security/authority.js";
 import {
 	assertRunSecurityPolicy,
 	legacySecurityPolicy,
@@ -211,7 +216,8 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 	) {
 		throw new Error(`Invalid run state: ${String(value.state)}`);
 	}
-	assertRunSecurityPolicy(value.securityPolicy);
+	const securityPolicy = value.securityPolicy;
+	assertRunSecurityPolicy(securityPolicy);
 	for (const field of [
 		"repositoryRoot",
 		"baseBranch",
@@ -232,6 +238,28 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 		throw new Error("run.integrationBranch must differ from run.baseBranch");
 	}
 	const plan = validateTaskPlan(value.plan);
+	if (value.authority !== undefined) {
+		const repositoryRoot = value.repositoryRoot;
+		assertString(repositoryRoot, "run.repositoryRoot");
+		const capabilityProfiles = securityPolicy.workers.capabilityProfiles;
+		if (!capabilityProfiles) {
+			throw new Error(
+				"run.authority requires a security policy that freezes capability profiles",
+			);
+		}
+		// The frozen envelope is the source this run's capability profiles and
+		// path locks derive from, so a stored run whose plan or profiles drifted
+		// away from it must not load and execute under unapproved authority.
+		assertStoredAuthorityConsistency(
+			validateStoredAuthority(value.authority, "run.authority"),
+			{
+				repositoryRoot,
+				plan: readWorkflowPlanDocument(plan),
+				capabilityProfiles,
+				path: "run.authority",
+			},
+		);
+	}
 	if (
 		!Number.isInteger(value.maxConcurrentWorkers) ||
 		(value.maxConcurrentWorkers as number) < MIN_CONCURRENT_WORKERS ||
@@ -1407,6 +1435,45 @@ function parseJson(text: string, context: string): unknown {
 	}
 }
 
+/**
+ * The authority a run was frozen with is the authority it finishes under.
+ *
+ * An approved envelope is a promise the user made before the work was known,
+ * so nothing may edit it afterwards. An envelope derived from the plan
+ * describes that plan, so it may only ever move together with a plan revision,
+ * and a run can neither gain nor lose one after it was created.
+ */
+function assertAuthorityTransition(
+	current: OrchestrationRun,
+	proposed: OrchestrationRun,
+): void {
+	if (!current.authority) {
+		if (proposed.authority) {
+			throw new Error(
+				"A run cannot gain a frozen authority envelope after creation",
+			);
+		}
+		return;
+	}
+	if (!proposed.authority) {
+		throw new Error("A run's frozen authority envelope cannot be dropped");
+	}
+	if (proposed.authority.source !== current.authority.source) {
+		throw new Error("A run's authority source is immutable");
+	}
+	if (proposed.authority.digest === current.authority.digest) {
+		return;
+	}
+	if (current.authority.source === "authored") {
+		throw new Error("An approved authority envelope is immutable");
+	}
+	if (proposed.planRevision === current.planRevision) {
+		throw new Error(
+			"A derived authority envelope can only change with its plan revision",
+		);
+	}
+}
+
 function assertPlanHistoryTransition(
 	current: OrchestrationRun,
 	proposed: OrchestrationRun,
@@ -1417,6 +1484,7 @@ function assertPlanHistoryTransition(
 	) {
 		throw new Error("Run security policy is immutable");
 	}
+	assertAuthorityTransition(current, proposed);
 	if (proposed.planRevisions.length < current.planRevisions.length) {
 		throw new Error("Plan revision history cannot be truncated");
 	}

@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ReviewCategory, ReviewSeverity } from "../../src/domain/types.js";
 import { reviewStepId } from "../../src/engine/steps/review.js";
 import {
@@ -37,6 +37,8 @@ export class ChangeRunWorkers implements WorkerBackend {
 	readonly prompts: string[] = [];
 	/** Set to fail the next change worker, as a first attempt would. */
 	failNextChange = false;
+	/** The repository-relative file the change worker writes. */
+	changeFile = "src/result.txt";
 	/** Awaited by the change worker before it reports, to hold a run open. */
 	onChangeWorker?: () => Promise<void>;
 	private next = 1;
@@ -83,7 +85,7 @@ export class ChangeRunWorkers implements WorkerBackend {
 					}),
 				};
 			}
-			await this.write(worker.cwd, "result.txt", "implemented\n");
+			await this.write(worker.cwd, this.changeFile, "implemented\n");
 			const gate = this.onChangeWorker?.();
 			return {
 				completion: (async () => {
@@ -93,7 +95,7 @@ export class ChangeRunWorkers implements WorkerBackend {
 			};
 		}
 		if (prompt.includes("You are the repair worker")) {
-			await this.write(worker.cwd, "review-fix.txt", "repaired\n");
+			await this.write(worker.cwd, "src/review-fix.txt", "repaired\n");
 			return { completion: Promise.resolve({ status: "succeeded" }) };
 		}
 		const category = /independent ([a-z]+) reviewer/.exec(prompt)?.[1];
@@ -137,8 +139,9 @@ export class ChangeRunWorkers implements WorkerBackend {
 		worker.status = "stopped";
 	}
 
-	private async write(cwd: string, name: string, body: string): Promise<void> {
-		await mkdir(join(cwd, "src"), { recursive: true });
-		await writeFile(join(cwd, "src", name), body);
+	private async write(cwd: string, path: string, body: string): Promise<void> {
+		const target = join(cwd, path);
+		await mkdir(dirname(target), { recursive: true });
+		await writeFile(target, body);
 	}
 }

@@ -113,7 +113,10 @@ describe("plan presentation", () => {
 			now: "2026-01-01T00:00:00.000Z",
 		});
 		const summary = renderApprovalSummary(run);
-		expect(summary).toContain("Authority envelope:");
+		// This run froze the envelope its own plan implies, so the heading says
+		// where that authority came from rather than presenting it as approved
+		// before the plan existed.
+		expect(summary).toContain("Authority envelope (read back from this plan):");
 		expect(summary).toContain('Outcome: "Diamond build"');
 		// Acceptance criteria and reserved decisions appear nowhere else.
 		expect(summary).toContain('  - "Base works"');
