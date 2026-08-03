@@ -160,7 +160,7 @@ describe("review and repair step profiles", () => {
 			investigationStep("review-1-security", [], { profile: "review" }),
 		]);
 		const step = plan.steps[0];
-		if (!step || step.kind !== "investigation") {
+		if (step?.kind !== "investigation") {
 			throw new Error("missing step");
 		}
 

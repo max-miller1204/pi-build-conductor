@@ -22,6 +22,10 @@ import {
 	narrowCapabilityProfile,
 	stepCapabilityProfile,
 } from "../security/capabilities.js";
+import {
+	authorityEnvelopeLines,
+	envelopeFromApprovedRun,
+} from "../security/envelope.js";
 import { securityPolicyLines } from "../security/policy.js";
 
 const SIMPLE_ARGUMENT = /^[A-Za-z0-9_./:@%+=,-]+$/;
@@ -181,6 +185,11 @@ export function renderApprovalSummary(run: OrchestrationRun): string {
 		`DAG layers: ${layerPreview}`,
 		`Worker limit: ${run.maxConcurrentWorkers} | Approved paths: ${pathCount} | Focused checks: ${focusedCommandCount}`,
 		`Integration branch: ${run.integrationBranch}`,
+		// The objective-level authority this approval grants. Today it is read
+		// back from the plan the user is approving; once the envelope is
+		// approved first, the step authority below derives from it instead.
+		"Authority envelope:",
+		...authorityEnvelopeLines(envelopeFromApprovedRun(run)),
 		"Step authority:",
 		...stepAuthority,
 		"Final validation:",

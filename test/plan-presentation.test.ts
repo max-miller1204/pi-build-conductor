@@ -99,6 +99,32 @@ describe("plan presentation", () => {
 		);
 	});
 
+	it("states the objective-level authority envelope the approval grants", () => {
+		const run = createOrchestrationRun({
+			id: "run-1",
+			repositoryRoot: "/repo",
+			baseBranch: "main",
+			baseCommit: "abc123",
+			integrationBranch: "conductor/run-1/integration",
+			request: { sourcePath: "/repo/request.md", text: "Build it" },
+			securityPolicy: readSecurityPolicy({}),
+			plan,
+			maxConcurrentWorkers: 3,
+			now: "2026-01-01T00:00:00.000Z",
+		});
+		const summary = renderApprovalSummary(run);
+		expect(summary).toContain("Authority envelope:");
+		expect(summary).toContain("Outcome: Diamond build");
+		// Acceptance criteria and reserved decisions appear nowhere else.
+		expect(summary).toContain("  - Base works");
+		expect(summary).toContain("  - UI works");
+		expect(summary).toContain("    mutable paths: src/base/, src/ui/");
+		expect(summary).toContain("Reserved for the user, always escalated:");
+		expect(summary).toContain(
+			"  - widen-mutation-authority: mutate a path or exercise a capability this envelope does not grant",
+		);
+	});
+
 	it("marks derived authority for legacy policies without frozen profiles", () => {
 		const run = createOrchestrationRun({
 			id: "run-1",
