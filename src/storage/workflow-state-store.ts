@@ -28,6 +28,7 @@ import {
 	WORKSPACE_REQUIREMENTS,
 } from "../engine/workspaces.js";
 import {
+	assertAuthorityTransition,
 	assertStoredAuthorityConsistency,
 	validateStoredAuthority,
 } from "../security/authority.js";
@@ -724,6 +725,11 @@ export class FileWorkflowStateStore implements WorkflowStateStore {
 			if (JSON.stringify(next) === baseline) {
 				return stored.run;
 			}
+			assertAuthorityTransition(
+				stored.run.authority,
+				next.authority,
+				JSON.stringify(next.plan) !== JSON.stringify(stored.run.plan),
+			);
 			await this.writeAtomic({
 				schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
 				revision: stored.revision + 1,

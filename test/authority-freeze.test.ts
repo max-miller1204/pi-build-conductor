@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { createOrchestrationRun, reviseRunPlan } from "../src/domain/run.js";
+import { readWorkflowPlanDocument } from "../src/domain/plan-translation.js";
 import { WORKFLOW_PLAN_SCHEMA_VERSION } from "../src/domain/steps.js";
 import type { OrchestrationRun, TaskPlan } from "../src/domain/types.js";
 import { createWorkflowRunState } from "../src/engine/workflow-state.js";
@@ -444,6 +445,16 @@ describe("the authority envelope frozen at run creation", () => {
 		]);
 	});
 
+	it("refuses an authored sandbox the run policy will not enforce", () => {
+		const envelope = authoredEnvelopeFor("/repo", {
+			sandbox: { workers: "worktree-only", validation: "nono" },
+		});
+
+		expect(violationIssues(() => runWith("/repo", envelope))).toEqual([
+			"The approved envelope requires validation sandbox nono, but the run security policy uses none; set PI_ORCHESTRATOR_VALIDATION_SANDBOX=nono before creating the run",
+		]);
+	});
+
 	it("freezes the authority a plan implies when none was authored", async () => {
 		const harness = await createHarness({ envelope: "none" });
 		const created = await harness.create();
@@ -611,6 +622,41 @@ describe("stored authority", () => {
 		);
 	});
 
+	it("refuses a stored sandbox that disagrees with the run policy", async () => {
+		const { harness, runId } = await storedRun((stored) => {
+			const authority = stored.authority as {
+				digest: string;
+				envelope: AuthorityEnvelope;
+			};
+			authority.envelope.sandbox.validation = "nono";
+			authority.digest = authorityEnvelopeDigest(authority.envelope);
+			return stored;
+		});
+
+		await expect(loadFailure(harness.store, runId)).resolves.toMatch(
+			/PI_ORCHESTRATOR_VALIDATION_SANDBOX=nono/,
+		);
+	});
+
+	it("refuses a stored derived envelope that no longer matches its plan", async () => {
+		const { harness, runId } = await storedRun(
+			(stored) => {
+				const authority = stored.authority as {
+					digest: string;
+					envelope: AuthorityEnvelope;
+				};
+				authority.envelope.outcome = "A substituted outcome";
+				authority.digest = authorityEnvelopeDigest(authority.envelope);
+				return stored;
+			},
+			{ envelope: "none" },
+		);
+
+		await expect(loadFailure(harness.store, runId)).resolves.toMatch(
+			/derived envelope must match the plan it was derived from/,
+		);
+	});
+
 	it("carries the frozen authority into the engine snapshot", async () => {
 		const harness = await createHarness();
 		const created = await harness.create();
@@ -667,6 +713,57 @@ describe("stored authority", () => {
 				}),
 			),
 		).rejects.toThrow(/plan exceeds the approved authority envelope/);
+	});
+
+	it("keeps engine snapshot authority immutable across transactions", async () => {
+		const harness = await createHarness();
+		const created = await harness.create();
+		const authority = created.authority;
+		if (!authority) {
+			throw new Error("expected the created run to freeze an authority");
+		}
+		const state = createWorkflowRunState({
+			id: "run-authority-transition",
+			plan: readWorkflowPlanDocument(created.plan),
+			repositoryRoot: harness.repositoryRoot,
+			baseBranch: "main",
+			baseCommit: "a".repeat(40),
+			integrationBranch: "conductor/run-authority-transition/integration",
+			integrationHead: "a".repeat(40),
+			capabilityProfiles: capabilityProfilesFromEnvelope(
+				authority.envelope,
+				harness.repositoryRoot,
+			),
+			authority,
+			maxConcurrentWorkers: 2,
+		});
+		await harness.dependencies.workflowStates.create(state);
+
+		await expect(
+			harness.dependencies.workflowStates.transaction(state.id, (current) => {
+				const { authority: _authority, ...withoutAuthority } = current;
+				return withoutAuthority;
+			}),
+		).rejects.toThrow(/cannot be dropped/);
+		await expect(
+			harness.dependencies.workflowStates.transaction(state.id, (current) => {
+				if (!current.authority) {
+					throw new Error("expected frozen authority");
+				}
+				const envelope = {
+					...current.authority.envelope,
+					outcome: "A replacement outcome",
+				};
+				return {
+					...current,
+					authority: {
+						...current.authority,
+						envelope,
+						digest: authorityEnvelopeDigest(envelope),
+					},
+				};
+			}),
+		).rejects.toThrow(/approved authority envelope is immutable/);
 	});
 });
 

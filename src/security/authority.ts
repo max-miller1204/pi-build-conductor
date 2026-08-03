@@ -275,6 +275,28 @@ export interface FrozenRunAuthority {
 	securityPolicy: RunSecurityPolicy;
 }
 
+function sandboxAuthorityIssues(
+	envelope: AuthorityEnvelope,
+	securityPolicy: RunSecurityPolicy,
+): AuthorityIssue[] {
+	const issues: AuthorityIssue[] = [];
+	if (envelope.sandbox.workers !== securityPolicy.workers.isolation) {
+		issues.push({
+			code: "worker_sandbox_mismatch",
+			path: "sandbox.workers",
+			message: `The approved envelope requires ${envelope.sandbox.workers} worker isolation, but the run security policy uses ${securityPolicy.workers.isolation}`,
+		});
+	}
+	if (envelope.sandbox.validation !== securityPolicy.validation.sandbox) {
+		issues.push({
+			code: "validation_sandbox_mismatch",
+			path: "sandbox.validation",
+			message: `The approved envelope requires validation sandbox ${envelope.sandbox.validation}, but the run security policy uses ${securityPolicy.validation.sandbox}; set PI_ORCHESTRATOR_VALIDATION_SANDBOX=${envelope.sandbox.validation} before creating the run`,
+		});
+	}
+	return issues;
+}
+
 /**
  * Freezes the authority one run executes under.
  *
@@ -313,6 +335,10 @@ export function freezeRunAuthority(
 				: {}),
 			sandbox: envelopeSandboxPolicy(input.securityPolicy),
 		});
+	const sandboxIssues = sandboxAuthorityIssues(envelope, input.securityPolicy);
+	if (sandboxIssues.length > 0) {
+		throw new AuthorityViolationError(sandboxIssues);
+	}
 	const capabilityProfiles = capabilityProfilesFromEnvelope(
 		envelope,
 		input.repositoryRoot,
@@ -416,9 +442,23 @@ export function assertStoredAuthorityConsistency(
 		repositoryRoot: string;
 		plan: WorkflowPlan;
 		capabilityProfiles: RunCapabilityProfiles;
+		securityPolicy?: RunSecurityPolicy;
 		path: string;
 	},
 ): void {
+	if (input.securityPolicy) {
+		const sandboxIssues = sandboxAuthorityIssues(
+			authority.envelope,
+			input.securityPolicy,
+		);
+		if (sandboxIssues.length > 0) {
+			throw new Error(
+				`${input.path} sandbox must match the run security policy: ${sandboxIssues
+					.map((issue) => issue.message)
+					.join("; ")}`,
+			);
+		}
+	}
 	const expected = capabilityProfilesFromEnvelope(
 		authority.envelope,
 		input.repositoryRoot,
@@ -427,6 +467,19 @@ export function assertStoredAuthorityConsistency(
 		throw new Error(
 			`${input.path} capability profiles must be the ones the approved envelope grants`,
 		);
+	}
+	if (authority.source === "derived" && input.securityPolicy) {
+		const derived = deriveAuthorityEnvelope({
+			repositoryRoot: input.repositoryRoot,
+			plan: input.plan,
+			capabilityProfiles: input.capabilityProfiles,
+			sandbox: envelopeSandboxPolicy(input.securityPolicy),
+		});
+		if (authorityEnvelopeDigest(derived) !== authority.digest) {
+			throw new Error(
+				`${input.path} derived envelope must match the plan it was derived from`,
+			);
+		}
 	}
 	const issues = planAuthorityIssues(
 		input.plan,
@@ -439,6 +492,39 @@ export function assertStoredAuthorityConsistency(
 			`${input.path} plan exceeds the approved authority envelope: ${issues
 				.map((issue) => issue.message)
 				.join("; ")}`,
+		);
+	}
+}
+
+/** Enforces the authority identity one stored run may carry across a write. */
+export function assertAuthorityTransition(
+	current: FrozenAuthority | undefined,
+	proposed: FrozenAuthority | undefined,
+	planChanged: boolean,
+): void {
+	if (!current) {
+		if (proposed) {
+			throw new Error(
+				"A run cannot gain a frozen authority envelope after creation",
+			);
+		}
+		return;
+	}
+	if (!proposed) {
+		throw new Error("A run's frozen authority envelope cannot be dropped");
+	}
+	if (proposed.source !== current.source) {
+		throw new Error("A run's authority source is immutable");
+	}
+	if (proposed.digest === current.digest) {
+		return;
+	}
+	if (current.source === "authored") {
+		throw new Error("An approved authority envelope is immutable");
+	}
+	if (!planChanged) {
+		throw new Error(
+			"A derived authority envelope can only change with its plan revision",
 		);
 	}
 }

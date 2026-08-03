@@ -23,6 +23,7 @@ import {
 	type WorkerUiMethod,
 } from "../domain/types.js";
 import {
+	assertAuthorityTransition,
 	assertStoredAuthorityConsistency,
 	validateStoredAuthority,
 } from "../security/authority.js";
@@ -256,6 +257,7 @@ export function validateStoredRun(value: unknown): OrchestrationRun {
 				repositoryRoot,
 				plan: readWorkflowPlanDocument(plan),
 				capabilityProfiles,
+				securityPolicy,
 				path: "run.authority",
 			},
 		);
@@ -1435,45 +1437,6 @@ function parseJson(text: string, context: string): unknown {
 	}
 }
 
-/**
- * The authority a run was frozen with is the authority it finishes under.
- *
- * An approved envelope is a promise the user made before the work was known,
- * so nothing may edit it afterwards. An envelope derived from the plan
- * describes that plan, so it may only ever move together with a plan revision,
- * and a run can neither gain nor lose one after it was created.
- */
-function assertAuthorityTransition(
-	current: OrchestrationRun,
-	proposed: OrchestrationRun,
-): void {
-	if (!current.authority) {
-		if (proposed.authority) {
-			throw new Error(
-				"A run cannot gain a frozen authority envelope after creation",
-			);
-		}
-		return;
-	}
-	if (!proposed.authority) {
-		throw new Error("A run's frozen authority envelope cannot be dropped");
-	}
-	if (proposed.authority.source !== current.authority.source) {
-		throw new Error("A run's authority source is immutable");
-	}
-	if (proposed.authority.digest === current.authority.digest) {
-		return;
-	}
-	if (current.authority.source === "authored") {
-		throw new Error("An approved authority envelope is immutable");
-	}
-	if (proposed.planRevision === current.planRevision) {
-		throw new Error(
-			"A derived authority envelope can only change with its plan revision",
-		);
-	}
-}
-
 function assertPlanHistoryTransition(
 	current: OrchestrationRun,
 	proposed: OrchestrationRun,
@@ -1484,7 +1447,11 @@ function assertPlanHistoryTransition(
 	) {
 		throw new Error("Run security policy is immutable");
 	}
-	assertAuthorityTransition(current, proposed);
+	assertAuthorityTransition(
+		current.authority,
+		proposed.authority,
+		proposed.planRevision !== current.planRevision,
+	);
 	if (proposed.planRevisions.length < current.planRevisions.length) {
 		throw new Error("Plan revision history cannot be truncated");
 	}
