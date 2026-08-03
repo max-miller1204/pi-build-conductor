@@ -229,14 +229,8 @@ function readCapabilities(
 			`${path} must not contain duplicates`,
 		);
 	}
-	if (capabilities.length > 0 && !capabilities.includes("read-repository")) {
-		addIssue(
-			issues,
-			"unreadable_scope",
-			path,
-			`${path} must grant read-repository before granting any other capability`,
-		);
-	}
+	// Requiring read authority beside a narrower capability would make callers
+	// add authority they do not need, contradicting the fail-closed boundary.
 	return orderedCapabilities(capabilities);
 }
 
@@ -429,12 +423,16 @@ function readValidationExpectations(
 				`${path}.required`,
 				`${path}.required must be an array of command objects`,
 			);
-		} else {
-			required = value.required.map((item, index) =>
-				readCommandObject(item, `${path}.required[${index}]`, issues),
-			);
+			} else {
+				required = value.required.map((item, index) => {
+					const itemPath = `${path}.required[${index}]`;
+					if (isRecord(item)) {
+						rejectUnknownKeys(item, ["command", "args"], itemPath, issues);
+					}
+					return readCommandObject(item, itemPath, issues);
+				});
+			}
 		}
-	}
 	if (value.perChange !== undefined && typeof value.perChange !== "boolean") {
 		addIssue(
 			issues,
@@ -521,12 +519,10 @@ function readEscalation(
 	return { conditions: [...RESERVED_ESCALATION_CONDITIONS], reservedDecisions };
 }
 
-/**
- * Validates and normalizes an authored authority envelope. Every absent
- * optional field resolves to the least authority that field can express, so
- * an incomplete envelope narrows the run rather than widening it.
- */
-export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
+function normalizeAuthorityEnvelope(
+	value: unknown,
+	requireMutationCompleteness: boolean,
+): AuthorityEnvelope {
 	const issues: PlanValidationIssue[] = [];
 	if (!isRecord(value)) {
 		throw new EnvelopeValidationError([
@@ -597,7 +593,14 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 	const mutates = repositories.some((repository) =>
 		repository.mutation.capabilities.includes("mutate-repository"),
 	);
-	if (mutates && acceptanceCriteria.length === 0) {
+	// An authored envelope is a forward promise and must be complete. Derived
+	// read-back is history that already happened, so fidelity takes precedence
+	// over rejecting a gap in a plan that was valid when approved.
+	if (
+		requireMutationCompleteness &&
+		mutates &&
+		acceptanceCriteria.length === 0
+	) {
 		addIssue(
 			issues,
 			"required_acceptance_criteria",
@@ -605,7 +608,11 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 			"acceptanceCriteria must state at least one criterion when mutation authority is granted",
 		);
 	}
-	if (mutates && validation.required.length === 0) {
+	if (
+		requireMutationCompleteness &&
+		mutates &&
+		validation.required.length === 0
+	) {
 		addIssue(
 			issues,
 			"required_commands",
@@ -627,6 +634,15 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 		validation,
 		escalation,
 	};
+}
+
+/**
+ * Validates and normalizes an authored authority envelope. Every absent
+ * optional field resolves to the least authority that field can express, so
+ * an incomplete envelope narrows the run rather than widening it.
+ */
+export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
+	return normalizeAuthorityEnvelope(value, true);
 }
 
 /**
@@ -726,7 +742,8 @@ export function envelopeFromApprovedRun(
 			),
 		),
 	];
-	return validateAuthorityEnvelope({
+	return normalizeAuthorityEnvelope(
+		{
 		version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
 		outcome: plan.title,
 		acceptanceCriteria,
@@ -751,14 +768,30 @@ export function envelopeFromApprovedRun(
 			required: plan.finalValidationCommands,
 			perChange: true,
 		},
-	});
+		},
+		false,
+	);
+}
+
+function renderAuthoredScalar(value: string): string {
+	return JSON.stringify(value);
 }
 
 function renderedList(label: string, entries: readonly string[]): string[] {
 	if (entries.length === 0) {
 		return [`${label}: none`];
 	}
-	return [`${label}:`, ...entries.map((entry) => `  - ${entry}`)];
+	return [
+		`${label}:`,
+		...entries.map((entry) => `  - ${renderAuthoredScalar(entry)}`),
+	];
+}
+
+function renderedPaths(label: string, entries: readonly string[]): string[] {
+	return [
+		`    ${label}:`,
+		...entries.map((entry) => `      - ${renderAuthoredScalar(entry)}`),
+	];
 }
 
 /**
@@ -766,23 +799,29 @@ function renderedList(label: string, entries: readonly string[]): string[] {
  * session may do appears here, and everything reserved appears beside it.
  */
 export function authorityEnvelopeLines(envelope: AuthorityEnvelope): string[] {
+	const mutates = envelope.repositories.some((repository) =>
+		repository.mutation.capabilities.includes("mutate-repository"),
+	);
+	const acceptanceCriteria =
+		mutates && envelope.acceptanceCriteria.length === 0
+			? ["Acceptance criteria: none stated by this plan"]
+			: renderedList("Acceptance criteria", envelope.acceptanceCriteria);
 	const repositories = envelope.repositories.flatMap((repository) => {
 		const scope = repository.mutation;
-		const mutable = scope.capabilities.includes("mutate-repository")
-			? scope.allowedPaths.join(", ")
-			: "none (read-only)";
 		return [
-			`  ${repository.root}`,
+			`  ${renderAuthoredScalar(repository.root)}`,
 			`    capabilities: ${scope.capabilities.join(", ") || "none"}`,
-			`    mutable paths: ${mutable}`,
+			...(scope.capabilities.includes("mutate-repository")
+				? renderedPaths("mutable paths", scope.allowedPaths)
+				: ["    mutable paths: none (read-only)"]),
 			...(scope.forbiddenPaths.length > 0
-				? [`    withheld paths: ${scope.forbiddenPaths.join(", ")}`]
+				? renderedPaths("withheld paths", scope.forbiddenPaths)
 				: []),
 		];
 	});
 	return [
-		`Outcome: ${envelope.outcome}`,
-		...renderedList("Acceptance criteria", envelope.acceptanceCriteria),
+		`Outcome: ${renderAuthoredScalar(envelope.outcome)}`,
+		...acceptanceCriteria,
 		"Repositories:",
 		...repositories,
 		...renderedList("Forbidden actions", envelope.forbiddenActions),
@@ -795,7 +834,7 @@ export function authorityEnvelopeLines(envelope: AuthorityEnvelope): string[] {
 				`  - ${condition}: ${ESCALATION_CONDITION_DESCRIPTIONS[condition]}`,
 		),
 		...envelope.escalation.reservedDecisions.map(
-			(decision) => `  - reserved: ${decision}`,
+			(decision) => `  - reserved: ${renderAuthoredScalar(decision)}`,
 		),
 		EXTERNAL_EFFECT_BOUNDARY,
 	];

@@ -157,10 +157,12 @@ describe("approved authority envelope", () => {
 
 		const lines = authorityEnvelopeLines(envelope);
 		expect(lines).toContain(
-			"Outcome: Publish the versioned inter-extension worklist API",
+			'Outcome: "Publish the versioned inter-extension worklist API"',
 		);
-		expect(lines).toContain("    mutable paths: src/, test/, docs/protocol.md");
-		expect(lines).toContain("    withheld paths: src/generated/");
+		expect(lines).toContain("    mutable paths:");
+		expect(lines).toContain('      - "docs/protocol.md"');
+		expect(lines).toContain("    withheld paths:");
+		expect(lines).toContain('      - "src/generated/"');
 		expect(lines.join("\n")).toContain("Never publish to npm");
 		for (const condition of RESERVED_ESCALATION_CONDITIONS) {
 			expect(lines.join("\n")).toContain(`  - ${condition}: `);
@@ -273,22 +275,24 @@ describe("approved authority envelope", () => {
 			"repositories[0].mutation.allowedPaths must name at least one path when mutate-repository is granted",
 		]);
 
-		const unreadable = expectIssues(() =>
-			validateAuthorityEnvelope({
-				...authoredDocument(),
-				repositories: [
-					{
-						root: repositoryRoot,
-						mutation: {
-							capabilities: ["mutate-repository"],
-							allowedPaths: ["src/"],
-						},
+	});
+
+	it("accepts narrower capabilities without adding read authority", () => {
+		const envelope = validateAuthorityEnvelope({
+			...authoredDocument(),
+			repositories: [
+				{
+					root: repositoryRoot,
+					mutation: {
+						capabilities: ["mutate-repository"],
+						allowedPaths: ["src/"],
 					},
-				],
-			}),
-		);
-		expect(unreadable).toEqual([
-			"repositories[0].mutation.capabilities must grant read-repository before granting any other capability",
+				},
+			],
+		});
+
+		expect(envelope.repositories[0]?.mutation.capabilities).toEqual([
+			"mutate-repository",
 		]);
 	});
 
@@ -381,7 +385,7 @@ describe("approved authority envelope", () => {
 
 	it("requires outcome criteria and validation for mutation authority", () => {
 		const issues = expectIssues(() =>
-			validateAuthorityEnvelope({
+			readAuthorityEnvelopeDocument({
 				version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
 				outcome: "   ",
 				acceptanceCriteria: [],
@@ -441,6 +445,17 @@ describe("approved authority envelope", () => {
 					},
 				},
 				"validation.optional",
+			],
+			[
+				{
+					...authoredDocument(),
+					validation: {
+						required: [
+							{ command: "npm", args: ["test"], allowFailure: true },
+						],
+					},
+				},
+				"validation.required[0].allowFailure",
 			],
 			[
 				{
@@ -587,6 +602,30 @@ describe("approved authority envelope", () => {
 		}
 	});
 
+	it("reads back a mutating plan that stated no acceptance criteria", () => {
+		const plan = taskPlan();
+		for (const task of plan.tasks) {
+			task.acceptanceCriteria = [];
+		}
+		const run = createOrchestrationRun({
+			id: "run-envelope-empty-criteria",
+			repositoryRoot,
+			baseBranch: "main",
+			baseCommit: "a".repeat(40),
+			integrationBranch: "conductor/run-envelope-empty-criteria/integration",
+			request: { sourcePath: "/tmp/request.md", text: "Apply the change" },
+			securityPolicy: readSecurityPolicy({}),
+			plan,
+			maxConcurrentWorkers: 2,
+			now: "2026-08-03T00:00:00.000Z",
+		});
+
+		expect(envelopeFromApprovedRun(run).acceptanceCriteria).toEqual([]);
+		expect(renderApprovalSummary(run)).toContain(
+			"Acceptance criteria: none stated by this plan",
+		);
+	});
+
 	it("does not treat investigation path locks as mutation authority", () => {
 		const run = runWithWorkflowPlan({
 			version: WORKFLOW_PLAN_SCHEMA_VERSION,
@@ -620,16 +659,13 @@ describe("approved authority envelope", () => {
 		).toEqual(["src/"]);
 	});
 
-	it("preserves narrowed frozen change authority during read-back", () => {
+	it("preserves frozen change authority without adding read authority", () => {
 		const securityPolicy = readSecurityPolicy({});
 		const profiles = securityPolicy.workers.capabilityProfiles;
 		if (!profiles) {
 			throw new Error("expected frozen capability profiles");
 		}
-		profiles.change = capabilityProfileFor([
-			"read-repository",
-			"execute-commands",
-		]);
+		profiles.change = capabilityProfileFor(["mutate-repository"]);
 		const run = createOrchestrationRun({
 			id: "run-envelope-narrowed",
 			repositoryRoot,
@@ -644,8 +680,8 @@ describe("approved authority envelope", () => {
 		});
 
 		expect(envelopeFromApprovedRun(run).repositories[0]?.mutation).toMatchObject({
-			capabilities: ["read-repository", "execute-commands"],
-			allowedPaths: [],
+			capabilities: ["mutate-repository"],
+			allowedPaths: ["src/service/", "src/protocol/"],
 		});
 	});
 
@@ -666,7 +702,7 @@ describe("approved authority envelope", () => {
 
 		const lines = authorityEnvelopeLines(envelope);
 		for (const entry of [...criteria, ...forbiddenActions]) {
-			expect(lines).toContain(`  - ${entry}`);
+			expect(lines).toContain(`  - ${JSON.stringify(entry)}`);
 		}
 		expect(lines.some((line) => line.includes("more)"))).toBe(false);
 	});
@@ -687,5 +723,48 @@ describe("approved authority envelope", () => {
 		expect(authorityEnvelopeLines(separate)).toContain(
 			"Required validation: tool a b",
 		);
+	});
+
+	it("renders authored list entries with injective scalar boundaries", () => {
+		const embeddedList = validateAuthorityEnvelope({
+			...authoredDocument(),
+			acceptanceCriteria: ["a\n - b"],
+		});
+		const separateEntries = validateAuthorityEnvelope({
+			...authoredDocument(),
+			acceptanceCriteria: ["a", "b"],
+		});
+
+		const embeddedLines = authorityEnvelopeLines(embeddedList);
+		const separateLines = authorityEnvelopeLines(separateEntries);
+		expect(embeddedLines).toContain('  - "a\\n - b"');
+		expect(embeddedLines.join("\n")).not.toBe(separateLines.join("\n"));
+	});
+
+	it("renders mutable paths one per line with explicit boundaries", () => {
+		const envelopeWithPaths = (allowedPaths: string[]): AuthorityEnvelope =>
+			validateAuthorityEnvelope({
+				...authoredDocument(),
+				repositories: [
+					{
+						root: repositoryRoot,
+						mutation: {
+							capabilities: ["read-repository", "mutate-repository"],
+							allowedPaths,
+						},
+					},
+				],
+			});
+		const joined = authorityEnvelopeLines(
+			envelopeWithPaths(["src/a, src/b"]),
+		);
+		const separate = authorityEnvelopeLines(
+			envelopeWithPaths(["src/a", "src/b"]),
+		);
+
+		expect(joined).toContain('      - "src/a, src/b"');
+		expect(separate).toContain('      - "src/a"');
+		expect(separate).toContain('      - "src/b"');
+		expect(joined.join("\n")).not.toBe(separate.join("\n"));
 	});
 });

@@ -114,11 +114,13 @@ describe("plan presentation", () => {
 		});
 		const summary = renderApprovalSummary(run);
 		expect(summary).toContain("Authority envelope:");
-		expect(summary).toContain("Outcome: Diamond build");
+		expect(summary).toContain('Outcome: "Diamond build"');
 		// Acceptance criteria and reserved decisions appear nowhere else.
-		expect(summary).toContain("  - Base works");
-		expect(summary).toContain("  - UI works");
-		expect(summary).toContain("    mutable paths: src/base/, src/ui/");
+		expect(summary).toContain('  - "Base works"');
+		expect(summary).toContain('  - "UI works"');
+		expect(summary).toContain("    mutable paths:");
+		expect(summary).toContain('      - "src/base/"');
+		expect(summary).toContain('      - "src/ui/"');
 		expect(summary).toContain("Reserved for the user, always escalated:");
 		expect(summary).toContain(
 			"  - widen-mutation-authority: mutate a path or exercise a capability this envelope does not grant",
