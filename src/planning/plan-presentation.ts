@@ -1,4 +1,5 @@
 import { analyzeTaskPlan, type PlanValidationIssue } from "../domain/dag.js";
+import { formatCommand } from "../domain/command-format.js";
 import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
 import {
 	type StepDefinition,
@@ -6,6 +7,7 @@ import {
 	stepPathLocks,
 	stepResourceLocks,
 	stepRetryPolicy,
+	topologicalStepIds,
 	type WorkflowPlan,
 } from "../domain/steps.js";
 import type {
@@ -28,7 +30,7 @@ import {
 } from "../security/envelope.js";
 import { securityPolicyLines } from "../security/policy.js";
 
-const SIMPLE_ARGUMENT = /^[A-Za-z0-9_./:@%+=,-]+$/;
+export { formatCommand };
 
 export function formatValidationIssues(issues: PlanValidationIssue[]): string {
 	return issues
@@ -37,16 +39,6 @@ export function formatValidationIssues(issues: PlanValidationIssue[]): string {
 				`${index + 1}. [${issue.code}] ${issue.path}: ${issue.message.replace(`${issue.path} `, "")}`,
 		)
 		.join("\n");
-}
-
-function quoteArgument(value: string): string {
-	return value.length > 0 && SIMPLE_ARGUMENT.test(value)
-		? value
-		: JSON.stringify(value);
-}
-
-export function formatCommand(command: ValidationCommand): string {
-	return [command.command, ...command.args].map(quoteArgument).join(" ");
 }
 
 export function renderDagOverview(plan: TaskPlan): string {
@@ -161,27 +153,53 @@ export function renderStepAuthorityLines(
 }
 
 export function renderApprovalSummary(run: OrchestrationRun): string {
-	const analysis = analyzeTaskPlan(run.plan);
-	const pathCount = new Set(run.plan.tasks.flatMap((task) => task.allowedPaths))
-		.size;
-	const focusedCommandCount = run.plan.tasks.reduce(
-		(total, task) => total + task.validationCommands.length,
+	const plan = readWorkflowPlanDocument(run.plan);
+	const orderedStepIds = topologicalStepIds(plan);
+	const layerByStep = new Map<string, number>();
+	for (const stepId of orderedStepIds) {
+		const step = plan.steps.find((candidate) => candidate.id === stepId);
+		layerByStep.set(
+			stepId,
+			Math.max(
+				0,
+				...(step?.dependencies ?? []).map(
+					(dependency) => (layerByStep.get(dependency) ?? 0) + 1,
+				),
+			),
+		);
+	}
+	const layers: string[][] = [];
+	for (const stepId of orderedStepIds) {
+		const layer = layerByStep.get(stepId) ?? 0;
+		const steps = layers[layer] ?? [];
+		steps.push(stepId);
+		layers[layer] = steps;
+	}
+	const dependencyCount = plan.steps.reduce(
+		(total, step) => total + step.dependencies.length,
 		0,
 	);
-	const layerPreview = analysis.layers
+	const pathCount = new Set(
+		plan.steps.flatMap((step) =>
+			step.kind === "change" ? step.allowedPaths : [],
+		),
+	).size;
+	const focusedCommandCount = plan.steps.reduce(
+		(total, step) =>
+			total + (step.kind === "change" ? step.validationCommands.length : 0),
+		0,
+	);
+	const layerPreview = layers
 		.slice(0, 6)
 		.map((layer, index) => `${index + 1}: ${layer.join(", ")}`)
 		.join(" | ");
-	const stepAuthority = renderStepAuthorityLines(
-		readWorkflowPlanDocument(run.plan),
-		run.securityPolicy,
-	);
-	const finalCommands = run.plan.finalValidationCommands.map(
+	const stepAuthority = renderStepAuthorityLines(plan, run.securityPolicy);
+	const finalCommands = plan.finalValidationCommands.map(
 		(command) => `- ${formatCommand(command)}`,
 	);
 	return [
-		`Run ${run.id}: ${run.plan.title}`,
-		`Plan revision: ${run.planRevision} | Tasks: ${run.plan.tasks.length} | Dependencies: ${analysis.edges.length}`,
+		`Run ${run.id}: ${plan.title}`,
+		`Plan revision: ${run.planRevision} | Tasks: ${plan.steps.length} | Dependencies: ${dependencyCount}`,
 		`DAG layers: ${layerPreview}`,
 		`Worker limit: ${run.maxConcurrentWorkers} | Approved paths: ${pathCount} | Focused checks: ${focusedCommandCount}`,
 		`Integration branch: ${run.integrationBranch}`,

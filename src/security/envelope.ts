@@ -4,14 +4,15 @@ import {
 	addIssue,
 	isRecord,
 	type PlanValidationIssue,
+	readCommandObject,
 	readNonEmptyString,
 	readSafeRepositoryPaths,
 	readStringArray,
-	readValidationCommands,
 } from "../domain/dag.js";
+import { formatCommand } from "../domain/command-format.js";
 import { pathIsAllowed } from "../domain/paths.js";
 import { readWorkflowPlanDocument } from "../domain/plan-translation.js";
-import { stepCapabilities, stepPathLocks } from "../domain/steps.js";
+import { stepCapabilities } from "../domain/steps.js";
 import {
 	type OrchestrationRun,
 	STEP_CAPABILITIES,
@@ -19,7 +20,10 @@ import {
 	type ValidationCommand,
 	type ValidationSandboxMode,
 } from "../domain/types.js";
-import { EXTERNAL_EFFECT_BOUNDARY } from "./capabilities.js";
+import {
+	EXTERNAL_EFFECT_BOUNDARY,
+	stepCapabilityProfile,
+} from "./capabilities.js";
 
 export const AUTHORITY_ENVELOPE_SCHEMA_VERSION = 1 as const;
 
@@ -116,6 +120,26 @@ export class EnvelopeValidationError extends Error {
 		this.name = "EnvelopeValidationError";
 		this.issues = details.map((issue) => issue.message);
 		this.details = details;
+	}
+}
+
+function rejectUnknownKeys(
+	value: Record<string, unknown>,
+	allowed: readonly string[],
+	path: string,
+	issues: PlanValidationIssue[],
+): void {
+	const recognized = new Set(allowed);
+	for (const key of Object.keys(value)) {
+		if (!recognized.has(key)) {
+			const keyPath = path.length > 0 ? `${path}.${key}` : key;
+			addIssue(
+				issues,
+				"unknown_key",
+				keyPath,
+				`${keyPath} is not a recognized authority envelope field`,
+			);
+		}
 	}
 }
 
@@ -233,6 +257,12 @@ function readMutationScope(
 		return { capabilities: [], allowedPaths: [], forbiddenPaths: [] };
 	}
 	const scope = value ?? {};
+	rejectUnknownKeys(
+		scope,
+		["capabilities", "allowedPaths", "forbiddenPaths"],
+		path,
+		issues,
+	);
 	const capabilities = readCapabilities(
 		scope.capabilities,
 		`${path}.capabilities`,
@@ -314,6 +344,7 @@ function readRepositories(
 				mutation: { capabilities: [], allowedPaths: [], forbiddenPaths: [] },
 			};
 		}
+		rejectUnknownKeys(entry, ["root", "mutation"], itemPath, issues);
 		return {
 			root: readRepositoryRoot(entry.root, `${itemPath}.root`, issues),
 			mutation: readMutationScope(
@@ -358,6 +389,7 @@ function readSandbox(
 		addIssue(issues, "sandbox_object", path, `${path} must be an object`);
 		return { workers: "worktree-only", validation: "none" };
 	}
+	rejectUnknownKeys(value, ["workers", "validation"], path, issues);
 	if (value.workers !== undefined && value.workers !== "worktree-only") {
 		addIssue(
 			issues,
@@ -387,11 +419,22 @@ function readValidationExpectations(
 		addIssue(issues, "validation_object", path, `${path} must be an object`);
 		return { required: [], perChange: true };
 	}
-	const required = readValidationCommands(
-		value.required,
-		`${path}.required`,
-		issues,
-	);
+	rejectUnknownKeys(value, ["required", "perChange"], path, issues);
+	let required: ValidationCommand[] = [];
+	if (value.required !== undefined) {
+		if (!Array.isArray(value.required)) {
+			addIssue(
+				issues,
+				"command_array",
+				`${path}.required`,
+				`${path}.required must be an array of command objects`,
+			);
+		} else {
+			required = value.required.map((item, index) =>
+				readCommandObject(item, `${path}.required[${index}]`, issues),
+			);
+		}
+	}
 	if (value.perChange !== undefined && typeof value.perChange !== "boolean") {
 		addIssue(
 			issues,
@@ -417,6 +460,12 @@ function readEscalation(
 		};
 	}
 	const escalation = value ?? {};
+	rejectUnknownKeys(
+		escalation,
+		["conditions", "reservedDecisions"],
+		path,
+		issues,
+	);
 	const reservedDecisions =
 		escalation.reservedDecisions === undefined
 			? []
@@ -488,14 +537,29 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 			},
 		]);
 	}
+	rejectUnknownKeys(
+		value,
+		[
+			"version",
+			"outcome",
+			"acceptanceCriteria",
+			"repositories",
+			"forbiddenActions",
+			"externalEffects",
+			"sandbox",
+			"validation",
+			"escalation",
+		],
+		"",
+		issues,
+	);
 	if (value.version !== AUTHORITY_ENVELOPE_SCHEMA_VERSION) {
-		throw new EnvelopeValidationError([
-			{
-				code: "unsupported_envelope_version",
-				path: "version",
-				message: `version must be ${AUTHORITY_ENVELOPE_SCHEMA_VERSION}`,
-			},
-		]);
+		addIssue(
+			issues,
+			"unsupported_envelope_version",
+			"version",
+			`version must be ${AUTHORITY_ENVELOPE_SCHEMA_VERSION}`,
+		);
 	}
 	const outcome = readNonEmptyString(value.outcome, "outcome", issues);
 	const acceptanceCriteria = readUniqueStrings(
@@ -503,14 +567,6 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 		"acceptanceCriteria",
 		issues,
 	);
-	if (acceptanceCriteria.length === 0) {
-		addIssue(
-			issues,
-			"required_acceptance_criteria",
-			"acceptanceCriteria",
-			"acceptanceCriteria must state at least one criterion the result is judged against",
-		);
-	}
 	const repositories = readRepositories(
 		value.repositories,
 		"repositories",
@@ -538,6 +594,25 @@ export function validateAuthorityEnvelope(value: unknown): AuthorityEnvelope {
 		issues,
 	);
 	const escalation = readEscalation(value.escalation, "escalation", issues);
+	const mutates = repositories.some((repository) =>
+		repository.mutation.capabilities.includes("mutate-repository"),
+	);
+	if (mutates && acceptanceCriteria.length === 0) {
+		addIssue(
+			issues,
+			"required_acceptance_criteria",
+			"acceptanceCriteria",
+			"acceptanceCriteria must state at least one criterion when mutation authority is granted",
+		);
+	}
+	if (mutates && validation.required.length === 0) {
+		addIssue(
+			issues,
+			"required_commands",
+			"validation.required",
+			"validation.required must be a non-empty array of command objects when mutation authority is granted",
+		);
+	}
 	if (issues.length > 0) {
 		throw new EnvelopeValidationError(issues);
 	}
@@ -617,19 +692,30 @@ export function authorityEnvelopeDigest(envelope: AuthorityEnvelope): string {
  * implicitly, step by step, so this reads back the outcome, criteria, paths,
  * capabilities, sandboxing, and validation the user already approved and
  * states them as one object. Session 39e inverts this: the envelope becomes
- * the source those step declarations derive from.
+ * the source those step declarations derive from and moves this boundary to
+ * WorkflowRunState; this session deliberately retains OrchestrationRun.
  */
 export function envelopeFromApprovedRun(
 	run: OrchestrationRun,
 ): AuthorityEnvelope {
 	const plan = readWorkflowPlanDocument(run.plan);
+	const profiles = run.securityPolicy.workers.capabilityProfiles;
+	const effectiveCapabilities = plan.steps.map((step) => ({
+		step,
+		capabilities: profiles
+			? stepCapabilityProfile(profiles, step).capabilities
+			: stepCapabilities(step),
+	}));
 	const capabilities = orderedCapabilities(
-		plan.steps.flatMap((step) => stepCapabilities(step)),
+		effectiveCapabilities.flatMap((entry) => entry.capabilities),
 	);
 	const allowedPaths = [
 		...new Set(
-			plan.steps.flatMap((step) =>
-				step.kind === "change" ? step.allowedPaths : stepPathLocks(step),
+			effectiveCapabilities.flatMap(({ step, capabilities: stepAuthority }) =>
+				step.kind === "change" &&
+				stepAuthority.includes("mutate-repository")
+					? step.allowedPaths
+					: [],
 			),
 		),
 	];
@@ -643,10 +729,7 @@ export function envelopeFromApprovedRun(
 	return validateAuthorityEnvelope({
 		version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
 		outcome: plan.title,
-		acceptanceCriteria:
-			acceptanceCriteria.length > 0
-				? acceptanceCriteria
-				: [`Final validation passes on ${run.integrationBranch}`],
+		acceptanceCriteria,
 		repositories: [
 			{
 				root: run.repositoryRoot,
@@ -671,23 +754,15 @@ export function envelopeFromApprovedRun(
 	});
 }
 
-const MAX_RENDERED_ENTRIES = 8;
-
-function boundedList(label: string, entries: readonly string[]): string[] {
+function renderedList(label: string, entries: readonly string[]): string[] {
 	if (entries.length === 0) {
 		return [`${label}: none`];
 	}
-	const shown = entries.slice(0, MAX_RENDERED_ENTRIES);
-	const remaining = entries.length - shown.length;
-	return [
-		`${label}:`,
-		...shown.map((entry) => `  - ${entry}`),
-		...(remaining > 0 ? [`  - (+${remaining} more)`] : []),
-	];
+	return [`${label}:`, ...entries.map((entry) => `  - ${entry}`)];
 }
 
 /**
- * The exact authority a user approves, as bounded lines. Everything a
+ * The exact authority a user approves, as reviewable lines. Everything a
  * session may do appears here, and everything reserved appears beside it.
  */
 export function authorityEnvelopeLines(envelope: AuthorityEnvelope): string[] {
@@ -707,12 +782,12 @@ export function authorityEnvelopeLines(envelope: AuthorityEnvelope): string[] {
 	});
 	return [
 		`Outcome: ${envelope.outcome}`,
-		...boundedList("Acceptance criteria", envelope.acceptanceCriteria),
+		...renderedList("Acceptance criteria", envelope.acceptanceCriteria),
 		"Repositories:",
 		...repositories,
-		...boundedList("Forbidden actions", envelope.forbiddenActions),
+		...renderedList("Forbidden actions", envelope.forbiddenActions),
 		`Sandbox: workers ${envelope.sandbox.workers}; validation ${envelope.sandbox.validation === "nono" ? "Nono sandbox, network blocked" : "no OS sandbox, host network available"}`,
-		`Required validation: ${envelope.validation.required.map((command) => [command.command, ...command.args].join(" ")).join("; ")}`,
+		`Required validation: ${envelope.validation.required.map(formatCommand).join("; ") || "none"}`,
 		`Per-change validation: ${envelope.validation.perChange ? "required before integration" : "not required"}`,
 		"Reserved for the user, always escalated:",
 		...envelope.escalation.conditions.map(

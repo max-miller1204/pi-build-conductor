@@ -3,7 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createOrchestrationRun } from "../src/domain/run.js";
-import { PLAN_SCHEMA_VERSION, type TaskPlan } from "../src/domain/types.js";
+import {
+	type WorkflowPlan,
+	WORKFLOW_PLAN_SCHEMA_VERSION,
+} from "../src/domain/steps.js";
+import {
+	PLAN_SCHEMA_VERSION,
+	type OrchestrationRun,
+	type TaskPlan,
+} from "../src/domain/types.js";
+import { renderApprovalSummary } from "../src/planning/plan-presentation.js";
+import { capabilityProfileFor } from "../src/security/capabilities.js";
 import {
 	AUTHORITY_ENVELOPE_SCHEMA_VERSION,
 	type AuthorityEnvelope,
@@ -99,6 +109,22 @@ function taskPlan(): TaskPlan {
 		],
 		finalValidationCommands: [{ command: "npm", args: ["run", "check"] }],
 	};
+}
+
+function runWithWorkflowPlan(plan: WorkflowPlan): OrchestrationRun {
+	const run = createOrchestrationRun({
+		id: "run-envelope-workflow",
+		repositoryRoot,
+		baseBranch: "main",
+		baseCommit: "a".repeat(40),
+		integrationBranch: "conductor/run-envelope-workflow/integration",
+		request: { sourcePath: "/tmp/request.md", text: plan.title },
+		securityPolicy: readSecurityPolicy({}),
+		plan: taskPlan(),
+		maxConcurrentWorkers: 2,
+		now: "2026-08-03T00:00:00.000Z",
+	});
+	return { ...run, plan: plan as unknown as TaskPlan };
 }
 
 describe("approved authority envelope", () => {
@@ -353,13 +379,21 @@ describe("approved authority envelope", () => {
 		]);
 	});
 
-	it("requires an outcome, a criterion, and a required validation command", () => {
+	it("requires outcome criteria and validation for mutation authority", () => {
 		const issues = expectIssues(() =>
 			validateAuthorityEnvelope({
 				version: AUTHORITY_ENVELOPE_SCHEMA_VERSION,
 				outcome: "   ",
 				acceptanceCriteria: [],
-				repositories: [{ root: repositoryRoot }],
+				repositories: [
+					{
+						root: repositoryRoot,
+						mutation: {
+							capabilities: ["read-repository", "mutate-repository"],
+							allowedPaths: ["src/"],
+						},
+					},
+				],
 				sandbox: { validation: "none" },
 				validation: { required: [] },
 			}),
@@ -367,9 +401,71 @@ describe("approved authority envelope", () => {
 
 		expect(issues).toEqual([
 			"outcome must be a non-empty string",
-			"acceptanceCriteria must state at least one criterion the result is judged against",
-			"validation.required must be a non-empty array of command objects",
+			"acceptanceCriteria must state at least one criterion when mutation authority is granted",
+			"validation.required must be a non-empty array of command objects when mutation authority is granted",
 		]);
+	});
+
+	it("rejects unknown keys at every envelope object boundary", () => {
+		const cases: Array<[Record<string, unknown>, string]> = [
+			[{ ...authoredDocument(), forbiddenAction: [] }, "forbiddenAction"],
+			[
+				{
+					...authoredDocument(),
+					repositories: [
+						{ root: repositoryRoot, mutation: {}, repositoryName: "worklist" },
+					],
+				},
+				"repositories[0].repositoryName",
+			],
+			[
+				{
+					...authoredDocument(),
+					repositories: [
+						{ root: repositoryRoot, mutation: { forbidenPaths: ["src/"] } },
+					],
+				},
+				"repositories[0].mutation.forbidenPaths",
+			],
+			[
+				{ ...authoredDocument(), sandbox: { validation: "none", network: "host" } },
+				"sandbox.network",
+			],
+			[
+				{
+					...authoredDocument(),
+					validation: {
+						required: [{ command: "npm", args: ["test"] }],
+						perChange: true,
+						optional: true,
+					},
+				},
+				"validation.optional",
+			],
+			[
+				{
+					...authoredDocument(),
+					escalation: { unexpectedDecision: "publish" },
+				},
+				"escalation.unexpectedDecision",
+			],
+		];
+
+		for (const [document, path] of cases) {
+			try {
+				validateAuthorityEnvelope(document);
+			} catch (error) {
+				expect(error).toBeInstanceOf(EnvelopeValidationError);
+				const validationError = error as EnvelopeValidationError;
+				expect(validationError.details).toContainEqual({
+					code: "unknown_key",
+					path,
+					message: `${path} is not a recognized authority envelope field`,
+				});
+				continue;
+			}
+			throw new Error(`expected ${path} to be rejected`);
+		}
 	});
 
 	it("rejects an unsupported envelope version without coercing it", () => {
@@ -459,19 +555,137 @@ describe("approved authority envelope", () => {
 		]);
 	});
 
-	it("bounds rendered lists rather than printing an unbounded envelope", () => {
+	it("derives honest empty expectations for non-mutating workflow plans", () => {
+		for (const step of [
+			{
+				id: "survey",
+				kind: "investigation" as const,
+				title: "Survey",
+				description: "Answer the open questions",
+				dependencies: [],
+				questions: ["What owns the state?"],
+			},
+			{
+				id: "decision",
+				kind: "approval" as const,
+				title: "Decide",
+				description: "Ask for a decision",
+				dependencies: [],
+				prompt: "Choose a direction",
+			},
+		]) {
+			const run = runWithWorkflowPlan({
+				version: WORKFLOW_PLAN_SCHEMA_VERSION,
+				title: step.title,
+				steps: [step],
+				finalValidationCommands: [],
+			});
+			const envelope = envelopeFromApprovedRun(run);
+			expect(envelope.acceptanceCriteria).toEqual([]);
+			expect(envelope.validation.required).toEqual([]);
+			expect(() => renderApprovalSummary(run)).not.toThrow();
+		}
+	});
+
+	it("does not treat investigation path locks as mutation authority", () => {
+		const run = runWithWorkflowPlan({
+			version: WORKFLOW_PLAN_SCHEMA_VERSION,
+			title: "Change after investigation",
+			steps: [
+				{
+					id: "survey",
+					kind: "investigation",
+					title: "Survey docs",
+					description: "Inspect documentation",
+					dependencies: [],
+					questions: ["What is documented?"],
+					pathLocks: ["docs/"],
+				},
+				{
+					id: "change",
+					kind: "change",
+					title: "Change source",
+					description: "Implement the fix",
+					dependencies: ["survey"],
+					acceptanceCriteria: ["The fix works"],
+					allowedPaths: ["src/"],
+					validationCommands: [{ command: "npm", args: ["test"] }],
+				},
+			],
+			finalValidationCommands: [{ command: "npm", args: ["test"] }],
+		});
+
+		expect(
+			envelopeFromApprovedRun(run).repositories[0]?.mutation.allowedPaths,
+		).toEqual(["src/"]);
+	});
+
+	it("preserves narrowed frozen change authority during read-back", () => {
+		const securityPolicy = readSecurityPolicy({});
+		const profiles = securityPolicy.workers.capabilityProfiles;
+		if (!profiles) {
+			throw new Error("expected frozen capability profiles");
+		}
+		profiles.change = capabilityProfileFor([
+			"read-repository",
+			"execute-commands",
+		]);
+		const run = createOrchestrationRun({
+			id: "run-envelope-narrowed",
+			repositoryRoot,
+			baseBranch: "main",
+			baseCommit: "a".repeat(40),
+			integrationBranch: "conductor/run-envelope-narrowed/integration",
+			request: { sourcePath: "/tmp/request.md", text: "Inspect only" },
+			securityPolicy,
+			plan: taskPlan(),
+			maxConcurrentWorkers: 2,
+			now: "2026-08-03T00:00:00.000Z",
+		});
+
+		expect(envelopeFromApprovedRun(run).repositories[0]?.mutation).toMatchObject({
+			capabilities: ["read-repository", "execute-commands"],
+			allowedPaths: [],
+		});
+	});
+
+	it("renders every authority-bearing list entry", () => {
 		const criteria = Array.from(
 			{ length: 12 },
 			(_, index) => `Criterion ${index + 1}`,
 		);
+		const forbiddenActions = Array.from(
+			{ length: 12 },
+			(_, index) => `Forbidden action ${index + 1}`,
+		);
 		const envelope: AuthorityEnvelope = validateAuthorityEnvelope({
 			...authoredDocument(),
 			acceptanceCriteria: criteria,
+			forbiddenActions,
 		});
 
 		const lines = authorityEnvelopeLines(envelope);
-		expect(lines).toContain("  - Criterion 8");
-		expect(lines).not.toContain("  - Criterion 9");
-		expect(lines).toContain("  - (+4 more)");
+		for (const entry of [...criteria, ...forbiddenActions]) {
+			expect(lines).toContain(`  - ${entry}`);
+		}
+		expect(lines.some((line) => line.includes("more)"))).toBe(false);
+	});
+
+	it("renders distinct validation commands without argument ambiguity", () => {
+		const spaced = validateAuthorityEnvelope({
+			...authoredDocument(),
+			validation: { required: [{ command: "tool", args: ["a b"] }] },
+		});
+		const separate = validateAuthorityEnvelope({
+			...authoredDocument(),
+			validation: { required: [{ command: "tool", args: ["a", "b"] }] },
+		});
+
+		expect(authorityEnvelopeLines(spaced)).toContain(
+			'Required validation: tool "a b"',
+		);
+		expect(authorityEnvelopeLines(separate)).toContain(
+			"Required validation: tool a b",
+		);
 	});
 });
