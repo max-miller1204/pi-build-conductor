@@ -1,12 +1,60 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-const allowedAdvisory = {
-	name: "brace-expansion",
-	url: "https://github.com/advisories/GHSA-mh99-v99m-4gvg",
-	node: "node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion",
-	trackingIssue: "https://github.com/earendil-works/pi/issues/7090",
-};
+const allowedVulnerabilities = [
+	{
+		name: "brace-expansion",
+		severity: "high",
+		node: "node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion",
+		advisories: [
+			{
+				severity: "high",
+				range: ">=4.0.0 <5.0.8",
+				url: "https://github.com/advisories/GHSA-mh99-v99m-4gvg",
+			},
+			{
+				severity: "high",
+				range: ">=4.0.0 <5.0.9",
+				url: "https://github.com/advisories/GHSA-rgw5-rvv9-x895",
+			},
+		],
+		upstreamReference: "https://github.com/earendil-works/pi/issues/7090",
+	},
+	{
+		name: "undici",
+		severity: "high",
+		node: "node_modules/@earendil-works/pi-coding-agent/node_modules/undici",
+		advisories: [
+			{
+				severity: "moderate",
+				range: ">=8.0.0 <8.9.0",
+				url: "https://github.com/advisories/GHSA-8xcm-r25x-g524",
+			},
+			{
+				severity: "high",
+				range: ">=8.0.0 <8.9.0",
+				url: "https://github.com/advisories/GHSA-4cwx-7wf7-3272",
+			},
+			{
+				severity: "moderate",
+				range: ">=8.0.0 <8.9.0",
+				url: "https://github.com/advisories/GHSA-m8rv-5g2x-5cg5",
+			},
+			{
+				severity: "moderate",
+				range: ">=8.0.0 <8.9.0",
+				url: "https://github.com/advisories/GHSA-jr45-8vmc-qm54",
+			},
+			{
+				severity: "moderate",
+				range: ">=8.0.0 <8.9.0",
+				url: "https://github.com/advisories/GHSA-v3r7-h72x-cjcm",
+			},
+		],
+		upstreamReference:
+			"https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/package.json",
+	},
+];
 const severityRank = new Map([
 	["info", 0],
 	["low", 1],
@@ -46,17 +94,31 @@ if (audit.status !== 0 && audit.status !== 1) {
 	);
 }
 
-function isAllowed(vulnerability) {
-	return (
-		vulnerability.name === allowedAdvisory.name &&
-		vulnerability.severity === "high" &&
-		vulnerability.nodes?.length === 1 &&
-		vulnerability.nodes[0] === allowedAdvisory.node &&
-		vulnerability.via?.length === 1 &&
-		typeof vulnerability.via[0] === "object" &&
-		vulnerability.via[0].severity === "high" &&
-		vulnerability.via[0].range === "<=5.0.7" &&
-		vulnerability.via[0].url === allowedAdvisory.url
+function matchesAdvisories(actual, expected) {
+	if (
+		!Array.isArray(actual) ||
+		actual.length !== expected.length ||
+		actual.some((advisory) => advisory === null || typeof advisory !== "object")
+	) {
+		return false;
+	}
+	const signature = (advisory) =>
+		JSON.stringify([advisory.severity, advisory.range, advisory.url]);
+	const actualSignatures = actual.map(signature).sort();
+	const expectedSignatures = expected.map(signature).sort();
+	return actualSignatures.every(
+		(actualSignature, index) => actualSignature === expectedSignatures[index],
+	);
+}
+
+function allowedVulnerability(vulnerability) {
+	return allowedVulnerabilities.find(
+		(allowed) =>
+			vulnerability.name === allowed.name &&
+			vulnerability.severity === allowed.severity &&
+			vulnerability.nodes?.length === 1 &&
+			vulnerability.nodes[0] === allowed.node &&
+			matchesAdvisories(vulnerability.via, allowed.advisories),
 	);
 }
 
@@ -64,7 +126,7 @@ const vulnerabilities = Object.values(report.vulnerabilities);
 const blocking = vulnerabilities.filter(
 	(vulnerability) =>
 		(severityRank.get(vulnerability.severity) ?? Number.POSITIVE_INFINITY) >=
-			severityRank.get("high") && !isAllowed(vulnerability),
+			severityRank.get("high") && !allowedVulnerability(vulnerability),
 );
 if (blocking.length > 0) {
 	process.stderr.write(
@@ -81,10 +143,11 @@ if (blocking.length > 0) {
 	}
 	process.exitCode = 1;
 } else {
-	const ignored = vulnerabilities.filter(isAllowed);
+	const ignored = vulnerabilities.filter(allowedVulnerability);
 	for (const vulnerability of ignored) {
+		const allowed = allowedVulnerability(vulnerability);
 		process.stdout.write(
-			`Allowed known upstream advisory ${allowedAdvisory.url} at ${vulnerability.nodes[0]}; tracked at ${allowedAdvisory.trackingIssue}.\n`,
+			`Allowed known upstream advisories for ${vulnerability.name} at ${vulnerability.nodes[0]}; upstream reference ${allowed.upstreamReference}.\n`,
 		);
 	}
 	process.stdout.write(
